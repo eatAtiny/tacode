@@ -68,3 +68,89 @@ func (c *OpenAIClient) Chat(ctx context.Context, systemPrompt, userPrompt string
 	}
 	return content, nil
 }
+
+// ChatMessage 表示一条对话消息，用于 ReAct 多轮交互。
+type ChatMessage struct {
+	Role       string // "system", "user", "assistant", "tool"
+	Content    string
+	ToolCallID string // tool 消息对应哪个 tool_call
+	ToolCalls  []ToolCall
+}
+
+// ToolCall 表示 LLM 请求调用一个工具。
+type ToolCall struct {
+	ID        string
+	Name      string
+	Arguments string
+}
+
+// ChatResponse 表示 LLM 的响应。
+type ChatResponse struct {
+	Content   string     // 文本内容（最终回答时非空）
+	ToolCalls []ToolCall // 工具调用请求（需要执行工具时非空）
+	Finish    bool       // true 表示不需要再调用工具，本轮结束
+}
+
+// ChatWithTools 支持 Function Calling 的多轮对话。
+// messages: 完整的消息历史；tools: 工具定义列表。
+func (c *OpenAIClient) ChatWithTools(ctx context.Context, messages []ChatMessage, tools []openai.Tool) (*ChatResponse, error) {
+	msgs := make([]openai.ChatCompletionMessage, len(messages))
+	for i, m := range messages {
+		msgs[i] = openai.ChatCompletionMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+		}
+		if len(m.ToolCalls) > 0 {
+			msgs[i].ToolCalls = make([]openai.ToolCall, len(m.ToolCalls))
+			for j, tc := range m.ToolCalls {
+				msgs[i].ToolCalls[j] = openai.ToolCall{
+					ID:   tc.ID,
+					Type: openai.ToolTypeFunction,
+					Function: openai.FunctionCall{
+						Name:      tc.Name,
+						Arguments: tc.Arguments,
+					},
+				}
+			}
+		}
+	}
+
+	req := openai.ChatCompletionRequest{
+		Model:      c.model,
+		Messages:   msgs,
+		Temperature: 0.2,
+	}
+	if len(tools) > 0 {
+		req.Tools = tools
+	}
+
+	resp, err := c.client.CreateChatCompletion(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("openai chat completion failed: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return nil, fmt.Errorf("empty choices")
+	}
+
+	choice := resp.Choices[0]
+	result := &ChatResponse{
+		Content: strings.TrimSpace(choice.Message.Content),
+	}
+
+	if len(choice.Message.ToolCalls) > 0 {
+		result.ToolCalls = make([]ToolCall, len(choice.Message.ToolCalls))
+		for i, tc := range choice.Message.ToolCalls {
+			result.ToolCalls[i] = ToolCall{
+				ID:        tc.ID,
+				Name:      tc.Function.Name,
+				Arguments: tc.Function.Arguments,
+			}
+		}
+		result.Finish = false
+	} else {
+		result.Finish = true
+	}
+
+	return result, nil
+}

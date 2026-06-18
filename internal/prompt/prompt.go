@@ -8,11 +8,35 @@ type RoundPrompt struct {
 	User   string
 }
 
-// BuildRoundPrompt 组装每轮提示词：
-// 1) system 约束 agent 风格
-// 2) user 包含轮次、记忆摘要和本轮输入
+// BuildRoundPrompt 组装每轮提示词（普通对话模式）。
 func BuildRoundPrompt(round int, memoryDigest, userInput string) RoundPrompt {
 	system := "你是一个有帮助的 AI 助手。请用简洁自然的中文回答用户的问题。"
 	user := fmt.Sprintf("轮次: %d\n最近对话记录:\n%s\n\n用户输入:\n%s", round, memoryDigest, userInput)
 	return RoundPrompt{System: system, User: user}
+}
+
+// BuildReActSystemPrompt 构建 ReAct 模式的 system prompt。
+// toolDescriptions 是所有可用工具的描述文本。
+func BuildReActSystemPrompt(toolDescriptions string) string {
+	return fmt.Sprintf(`你是一个具备工具调用能力的 AI 助手。你可以通过调用工具来完成用户的任务。
+
+## 可用工具
+%s
+
+## 工作方式
+1. 分析用户任务，判断是否需要使用工具
+2. 如果需要工具，调用合适的工具获取信息或执行操作
+3. 根据工具返回的结果继续思考，必要时再次调用工具
+4. 当你有了足够的信息，直接给出最终答案
+
+## 注意事项
+- 如果用户的问题不需要工具（如简单闲聊），直接回答即可
+- 每次只调用一个工具
+- 工具调用失败时，分析原因并尝试其他方案
+- 最终回答要简洁明了，用中文回复`, toolDescriptions)
+}
+
+// BuildReActUserPrompt 构建 ReAct 模式的 user prompt。
+func BuildReActUserPrompt(round int, memoryDigest, userInput string) string {
+	return fmt.Sprintf("轮次: %d\n最近对话记录:\n%s\n\n用户任务:\n%s", round, memoryDigest, userInput)
 }

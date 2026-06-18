@@ -11,6 +11,7 @@ import (
 	"agentic/internal/agent"
 	"agentic/internal/llm"
 	"agentic/internal/memory"
+	"agentic/internal/tool"
 )
 
 // loadEnvFile 从 .env 文件加载环境变量。
@@ -75,8 +76,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 启动最小 agent 循环。
-	runner := agent.NewRunner(client, store)
+	// 注册内置工具。
+	tools := tool.NewRegistry()
+	tools.Register(tool.NewShellTool())
+	tools.Register(tool.NewFileTool())
+
+	// 启动 ReAct agent 循环。
+	runner := agent.NewRunner(client, store, tools)
 	if err := runner.Run(context.Background()); err != nil {
 		fmt.Fprintf(os.Stderr, "agent run failed: %v\n", err)
 		os.Exit(1)
