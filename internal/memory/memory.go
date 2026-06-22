@@ -35,6 +35,11 @@ func NewStore(path string) (*Store, error) {
 	return &Store{path: path}, nil
 }
 
+// SetPath 切换底层 JSONL 文件路径（用于会话切换）。
+func (s *Store) SetPath(path string) {
+	s.path = path
+}
+
 // Append 追加一条新记忆，并裁剪为最近 20 条。
 func (s *Store) Append(round int, userInput, assistantOutput string) error {
 	record := Record{

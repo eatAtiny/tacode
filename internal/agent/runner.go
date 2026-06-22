@@ -10,6 +10,7 @@ import (
 	"agentic/internal/llm"
 	"agentic/internal/memory"
 	"agentic/internal/prompt"
+	"agentic/internal/session"
 	"agentic/internal/tool"
 
 	"github.com/charmbracelet/glamour"
@@ -93,17 +94,19 @@ func init() {
 
 // Runner 负责驱动 Agent 的 ReAct 循环执行。
 type Runner struct {
-	llm    *llm.OpenAIClient
-	memory *memory.Store
-	tools  *tool.Registry
+	llm      *llm.OpenAIClient
+	memory   *memory.Store
+	tools    *tool.Registry
+	sessions *session.SessionManager
 }
 
 // NewRunner 构造 Agent 执行器。
-func NewRunner(client *llm.OpenAIClient, store *memory.Store, tools *tool.Registry) *Runner {
+func NewRunner(client *llm.OpenAIClient, store *memory.Store, tools *tool.Registry, sessions *session.SessionManager) *Runner {
 	return &Runner{
-		llm:    client,
-		memory: store,
-		tools:  tools,
+		llm:      client,
+		memory:   store,
+		tools:    tools,
+		sessions: sessions,
 	}
 }
 
@@ -115,9 +118,9 @@ func newReadline(prompt string) (*readline.Instance, error) {
 }
 
 // Run 进入交互循环：读用户输入 -> ReAct 循环 -> 保存记忆。
-// 输入 exit 可退出。
+// 输入 exit 可退出，/ 开头为会话管理命令。
 func (r *Runner) Run(ctx context.Context) error {
-	printBanner()
+	printBanner(r.sessions)
 	rl, err := newReadline("")
 	if err != nil {
 		return fmt.Errorf("init readline failed: %w", err)
@@ -144,6 +147,21 @@ func (r *Runner) Run(ctx context.Context) error {
 			return nil
 		}
 
+		// 处理会话管理斜杠命令。
+		if strings.HasPrefix(input, "/") {
+			newRound, handled := r.handleSessionCommand(input)
+			if handled {
+				if newRound > 0 {
+					round = newRound - 1 // -1 因为 for 循环末尾会 ++
+				}
+				continue
+			}
+			// 不是已知命令，提示用户
+			fmt.Printf("\n%s\n", errorStyle.Render("未知命令，可用: /new, /list, /switch, /delete, /rename, /current"))
+			round-- // 不消耗轮次
+			continue
+		}
+
 		// 先调 LLM 判断是否需要工具：不需要则直接回答，需要则进入 ReAct 循环。
 		answer, err := r.reactLoop(ctx, round, input)
 		if err != nil {
@@ -156,6 +174,117 @@ func (r *Runner) Run(ctx context.Context) error {
 		if err := r.memory.Append(round, input, answer); err != nil {
 			return fmt.Errorf("save memory failed at round %d: %w", round, err)
 		}
+	}
+}
+
+// handleSessionCommand 处理 / 开头的会话管理命令。
+// 返回值：新的轮次号（切换会话时重置为 1），是否已处理。
+func (r *Runner) handleSessionCommand(input string) (int, bool) {
+	parts := strings.Fields(input)
+	cmd := strings.ToLower(parts[0])
+
+	switch cmd {
+	case "/new":
+		name := ""
+		if len(parts) > 1 {
+			name = strings.Join(parts[1:], " ")
+		}
+		id, err := r.sessions.Create(name)
+		if err != nil {
+			fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("创建会话失败: %v", err)))
+			return 0, true
+		}
+		r.memory.SetPath(r.sessions.ActivePath())
+		meta := r.sessions.FindMeta(id)
+		displayName := id
+		if meta != nil {
+			displayName = meta.Name
+		}
+		fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 已创建并切换到新会话: %s", displayName)))
+		return 1, true
+
+	case "/list":
+		selected, err := session.RunSessionPicker(r.sessions.List(), r.sessions.ActiveID())
+		if err != nil {
+			fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("选择器错误: %v", err)))
+			return 0, true
+		}
+		if selected == "" {
+			// 用户取消
+			return 0, true
+		}
+		// 用户选中了一个会话，执行切换
+		if err := r.sessions.Switch(selected); err != nil {
+			fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("切换失败: %v", err)))
+			return 0, true
+		}
+		r.memory.SetPath(r.sessions.ActivePath())
+		meta := r.sessions.FindMeta(r.sessions.ActiveID())
+		displayName := r.sessions.ActiveID()
+		if meta != nil {
+			displayName = meta.Name
+		}
+		fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 已切换到会话: %s", displayName)))
+		return 1, true
+
+	case "/switch":
+		if len(parts) < 2 {
+			fmt.Printf("\n%s\n", errorStyle.Render("用法: /switch <会话ID>"))
+			return 0, true
+		}
+		id := parts[1]
+		if err := r.sessions.Switch(id); err != nil {
+			fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("切换失败: %v", err)))
+			return 0, true
+		}
+		r.memory.SetPath(r.sessions.ActivePath())
+		meta := r.sessions.FindMeta(r.sessions.ActiveID())
+		displayName := r.sessions.ActiveID()
+		if meta != nil {
+			displayName = meta.Name
+		}
+		fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 已切换到会话: %s", displayName)))
+		return 1, true
+
+	case "/delete":
+		if len(parts) < 2 {
+			fmt.Printf("\n%s\n", errorStyle.Render("用法: /delete <会话ID>"))
+			return 0, true
+		}
+		id := parts[1]
+		if err := r.sessions.Delete(id); err != nil {
+			fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("删除失败: %v", err)))
+			return 0, true
+		}
+		fmt.Printf("\n%s\n", successStyle.Render("✅ 会话已删除"))
+		return 0, true
+
+	case "/rename":
+		if len(parts) < 2 {
+			fmt.Printf("\n%s\n", errorStyle.Render("用法: /rename <新名称>"))
+			return 0, true
+		}
+		name := strings.Join(parts[1:], " ")
+		activeID := r.sessions.ActiveID()
+		if err := r.sessions.Rename(activeID, name); err != nil {
+			fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("重命名失败: %v", err)))
+			return 0, true
+		}
+		fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 会话已重命名为: %s", name)))
+		return 0, true
+
+	case "/current":
+		activeID := r.sessions.ActiveID()
+		meta := r.sessions.FindMeta(activeID)
+		if meta != nil {
+			fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("当前会话: %s (%s)", meta.Name, meta.ID)))
+		} else {
+			fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("当前会话: %s", activeID)))
+		}
+		return 0, true
+
+	default:
+		return 0, false
 	}
 }
 
@@ -251,12 +380,22 @@ func (r *Runner) reactLoop(ctx context.Context, round int, userInput string) (st
 // 终端美化输出函数（Lip Gloss + Glamour）
 // ──────────────────────────────────────────────────────────
 
-func printBanner() {
+func printBanner(sessions *session.SessionManager) {
 	fmt.Println()
+	sessionInfo := ""
+	if sessions != nil {
+		activeID := sessions.ActiveID()
+		meta := sessions.FindMeta(activeID)
+		if meta != nil {
+			sessionInfo = fmt.Sprintf("📋 会话: %s", meta.Name)
+		}
+	}
 	content := lipgloss.JoinVertical(lipgloss.Center,
 		"🤖  Agentic AI Assistant",
+		mutedStyle.Render(sessionInfo),
 		"",
 		mutedStyle.Render("输入任务开始对话，输入 exit 退出"),
+		mutedStyle.Render("会话命令: /new /list /switch /delete /rename /current"),
 	)
 	fmt.Println(bannerStyle.Render(content))
 	fmt.Println()

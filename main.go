@@ -11,6 +11,7 @@ import (
 	"agentic/internal/agent"
 	"agentic/internal/llm"
 	"agentic/internal/memory"
+	"agentic/internal/session"
 	"agentic/internal/tool"
 )
 
@@ -52,8 +53,9 @@ func loadEnvFile(path string) error {
 
 // main 是程序入口：初始化 LLM、Memory 和 Agent Runner。
 func main() {
-	// memory 参数用于指定记忆文件路径，默认写到 data 目录。
-	memoryPath := flag.String("memory", "./data/memory.jsonl", "memory file path")
+	// sessions 参数用于指定会话目录，默认写到 data/sessions。
+	sessionsDir := flag.String("sessions", "./data/sessions", "sessions directory path")
+	sessionID := flag.String("session", "", "resume a specific session by ID (optional)")
 	envFile := flag.String("env", ".env", "env file path")
 	flag.Parse()
 
@@ -69,8 +71,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 初始化记忆存储（JSONL 文件）。
-	store, err := memory.NewStore(*memoryPath)
+	// 初始化会话管理器。
+	sessions, err := session.NewSessionManager(*sessionsDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init session manager failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 如果指定了 -session flag，切换到该会话。
+	if *sessionID != "" {
+		if err := sessions.Switch(*sessionID); err != nil {
+			fmt.Fprintf(os.Stderr, "switch session failed: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// 初始化记忆存储，指向当前活跃会话的 JSONL 文件。
+	store, err := memory.NewStore(sessions.ActivePath())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "init memory store failed: %v\n", err)
 		os.Exit(1)
@@ -82,7 +99,7 @@ func main() {
 	tools.Register(tool.NewFileTool())
 
 	// 启动 ReAct agent 循环。
-	runner := agent.NewRunner(client, store, tools)
+	runner := agent.NewRunner(client, store, tools, sessions)
 	if err := runner.Run(context.Background()); err != nil {
 		fmt.Fprintf(os.Stderr, "agent run failed: %v\n", err)
 		os.Exit(1)

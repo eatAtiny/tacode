@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A minimal Go ReAct agent with an interactive REPL. Reads user input, decides whether to answer directly or invoke tools (shell, file read/write), loops tool calls until it has enough information, then returns a final answer. Each round is persisted to a JSONL memory file for conversation context.
+A minimal Go ReAct agent with an interactive REPL. Reads user input, decides whether to answer directly or invoke tools (shell, file read/write), loops tool calls until it has enough information, then returns a final answer. Supports independent sessions with isolated conversation histories, switchable via REPL commands.
 
 ## Build and Run Commands
 
@@ -12,7 +12,8 @@ A minimal Go ReAct agent with an interactive REPL. Reads user input, decides whe
 go mod tidy                              # install dependencies
 go build -o agentic .                    # build binary
 go run .                                 # run (requires OPENAI_API_KEY)
-go run . -memory ./data/memory.jsonl     # custom memory path
+go run . -sessions ./data/sessions       # custom sessions directory
+go run . -session <id>                   # resume a specific session
 go run . -env .env                       # custom env file path
 go test ./...                            # (no tests exist yet)
 ```
@@ -35,10 +36,11 @@ main.go
        ├─ internal/llm      (openai.go) — OpenAI Chat Completions wrapper
        ├─ internal/memory   (memory.go) — JSONL conversation store
        ├─ internal/prompt   (prompt.go) — prompt template builder
+       ├─ internal/session  (session.go, picker.go) — session manager + interactive picker
        └─ internal/tool     (tool.go, shell.go, file.go) — tool registry + implementations
 ```
 
-`llm`, `memory`, `prompt`, and `tool` are independent leaf packages; only `agent` imports all of them.
+`llm`, `memory`, `prompt`, `session`, and `tool` are independent leaf packages; only `agent` imports all of them.
 
 ### ReAct Flow
 
@@ -56,12 +58,13 @@ The agent does NOT simply forward every question to the LLM. On each user input:
 ## Key Design Decisions
 
 - **Minimal interfaces** — only `tool.Tool` is an interface; everything else uses concrete pointer types (`*llm.OpenAIClient`, `*memory.Store`).
+- **Session management** — each session is an isolated JSONL file under `data/sessions/`, tracked by a `manifest.json`. All session logic lives in `internal/session/`. REPL supports `/new`, `/list` (interactive picker with arrow key navigation), `/switch`, `/delete`, `/rename`, `/current` commands.
 - **JSONL memory** — one JSON object per line, re-read and rewritten on each append, trimmed to the last 20 records. `Digest()` produces a text summary injected into prompts.
 - **Hardcoded temperature** — `0.2` in `internal/llm/openai.go`.
 - **All code comments and the README are in Chinese.**
 
 ## Conventions
 
-- Go 1.26.4, two external dependencies (`github.com/sashabaranov/go-openai`, `github.com/chzyer/readline`)
+- Go 1.26.4, external dependencies: `go-openai`, `readline`, `glamour`, `lipgloss`, `bubbletea`, `bubbles`
 - Constructor pattern: `NewXxx(...)` for all types
 - No Makefile, no CI, no linter config, no Dockerfile
