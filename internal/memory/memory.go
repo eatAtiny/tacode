@@ -111,6 +111,11 @@ func (s *Store) writeAll(records []Record) error {
 	return nil
 }
 
+// ReadHistory 返回全部历史记录，用于展示会话历史。
+func (s *Store) ReadHistory() ([]Record, error) {
+	return s.readAll()
+}
+
 // Digest 返回最近 N 条记忆的摘要文本，用于拼接到 prompt 中。
 func (s *Store) Digest(lastN int) string {
 	if lastN <= 0 {

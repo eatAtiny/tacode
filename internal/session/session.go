@@ -164,6 +164,11 @@ func (m *SessionManager) SessionPath(id string) string {
 	return filepath.Join(m.dir, id+".jsonl")
 }
 
+// TempPath 返回临时会话的 JSONL 文件路径（不在 manifest 中）。
+func (m *SessionManager) TempPath(tempID string) string {
+	return filepath.Join(m.dir, tempID+".jsonl")
+}
+
 // FindMeta 根据 ID 前缀查找会话元数据，找不到返回 nil。
 func (m *SessionManager) FindMeta(id string) *SessionMeta {
 	return m.findByPrefix(id)
@@ -222,11 +227,16 @@ func (m *SessionManager) touch(id string) {
 	}
 }
 
-// generateID 生成短会话 ID：日期 + 随机 4 字节十六进制。
-func generateID() (string, error) {
+// GenerateID 生成短会话 ID：日期 + 随机 4 字节十六进制。
+func GenerateID() (string, error) {
 	b := make([]byte, 4)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("%s-%x", time.Now().Format("20060102-150405"), b), nil
+}
+
+// generateID 内部别名，保持兼容。
+func generateID() (string, error) {
+	return GenerateID()
 }
