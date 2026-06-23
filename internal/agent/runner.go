@@ -104,6 +104,13 @@ var (
 
 	// todoCurrentStyle 用于正在执行的 todo 项。
 	todoCurrentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
+
+	// memoryBoxStyle 用于记忆信息的提示框。
+	memoryBoxStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("13")).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("13")).
+			Padding(0, 1)
 )
 
 // glamourRender 用于将 Markdown 渲染为漂亮的终端输出。
@@ -122,21 +129,38 @@ func init() {
 
 // Runner 负责驱动 Agent 的 ReAct 循环执行。
 type Runner struct {
-	llm         *llm.OpenAIClient
-	memory      *memory.Store
-	tools       *tool.Registry
-	sessions    *session.SessionManager
+	llm        *llm.OpenAIClient
+	history    *memory.HistoryStore
+	summary    *memory.SummaryStore
+	memStore   *memory.MemoryStore
+	extractor  *memory.Extractor
+	retriever  *memory.Retriever
+	tools      *tool.Registry
+	sessions   *session.SessionManager
 	isTemporary bool   // 临时会话：启动时创建，有对话后才落盘
 	tempID      string // 临时会话 ID
 }
 
 // NewRunner 构造 Agent 执行器。
-func NewRunner(client *llm.OpenAIClient, store *memory.Store, tools *tool.Registry, sessions *session.SessionManager) *Runner {
+func NewRunner(
+	client *llm.OpenAIClient,
+	history *memory.HistoryStore,
+	summary *memory.SummaryStore,
+	memStore *memory.MemoryStore,
+	extractor *memory.Extractor,
+	retriever *memory.Retriever,
+	tools *tool.Registry,
+	sessions *session.SessionManager,
+) *Runner {
 	return &Runner{
-		llm:      client,
-		memory:   store,
-		tools:    tools,
-		sessions: sessions,
+		llm:       client,
+		history:   history,
+		summary:   summary,
+		memStore:  memStore,
+		extractor: extractor,
+		retriever: retriever,
+		tools:     tools,
+		sessions:  sessions,
 	}
 }
 
@@ -154,14 +178,21 @@ func (r *Runner) Run(ctx context.Context) error {
 	printBanner(r.sessions)
 	printSessionHint()
 
-	// 启动时使用临时会话：生成临时 ID，记忆写入临时文件，不写 manifest。
+	// 启动时使用临时会话：生成临时 ID，记忆写入临时目录，不写 manifest。
 	r.isTemporary = true
 	tempID, err := session.GenerateID()
 	if err != nil {
 		return fmt.Errorf("generate temp session id failed: %w", err)
 	}
 	r.tempID = tempID
-	r.memory.SetPath(r.sessions.TempPath(tempID))
+	// SessionDir 返回 <dir>/<id>/，需要先创建目录。
+	tempDir := r.sessions.SessionDir(tempID)
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		return fmt.Errorf("create temp session dir failed: %w", err)
+	}
+	r.history.SetPath(tempDir)
+	r.summary.SetPath(tempDir)
+	r.memStore.SetPath(tempDir)
 
 	rl, err := newReadline("")
 	if err != nil {
@@ -199,7 +230,7 @@ func (r *Runner) Run(ctx context.Context) error {
 				continue
 			}
 			// 不是已知命令，提示用户
-			fmt.Printf("\n%s\n", errorStyle.Render("未知命令，可用: /new, /list, /switch, /delete, /rename, /current"))
+			fmt.Printf("\n%s\n", errorStyle.Render("未知命令，可用: /new, /list, /switch, /delete, /rename, /current, /compress, /memory"))
 			round-- // 不消耗轮次
 			continue
 		}
@@ -212,10 +243,14 @@ func (r *Runner) Run(ctx context.Context) error {
 
 		printAnswer(round, answer)
 
-		// 落盘记忆。
-		if err := r.memory.Append(round, input, answer); err != nil {
-			return fmt.Errorf("save memory failed at round %d: %w", round, err)
+		// ── 保存记忆（三层） ──
+		// L1: 原始对话日志。
+		if err := r.history.Append(round, input, answer); err != nil {
+			return fmt.Errorf("save history failed at round %d: %w", round, err)
 		}
+
+		// L2 + L3: LLM 提取摘要和记忆。
+		r.extractMemory(ctx, round, input, answer)
 
 		// 首次对话后，将临时会话持久化到 manifest。
 		if r.isTemporary {
@@ -226,37 +261,113 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 }
 
+// extractMemory 调用 LLM 提取摘要和结构化记忆。
+func (r *Runner) extractMemory(ctx context.Context, round int, userInput, assistantOutput string) {
+	result, err := r.extractor.Extract(ctx, userInput, assistantOutput)
+	if err != nil {
+		fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("⚠️ 记忆提取失败: %v", err)))
+		return
+	}
+
+	// 保存 L2 摘要。
+	if result.Summary != "" {
+		if err := r.summary.Append(round, result.Summary); err != nil {
+			fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("⚠️ 保存摘要失败: %v", err)))
+		}
+	}
+
+	// 保存 L3 记忆。
+	for _, action := range result.Memories {
+		switch action.Action {
+		case "create", "update":
+			entry := memory.MemoryEntry{
+				Name:        action.Name,
+				Description: action.Description,
+				Type:        action.Type,
+				Importance:  action.Importance,
+				Tags:        action.Tags,
+				Content:     action.Content,
+			}
+			if err := r.memStore.SaveEntry(entry); err != nil {
+				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("⚠️ 保存记忆失败: %v", err)))
+			} else {
+				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("💾 记忆已保存: %s", action.Description)))
+			}
+		case "delete":
+			if err := r.memStore.DeleteEntry(action.Name); err != nil {
+				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("⚠️ 删除记忆失败: %v", err)))
+			} else {
+				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("🗑️ 记忆已删除: %s", action.Name)))
+			}
+		}
+	}
+}
+
 // ensurePersisted 将临时会话持久化到 manifest。
-// 首次对话完成后调用：创建正式会话，将临时文件重命名为正式文件。
+// 首次对话完成后调用：创建正式会话，将临时文件移动到正式目录。
 func (r *Runner) ensurePersisted() error {
-	// 记住临时文件路径，Create 会改变 Active。
-	tempPath := r.sessions.TempPath(r.tempID)
+	// 记住临时目录路径。
+	tempDir := r.sessions.SessionDir(r.tempID)
 
 	// 创建正式会话（会自动设为 Active）。
 	realID, err := r.sessions.Create("新会话")
 	if err != nil {
 		return err
 	}
-	realPath := r.sessions.SessionPath(realID)
+	realDir := r.sessions.SessionDir(realID)
 
-	// 将临时文件重命名为正式文件。
-	if err := os.Rename(tempPath, realPath); err != nil {
-		// 重命名失败（可能临时文件不存在），不影响会话创建。
-		if !os.IsNotExist(err) {
-			fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("⚠️ 临时文件迁移失败: %v", err)))
+	// 将临时目录下的文件移动到正式目录。
+	// history.jsonl
+	tempHistory := tempDir + "/history.jsonl"
+	realHistory := realDir + "/history.jsonl"
+	if _, err := os.Stat(tempHistory); err == nil {
+		os.MkdirAll(realDir, 0o755)
+		if err := os.Rename(tempHistory, realHistory); err != nil {
+			if !os.IsNotExist(err) {
+				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("⚠️ 临时历史文件迁移失败: %v", err)))
+			}
 		}
 	}
+	// summaries.jsonl
+	tempSummary := tempDir + "/summaries.jsonl"
+	realSummary := realDir + "/summaries.jsonl"
+	if _, err := os.Stat(tempSummary); err == nil {
+		os.MkdirAll(realDir, 0o755)
+		os.Rename(tempSummary, realSummary)
+	}
+	// memory/ 目录
+	tempMemory := tempDir + "/memory"
+	realMemory := realDir + "/memory"
+	if _, err := os.Stat(tempMemory); err == nil {
+		os.MkdirAll(realDir, 0o755)
+		os.Rename(tempMemory, realMemory)
+	}
 
-	r.memory.SetPath(realPath)
+	// 清理临时目录。
+	os.RemoveAll(tempDir)
+
+	// 更新所有 store 的路径。
+	r.history.SetPath(realDir)
+	r.summary.SetPath(realDir)
+	r.memStore.SetPath(realDir)
 	r.isTemporary = false
 	r.tempID = ""
 	fmt.Printf("\n%s\n", mutedStyle.Render("💾 会话已保存"))
 	return nil
 }
 
+// switchSession 切换会话时重新初始化所有 store 路径。
+func (r *Runner) switchSession() {
+	activeDir := r.sessions.ActiveSessionDir()
+	os.MkdirAll(activeDir, 0o755)
+	r.history.SetPath(activeDir)
+	r.summary.SetPath(activeDir)
+	r.memStore.SetPath(activeDir)
+}
+
 // printSessionHistory 读取并展示指定会话的历史记录。
 func (r *Runner) printSessionHistory() {
-	records, err := r.memory.ReadHistory()
+	records, err := r.history.ReadHistory()
 	if err != nil || len(records) == 0 {
 		fmt.Printf("\n%s\n", mutedStyle.Render("  (无历史记录)"))
 		return
@@ -296,7 +407,7 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 		}
 		// 如果当前是临时会话，先清理临时文件。
 		if r.isTemporary {
-			os.Remove(r.sessions.TempPath(r.tempID))
+			os.RemoveAll(r.sessions.SessionDir(r.tempID))
 			r.isTemporary = false
 			r.tempID = ""
 		}
@@ -305,7 +416,7 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 			fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("创建会话失败: %v", err)))
 			return 0, true
 		}
-		r.memory.SetPath(r.sessions.ActivePath())
+		r.switchSession()
 		meta := r.sessions.FindMeta(id)
 		displayName := id
 		if meta != nil {
@@ -330,7 +441,7 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 			return 0, true
 		}
 		r.isTemporary = false // 切换到已持久化会话
-		r.memory.SetPath(r.sessions.ActivePath())
+		r.switchSession()
 		meta := r.sessions.FindMeta(r.sessions.ActiveID())
 		displayName := r.sessions.ActiveID()
 		if meta != nil {
@@ -351,7 +462,7 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 			return 0, true
 		}
 		r.isTemporary = false // 切换到已持久化会话
-		r.memory.SetPath(r.sessions.ActivePath())
+		r.switchSession()
 		meta := r.sessions.FindMeta(r.sessions.ActiveID())
 		displayName := r.sessions.ActiveID()
 		if meta != nil {
@@ -402,9 +513,114 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 		}
 		return 0, true
 
+	case "/compress":
+		r.handleCompress()
+		return 0, true
+
+	case "/memory":
+		r.handleMemoryCommand(parts)
+		return 0, true
+
 	default:
 		return 0, false
 	}
+}
+
+// handleCompress 手动触发摘要压缩。
+func (r *Runner) handleCompress() {
+	fmt.Printf("\n%s\n", memoryBoxStyle.Render("🗜️ 正在压缩摘要..."))
+
+	// 使用一个简单的上下文。
+	ctx := context.Background()
+	err := r.retriever.CompressSummaries(ctx, r.llm)
+	if err != nil {
+		fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("压缩失败: %v", err)))
+		return
+	}
+
+	count, _ := r.summary.Count()
+	fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 压缩完成，当前 %d 条摘要", count)))
+}
+
+// handleMemoryCommand 处理 /memory 子命令。
+func (r *Runner) handleMemoryCommand(parts []string) {
+	if len(parts) < 2 {
+		// 默认列出所有记忆。
+		r.listMemories()
+		return
+	}
+
+	sub := strings.ToLower(parts[1])
+	switch sub {
+	case "list":
+		r.listMemories()
+	case "add":
+		if len(parts) < 3 {
+			fmt.Printf("\n%s\n", errorStyle.Render("用法: /memory add <内容>"))
+			return
+		}
+		content := strings.Join(parts[2:], " ")
+		r.addMemory(content)
+	case "rm", "delete":
+		if len(parts) < 3 {
+			fmt.Printf("\n%s\n", errorStyle.Render("用法: /memory rm <name>"))
+			return
+		}
+		name := parts[2]
+		r.deleteMemory(name)
+	default:
+		fmt.Printf("\n%s\n", errorStyle.Render("用法: /memory [list|add|rm]"))
+	}
+}
+
+// listMemories 列出所有记忆。
+func (r *Runner) listMemories() {
+	entries, err := r.memStore.ListEntries()
+	if err != nil {
+		fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("读取记忆失败: %v", err)))
+		return
+	}
+	if len(entries) == 0 {
+		fmt.Printf("\n%s\n", mutedStyle.Render("  (暂无记忆)"))
+		return
+	}
+
+	fmt.Printf("\n%s\n", memoryBoxStyle.Render(fmt.Sprintf("🧠 共 %d 条记忆:", len(entries))))
+	for _, e := range entries {
+		importanceIcon := strings.Repeat("⭐", e.Importance)
+		fmt.Printf("  %s %s\n", mutedStyle.Render(fmt.Sprintf("[%s]", e.Type)), e.Description)
+		fmt.Printf("    %s name=%s\n", mutedStyle.Render(importanceIcon), e.Name)
+	}
+}
+
+// addMemory 手动添加一条记忆。
+func (r *Runner) addMemory(content string) {
+	// 生成一个简单的 name。
+	name := fmt.Sprintf("manual-%s", strings.ReplaceAll(strings.ToLower(content[:min(20, len(content))]), " ", "-"))
+	name = strings.TrimRight(name, "-")
+
+	entry := memory.MemoryEntry{
+		Name:        name,
+		Description: content,
+		Type:        "user",
+		Importance:  3,
+		Tags:        []string{"manual"},
+		Content:     content,
+	}
+	if err := r.memStore.SaveEntry(entry); err != nil {
+		fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("保存记忆失败: %v", err)))
+		return
+	}
+	fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 记忆已保存: %s", content)))
+}
+
+// deleteMemory 删除一条记忆。
+func (r *Runner) deleteMemory(name string) {
+	if err := r.memStore.DeleteEntry(name); err != nil {
+		fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("删除记忆失败: %v", err)))
+		return
+	}
+	fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 记忆已删除: %s", name)))
 }
 
 // planAndExecute 实现 Plan & Execute 流程：
@@ -412,17 +628,40 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 // 2. 执行阶段：逐条执行 todo，每步可调用工具
 // 3. 汇总阶段：LLM 根据所有执行结果给出最终答案
 func (r *Runner) planAndExecute(ctx context.Context, round int, userInput string) (string, error) {
-	digest := r.memory.Digest(20)
+	// 构建上下文（从三层记忆中检索）。
+	contextDigest, err := r.retriever.BuildContext(userInput)
+	if err != nil {
+		// 降级：从原始日志生成简易摘要。
+		contextDigest = r.history.Digest(10)
+	}
+
+	// 自动压缩检查：估算上下文 token 用量，接近阈值时压缩 L2。
+	if contextDigest != "" {
+		totalTokens := memory.EstimateTokens(contextDigest + userInput + r.tools.Descriptions())
+		limit := r.llm.ContextLimit()
+		compressed, compErr := r.retriever.CheckAndCompress(ctx, r.llm, limit, totalTokens)
+		if compressed {
+			if compErr != nil {
+				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("⚠️ 自动压缩失败: %v", compErr)))
+			} else {
+				fmt.Printf("\n%s\n", mutedStyle.Render("🗜️ 上下文接近上限，已自动压缩摘要"))
+				// 压缩后重新构建上下文。
+				if newCtx, err := r.retriever.BuildContext(userInput); err == nil {
+					contextDigest = newCtx
+				}
+			}
+		}
+	}
 
 	// ── 规划阶段 ──
-	todos, err := r.planPhase(ctx, round, digest, userInput)
+	todos, err := r.planPhase(ctx, round, contextDigest, userInput)
 	if err != nil {
 		return "", fmt.Errorf("plan phase failed: %w", err)
 	}
 	printPlan(todos)
 
 	// ── 执行阶段 ──
-	answer, err := r.execPhase(ctx, round, digest, userInput, todos)
+	answer, err := r.execPhase(ctx, round, contextDigest, userInput, todos)
 	if err != nil {
 		return "", fmt.Errorf("exec phase failed: %w", err)
 	}
@@ -431,9 +670,9 @@ func (r *Runner) planAndExecute(ctx context.Context, round int, userInput string
 }
 
 // planPhase 调用 LLM 生成结构化的 todo 列表。
-func (r *Runner) planPhase(ctx context.Context, round int, digest, userInput string) ([]TodoItem, error) {
+func (r *Runner) planPhase(ctx context.Context, round int, contextDigest, userInput string) ([]TodoItem, error) {
 	systemPrompt := prompt.BuildPlanPrompt(r.tools.Descriptions())
-	userPrompt := prompt.BuildPlanUserPrompt(round, digest, userInput)
+	userPrompt := prompt.BuildPlanUserPrompt(round, contextDigest, userInput)
 
 	printPlanStart()
 
@@ -458,13 +697,20 @@ func (r *Runner) planPhase(ctx context.Context, round int, digest, userInput str
 }
 
 // execPhase 逐条执行 todo 列表，完成后汇总最终答案。
-func (r *Runner) execPhase(ctx context.Context, round int, digest, userInput string, todos []TodoItem) (string, error) {
+func (r *Runner) execPhase(ctx context.Context, round int, contextDigest, userInput string, todos []TodoItem) (string, error) {
 	tools := r.tools.FunctionDefinitions()
 	var doneSummaries []string
 
 	for i := range todos {
 		todos[i].Status = "current"
 		printTodoList(todos)
+
+		// 如果步骤是"直接完成任务"类的简单指令，跳过工具调用，直接让 LLM 回答。
+		if isDirectTask(todos[i].Content) {
+			todos[i].Status = "done"
+			doneSummaries = append(doneSummaries, fmt.Sprintf("步骤 %d 完成: 直接回答", todos[i].ID))
+			continue
+		}
 
 		// 构建执行 prompt。
 		todosText := formatTodoList(todos)
@@ -491,7 +737,7 @@ func (r *Runner) execPhase(ctx context.Context, round int, digest, userInput str
 		// 如果 LLM 需要调用工具，进入 ReAct 子循环。
 		if !resp.Finish {
 			printExecToolStart(i + 1)
-			resp, err = r.execToolLoop(ctx, resp, tools)
+			resp, err = r.execToolLoop(ctx, resp, tools, messages)
 			if err != nil {
 				todos[i].Status = "failed"
 				doneSummaries = append(doneSummaries, fmt.Sprintf("步骤 %d 工具执行失败: %v", todos[i].ID, err))
@@ -510,12 +756,14 @@ func (r *Runner) execPhase(ctx context.Context, round int, digest, userInput str
 
 	// ── 汇总阶段 ──
 	printTodoList(todos)
-	return r.summarizePhase(ctx, round, digest, userInput, todos, doneSummaries)
+	return r.summarizePhase(ctx, round, contextDigest, userInput, todos, doneSummaries)
 }
 
 // execToolLoop 在单个 todo 步骤内执行 ReAct 子循环（调用工具直到 LLM 给出文本回答）。
-func (r *Runner) execToolLoop(ctx context.Context, resp *llm.ChatResponse, tools []openai.Tool) (*llm.ChatResponse, error) {
-	messages := []llm.ChatMessage{} // 子循环独立的消息历史
+// initMessages 是进入子循环前的完整消息历史（system + user），确保 LLM 保留任务上下文。
+func (r *Runner) execToolLoop(ctx context.Context, resp *llm.ChatResponse, tools []openai.Tool, initMessages []llm.ChatMessage) (*llm.ChatResponse, error) {
+	messages := append([]llm.ChatMessage{}, initMessages...) // 复制初始消息，保留上下文
+	seenToolCalls := make(map[string]bool)                    // 记录所有工具调用签名，检测重复
 
 	for iter := 0; iter < maxIterations; iter++ {
 		messages = append(messages, llm.ChatMessage{
@@ -523,6 +771,13 @@ func (r *Runner) execToolLoop(ctx context.Context, resp *llm.ChatResponse, tools
 			Content:   resp.Content,
 			ToolCalls: resp.ToolCalls,
 		})
+
+		// 生成本次工具调用的签名（工具名+参数），用于重复检测。
+		currentToolCall := toolCallSignature(resp.ToolCalls)
+		isDuplicate := currentToolCall != "" && seenToolCalls[currentToolCall]
+		if currentToolCall != "" {
+			seenToolCalls[currentToolCall] = true
+		}
 
 		// 逐个执行工具调用。
 		for i, tc := range resp.ToolCalls {
@@ -543,7 +798,7 @@ func (r *Runner) execToolLoop(ctx context.Context, resp *llm.ChatResponse, tools
 			result, execErr := t.Execute(tc.Arguments)
 			if execErr != nil {
 				printToolResult(fmt.Sprintf("%v", execErr), true)
-				result = fmt.Sprintf("工具执行出错: %v", execErr)
+				result = fmt.Sprintf("工具执行出错: %v\n请尝试其他方案，不要重复相同的命令。", execErr)
 			} else {
 				printToolResult(result, false)
 			}
@@ -552,6 +807,14 @@ func (r *Runner) execToolLoop(ctx context.Context, resp *llm.ChatResponse, tools
 				Role:       "tool",
 				Content:    result,
 				ToolCallID: tc.ID,
+			})
+		}
+
+		// 重复调用检测：如果调用了相同的工具+参数，强制 LLM 总结。
+		if isDuplicate {
+			messages = append(messages, llm.ChatMessage{
+				Role:    "user",
+				Content: "你已经调用过相同的工具并获得了相同的结果。请根据已有信息直接给出最终回答，不要再调用任何工具。",
 			})
 		}
 
@@ -568,11 +831,32 @@ func (r *Runner) execToolLoop(ctx context.Context, resp *llm.ChatResponse, tools
 		printContinue()
 	}
 
-	return nil, fmt.Errorf("tool loop reached max iterations (%d)", maxIterations)
+	// 达到最大迭代次数，让 LLM 做最终总结而不是直接报错。
+	messages = append(messages, llm.ChatMessage{
+		Role:    "user",
+		Content: "你已经尝试了多次工具调用。请根据已有信息直接给出回答，不要再调用工具。",
+	})
+	finalResp, err := r.llm.ChatWithTools(ctx, messages, tools)
+	if err != nil {
+		return nil, fmt.Errorf("tool loop reached max iterations (%d)", maxIterations)
+	}
+	return finalResp, nil
+}
+
+// toolCallSignature 生成工具调用的签名，用于检测重复调用。
+func toolCallSignature(calls []llm.ToolCall) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, tc := range calls {
+		parts = append(parts, fmt.Sprintf("%s:%s", tc.Name, tc.Arguments))
+	}
+	return strings.Join(parts, "|")
 }
 
 // summarizePhase 让 LLM 根据所有步骤的执行结果生成最终答案。
-func (r *Runner) summarizePhase(ctx context.Context, round int, digest, userInput string, todos []TodoItem, doneSummaries []string) (string, error) {
+func (r *Runner) summarizePhase(ctx context.Context, round int, contextDigest, userInput string, todos []TodoItem, doneSummaries []string) (string, error) {
 	todosText := formatTodoList(todos)
 	summariesText := "(无)"
 	if len(doneSummaries) > 0 {
@@ -603,6 +887,23 @@ func (r *Runner) summarizePhase(ctx context.Context, round int, digest, userInpu
 	return result, nil
 }
 
+// isDirectTask 判断步骤是否是"直接完成任务"类的简单指令（不需要工具调用）。
+func isDirectTask(content string) bool {
+	c := strings.TrimSpace(strings.ToLower(content))
+	directPatterns := []string{
+		"直接完成任务",
+		"直接回答",
+		"直接回复",
+		"直接输出",
+	}
+	for _, p := range directPatterns {
+		if strings.Contains(c, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // formatTodoList 将 todo 列表格式化为可读文本。
 func formatTodoList(todos []TodoItem) string {
 	var lines []string
@@ -626,8 +927,11 @@ func formatTodoList(todos []TodoItem) string {
 // reactLoop 保留作为降级方案，当规划阶段完全失败时使用。
 func (r *Runner) reactLoop(ctx context.Context, round int, userInput string) (string, error) {
 	systemPrompt := prompt.BuildReActSystemPrompt(r.tools.Descriptions())
-	digest := r.memory.Digest(20)
-	userPrompt := prompt.BuildReActUserPrompt(round, digest, userInput)
+	contextDigest, err := r.retriever.BuildContext(userInput)
+	if err != nil {
+		contextDigest = r.history.Digest(10)
+	}
+	userPrompt := prompt.BuildReActUserPrompt(round, contextDigest, userInput)
 
 	messages := []llm.ChatMessage{
 		{Role: "system", Content: systemPrompt},
@@ -712,6 +1016,7 @@ func printBanner(sessions *session.SessionManager) {
 		"",
 		mutedStyle.Render("输入任务开始对话，输入 exit 退出"),
 		mutedStyle.Render("会话命令: /new /list /switch /delete /rename /current"),
+		mutedStyle.Render("记忆命令: /compress /memory [list|add|rm]"),
 	)
 	fmt.Println(bannerStyle.Render(content))
 	fmt.Println()
