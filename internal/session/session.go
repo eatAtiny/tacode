@@ -64,12 +64,22 @@ func NewSessionManager(dir string) (*SessionManager, error) {
 		if err := m.save(); err != nil {
 			return nil, err
 		}
+		// 创建默认会话的子目录。
+		if err := os.MkdirAll(m.SessionDir(id), 0o755); err != nil {
+			return nil, fmt.Errorf("create default session dir failed: %w", err)
+		}
 		return m, nil
 	}
 
 	if err := json.Unmarshal(data, &m.data); err != nil {
 		return nil, fmt.Errorf("parse manifest failed: %w", err)
 	}
+
+	// 迁移旧格式：将 <id>.jsonl 移入 <id>/history.jsonl。
+	for _, s := range m.data.Sessions {
+		m.migrateOldFormat(s.ID)
+	}
+
 	return m, nil
 }
 
@@ -92,6 +102,10 @@ func (m *SessionManager) Create(name string) (string, error) {
 	m.data.Active = id
 	if err := m.save(); err != nil {
 		return "", err
+	}
+	// 创建会话子目录。
+	if err := os.MkdirAll(m.SessionDir(id), 0o755); err != nil {
+		return "", fmt.Errorf("create session dir failed: %w", err)
 	}
 	return id, nil
 }
@@ -122,7 +136,7 @@ func (m *SessionManager) Switch(id string) error {
 	return m.save()
 }
 
-// Delete 删除指定 ID 的会话及其 JSONL 文件。不能删除当前活跃会话。
+// Delete 删除指定 ID 的会话及其整个目录。不能删除当前活跃会话。
 func (m *SessionManager) Delete(id string) error {
 	s := m.findByPrefix(id)
 	if s == nil {
@@ -131,9 +145,11 @@ func (m *SessionManager) Delete(id string) error {
 	if s.ID == m.data.Active {
 		return fmt.Errorf("不能删除当前活跃的会话")
 	}
-	// 删除 JSONL 文件
-	os.Remove(m.SessionPath(s.ID))
-	// 从列表移除
+	// 删除整个会话目录。
+	os.RemoveAll(m.SessionDir(s.ID))
+	// 兼容：也删除旧格式的 .jsonl 文件。
+	os.Remove(filepath.Join(m.dir, s.ID+".jsonl"))
+	// 从列表移除。
 	for i, sess := range m.data.Sessions {
 		if sess.ID == s.ID {
 			m.data.Sessions = append(m.data.Sessions[:i], m.data.Sessions[i+1:]...)
@@ -154,19 +170,39 @@ func (m *SessionManager) Rename(id, name string) error {
 	return m.save()
 }
 
-// ActivePath 返回当前活跃会话的 JSONL 文件路径。
+// SessionDir 返回指定会话的子目录路径。
+func (m *SessionManager) SessionDir(id string) string {
+	return filepath.Join(m.dir, id)
+}
+
+// ActiveSessionDir 返回当前活跃会话的子目录路径。
+func (m *SessionManager) ActiveSessionDir() string {
+	return m.SessionDir(m.data.Active)
+}
+
+// MemoryDir 返回指定会话的 memory/ 子目录路径。
+func (m *SessionManager) MemoryDir(id string) string {
+	return filepath.Join(m.dir, id, "memory")
+}
+
+// ActiveMemoryDir 返回当前活跃会话的 memory/ 子目录路径。
+func (m *SessionManager) ActiveMemoryDir() string {
+	return m.MemoryDir(m.data.Active)
+}
+
+// ActivePath 返回当前活跃会话的 history.jsonl 文件路径。
 func (m *SessionManager) ActivePath() string {
 	return m.SessionPath(m.data.Active)
 }
 
-// SessionPath 返回指定会话的 JSONL 文件路径。
+// SessionPath 返回指定会话的 history.jsonl 文件路径。
 func (m *SessionManager) SessionPath(id string) string {
-	return filepath.Join(m.dir, id+".jsonl")
+	return filepath.Join(m.dir, id, "history.jsonl")
 }
 
-// TempPath 返回临时会话的 JSONL 文件路径（不在 manifest 中）。
+// TempPath 返回临时会话的 history.jsonl 文件路径（不在 manifest 中）。
 func (m *SessionManager) TempPath(tempID string) string {
-	return filepath.Join(m.dir, tempID+".jsonl")
+	return filepath.Join(m.dir, tempID, "history.jsonl")
 }
 
 // FindMeta 根据 ID 前缀查找会话元数据，找不到返回 nil。
@@ -224,6 +260,31 @@ func (m *SessionManager) touch(id string) {
 			m.data.Sessions[i].Updated = now
 			return
 		}
+	}
+}
+
+// migrateOldFormat 将旧格式的 <id>.jsonl 迁移到新格式 <id>/history.jsonl。
+func (m *SessionManager) migrateOldFormat(id string) {
+	oldPath := filepath.Join(m.dir, id+".jsonl")
+	newDir := m.SessionDir(id)
+	newPath := m.SessionPath(id)
+
+	// 如果旧文件不存在，无需迁移。
+	if _, err := os.Stat(oldPath); os.IsNotExist(err) {
+		return
+	}
+	// 如果新路径已存在，无需迁移。
+	if _, err := os.Stat(newPath); err == nil {
+		// 清理旧文件。
+		os.Remove(oldPath)
+		return
+	}
+
+	// 创建新目录并移动文件。
+	os.MkdirAll(newDir, 0o755)
+	if err := os.Rename(oldPath, newPath); err != nil {
+		// 迁移失败，保留旧文件不动。
+		return
 	}
 }
 

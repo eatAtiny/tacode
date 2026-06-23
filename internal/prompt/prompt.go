@@ -9,9 +9,9 @@ type RoundPrompt struct {
 }
 
 // BuildRoundPrompt 组装每轮提示词（普通对话模式）。
-func BuildRoundPrompt(round int, memoryDigest, userInput string) RoundPrompt {
+func BuildRoundPrompt(round int, contextDigest, userInput string) RoundPrompt {
 	system := "你是一个有帮助的 AI 助手。请用简洁自然的中文回答用户的问题。"
-	user := fmt.Sprintf("轮次: %d\n最近对话记录:\n%s\n\n用户输入:\n%s", round, memoryDigest, userInput)
+	user := fmt.Sprintf("轮次: %d\n记忆上下文:\n%s\n\n用户输入:\n%s", round, contextDigest, userInput)
 	return RoundPrompt{System: system, User: user}
 }
 
@@ -32,13 +32,16 @@ func BuildReActSystemPrompt(toolDescriptions string) string {
 ## 注意事项
 - 如果用户的问题不需要工具（如简单闲聊），直接回答即可
 - 每次只调用一个工具
-- 工具调用失败时，分析原因并尝试其他方案
+- 收到工具结果后，判断信息是否足够回答用户：
+  - 足够 → 立即给出最终回答，不要再调用任何工具
+  - 不足 → 调用一个不同的工具（不要重复调用同一个工具）
+- 工具调用失败时，换一种方式尝试，不要重复相同的命令
 - 最终回答要简洁明了，用中文回复`, toolDescriptions)
 }
 
 // BuildReActUserPrompt 构建 ReAct 模式的 user prompt。
-func BuildReActUserPrompt(round int, memoryDigest, userInput string) string {
-	return fmt.Sprintf("轮次: %d\n最近对话记录:\n%s\n\n用户任务:\n%s", round, memoryDigest, userInput)
+func BuildReActUserPrompt(round int, contextDigest, userInput string) string {
+	return fmt.Sprintf("轮次: %d\n记忆上下文:\n%s\n\n用户任务:\n%s", round, contextDigest, userInput)
 }
 
 // BuildPlanPrompt 构建规划阶段的 system prompt。
@@ -62,8 +65,8 @@ func BuildPlanPrompt(toolDescriptions string) string {
 }
 
 // BuildPlanUserPrompt 构建规划阶段的 user prompt。
-func BuildPlanUserPrompt(round int, memoryDigest, userInput string) string {
-	return fmt.Sprintf("轮次: %d\n最近对话记录:\n%s\n\n请为以下任务制定执行计划:\n%s", round, memoryDigest, userInput)
+func BuildPlanUserPrompt(round int, contextDigest, userInput string) string {
+	return fmt.Sprintf("轮次: %d\n记忆上下文:\n%s\n\n请为以下任务制定执行计划:\n%s", round, contextDigest, userInput)
 }
 
 // BuildExecPrompt 构建执行阶段的 system prompt。
@@ -81,9 +84,11 @@ func BuildExecPrompt(todosText, currentStep, doneSummary string) string {
 ## 已完成步骤的结果
 %s
 
-## 说明
-- 专注于执行当前步骤，不要跳到其他步骤
-- 如果需要调用工具来完成当前步骤，请调用
-- 执行完成后，简要说明结果（2-3 句话即可）
-- 用中文回复`, todosText, currentStep, doneSummary)
+## 执行规则
+1. 如果当前步骤需要调用工具，调用一次即可
+2. 收到工具结果后，判断结果是否足以完成当前步骤：
+   - 足够 → 立即给出执行结果摘要（2-3句话），不要再调用任何工具
+   - 不足 → 调用一个不同的工具获取更多信息（不要重复调用同一个工具）
+3. 工具调用失败时，换一种方式尝试，不要重复相同的命令
+4. 用中文回复`, todosText, currentStep, doneSummary)
 }

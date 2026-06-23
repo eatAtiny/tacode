@@ -14,8 +14,9 @@ const defaultModel = openai.GPT4oMini
 
 // OpenAIClient 对 go-openai 做一层轻量封装。
 type OpenAIClient struct {
-	client *openai.Client
-	model  string
+	client       *openai.Client
+	model        string
+	contextLimit int // 模型上下文窗口大小（token）
 }
 
 // NewOpenAIClientFromEnv 从环境变量初始化客户端。
@@ -39,9 +40,13 @@ func NewOpenAIClientFromEnv() (*OpenAIClient, error) {
 		model = defaultModel
 	}
 
+	// 推断上下文窗口大小。
+	contextLimit := inferContextLimit(model)
+
 	return &OpenAIClient{
-		client: openai.NewClientWithConfig(config),
-		model:  model,
+		client:       openai.NewClientWithConfig(config),
+		model:        model,
+		contextLimit: contextLimit,
 	}, nil
 }
 
@@ -153,4 +158,72 @@ func (c *OpenAIClient) ChatWithTools(ctx context.Context, messages []ChatMessage
 	}
 
 	return result, nil
+}
+
+// Model 返回当前使用的模型名称。
+func (c *OpenAIClient) Model() string {
+	return c.model
+}
+
+// ContextLimit 返回模型的上下文窗口大小（token 数）。
+func (c *OpenAIClient) ContextLimit() int {
+	return c.contextLimit
+}
+
+// inferContextLimit 根据模型名称推断上下文窗口大小。
+// 支持通过 OPENAI_CONTEXT_LIMIT 环境变量覆盖。
+// 未识别的模型默认使用 128k。
+func inferContextLimit(model string) int {
+	// 环境变量覆盖优先。
+	if v := strings.TrimSpace(os.Getenv("OPENAI_CONTEXT_LIMIT")); v != "" {
+		var limit int
+		if _, err := fmt.Sscanf(v, "%d", &limit); err == nil && limit > 0 {
+			return limit
+		}
+	}
+
+	model = strings.ToLower(model)
+
+	// MiMo 模型（小米）。
+	switch {
+	case strings.Contains(model, "mimo-v2.5-pro"), strings.Contains(model, "mimo-v2-pro"):
+		return 1_000_000 // 1M
+	case strings.Contains(model, "mimo-v2.5"):
+		return 1_000_000 // 1M
+	case strings.Contains(model, "mimo-v2-omni"):
+		return 256_000
+	case strings.Contains(model, "mimo-v2-flash"):
+		return 256_000
+	case strings.Contains(model, "mimo"):
+		return 256_000
+
+	// OpenAI 模型。
+	case strings.Contains(model, "gpt-4o-mini"):
+		return 128_000
+	case strings.Contains(model, "gpt-4o"):
+		return 128_000
+	case strings.Contains(model, "gpt-4-turbo"):
+		return 128_000
+	case strings.Contains(model, "gpt-4-32k"):
+		return 32_000
+	case strings.Contains(model, "gpt-4"):
+		return 8_192
+	case strings.Contains(model, "gpt-3.5-turbo-16k"):
+		return 16_384
+	case strings.Contains(model, "gpt-3.5-turbo"):
+		return 16_384
+
+	// Anthropic 模型。
+	case strings.Contains(model, "claude-3.5-sonnet"), strings.Contains(model, "claude-sonnet-4"):
+		return 200_000
+	case strings.Contains(model, "claude-3-opus"), strings.Contains(model, "claude-opus-4"):
+		return 200_000
+	case strings.Contains(model, "claude-3-haiku"), strings.Contains(model, "claude-haiku-4"):
+		return 200_000
+	case strings.Contains(model, "claude"):
+		return 200_000
+
+	default:
+		return 128_000
+	}
 }

@@ -51,7 +51,7 @@ func loadEnvFile(path string) error {
 	return scanner.Err()
 }
 
-// main 是程序入口：初始化 LLM、Memory 和 Agent Runner。
+// main 是程序入口：初始化 LLM、Memory 三层存储和 Agent Runner。
 func main() {
 	// sessions 参数用于指定会话目录，默认写到 data/sessions。
 	sessionsDir := flag.String("sessions", "./data/sessions", "sessions directory path")
@@ -86,12 +86,32 @@ func main() {
 		}
 	}
 
-	// 初始化记忆存储，指向当前活跃会话的 JSONL 文件。
-	store, err := memory.NewStore(sessions.ActivePath())
+	// 初始化三层记忆存储。
+	activeDir := sessions.ActiveSessionDir()
+
+	history, err := memory.NewHistoryStore(activeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init history store failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	summary, err := memory.NewSummaryStore(activeDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init summary store failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	memStore, err := memory.NewMemoryStore(activeDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "init memory store failed: %v\n", err)
 		os.Exit(1)
 	}
+
+	// 初始化 LLM 记忆提取器。
+	extractor := memory.NewExtractor(client)
+
+	// 初始化记忆检索器。
+	retriever := memory.NewRetriever(history, summary, memStore)
 
 	// 注册内置工具。
 	tools := tool.NewRegistry()
@@ -99,7 +119,7 @@ func main() {
 	tools.Register(tool.NewFileTool())
 
 	// 启动 ReAct agent 循环。
-	runner := agent.NewRunner(client, store, tools, sessions)
+	runner := agent.NewRunner(client, history, summary, memStore, extractor, retriever, tools, sessions)
 	if err := runner.Run(context.Background()); err != nil {
 		fmt.Fprintf(os.Stderr, "agent run failed: %v\n", err)
 		os.Exit(1)
