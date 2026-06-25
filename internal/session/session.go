@@ -170,6 +170,11 @@ func (m *SessionManager) Rename(id, name string) error {
 	return m.save()
 }
 
+// Dir 返回 sessions 目录路径。
+func (m *SessionManager) Dir() string {
+	return m.dir
+}
+
 // SessionDir 返回指定会话的子目录路径。
 func (m *SessionManager) SessionDir(id string) string {
 	return filepath.Join(m.dir, id)

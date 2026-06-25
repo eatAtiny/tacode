@@ -107,11 +107,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 初始化全量事件日志。
+	events := memory.NewEventStore(activeDir)
+
 	// 初始化 LLM 记忆提取器。
 	extractor := memory.NewExtractor(client)
 
 	// 初始化记忆检索器。
-	retriever := memory.NewRetriever(history, summary, memStore)
+	retriever := memory.NewRetriever(history, summary, memStore, events)
 
 	// 注册内置工具。
 	tools := tool.NewRegistry()
@@ -119,7 +122,7 @@ func main() {
 	tools.Register(tool.NewFileTool())
 
 	// 启动 ReAct agent 循环。
-	runner := agent.NewRunner(client, history, summary, memStore, extractor, retriever, tools, sessions)
+	runner := agent.NewRunner(client, history, summary, memStore, events, extractor, retriever, tools, sessions)
 	if err := runner.Run(context.Background()); err != nil {
 		fmt.Fprintf(os.Stderr, "agent run failed: %v\n", err)
 		os.Exit(1)

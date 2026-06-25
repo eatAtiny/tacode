@@ -15,11 +15,8 @@ type SummaryStore struct {
 	path string // summaries.jsonl 的完整路径
 }
 
-// NewSummaryStore 构造 SummaryStore。
+// NewSummaryStore 构造 SummaryStore，不立即创建目录（惰性创建）。
 func NewSummaryStore(sessionDir string) (*SummaryStore, error) {
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create session dir failed: %w", err)
-	}
 	return &SummaryStore{path: filepath.Join(sessionDir, "summaries.jsonl")}, nil
 }
 
@@ -122,8 +119,11 @@ func (s *SummaryStore) readAll() ([]Summary, error) {
 	return all, nil
 }
 
-// writeAll 覆盖写回全部摘要。
+// writeAll 覆盖写回全部摘要，写入前惰性创建目录。
 func (s *SummaryStore) writeAll(summaries []Summary) error {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return fmt.Errorf("create session dir failed: %w", err)
+	}
 	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("open summary file failed: %w", err)

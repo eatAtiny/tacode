@@ -22,14 +22,16 @@ type Retriever struct {
 	history  *HistoryStore
 	summary  *SummaryStore
 	memory   *MemoryStore
+	events   *EventStore
 }
 
 // NewRetriever 构造 Retriever。
-func NewRetriever(history *HistoryStore, summary *SummaryStore, memory *MemoryStore) *Retriever {
+func NewRetriever(history *HistoryStore, summary *SummaryStore, memory *MemoryStore, events *EventStore) *Retriever {
 	return &Retriever{
 		history: history,
 		summary: summary,
 		memory:  memory,
+		events:  events,
 	}
 }
 
@@ -56,10 +58,17 @@ func (r *Retriever) BuildContext(query string) (string, error) {
 	if err == nil && summaryText != "" {
 		parts = append(parts, "## 最近对话摘要\n"+summaryText)
 	} else {
-		// 降级：从 L1 原始日志生成简易摘要。
-		historyDigest := r.history.Digest(defaultSummaryCount)
-		if historyDigest != "" && historyDigest != "(无历史记录)" {
-			parts = append(parts, "## 最近对话记录\n"+historyDigest)
+		// 降级：优先从事件日志生成摘要，再降级到原始日志。
+		if r.events != nil {
+			eventDigest := r.events.Digest(defaultSummaryCount)
+			if eventDigest != "" && eventDigest != "(无历史记录)" {
+				parts = append(parts, "## 最近对话记录\n"+eventDigest)
+			}
+		} else {
+			historyDigest := r.history.Digest(defaultSummaryCount)
+			if historyDigest != "" && historyDigest != "(无历史记录)" {
+				parts = append(parts, "## 最近对话记录\n"+historyDigest)
+			}
 		}
 	}
 

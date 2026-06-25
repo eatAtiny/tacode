@@ -15,19 +15,14 @@ type MemoryStore struct {
 	dir string // memory/ 目录的完整路径
 }
 
-// NewMemoryStore 构造 MemoryStore，确保目录存在。
+// NewMemoryStore 构造 MemoryStore，不立即创建目录（惰性创建）。
 func NewMemoryStore(sessionDir string) (*MemoryStore, error) {
-	dir := filepath.Join(sessionDir, "memory")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create memory dir failed: %w", err)
-	}
-	return &MemoryStore{dir: dir}, nil
+	return &MemoryStore{dir: filepath.Join(sessionDir, "memory")}, nil
 }
 
-// SetPath 切换 memory/ 目录路径（用于会话切换），自动创建目录。
+// SetPath 切换 memory/ 目录路径（用于会话切换），不立即创建目录。
 func (s *MemoryStore) SetPath(sessionDir string) {
 	s.dir = filepath.Join(sessionDir, "memory")
-	os.MkdirAll(s.dir, 0o755)
 }
 
 // Dir 返回 memory/ 目录路径。
@@ -81,8 +76,11 @@ func (s *MemoryStore) GetEntry(name string) *MemoryEntry {
 	return &entry
 }
 
-// SaveEntry 写入/更新一条记忆，同时更新索引。
+// SaveEntry 写入/更新一条记忆，同时更新索引。写入前惰性创建目录。
 func (s *MemoryStore) SaveEntry(entry MemoryEntry) error {
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return fmt.Errorf("create memory dir failed: %w", err)
+	}
 	if entry.Created == "" {
 		entry.Created = time.Now().Format(time.RFC3339)
 	}

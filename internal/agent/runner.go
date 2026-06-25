@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"agentic/internal/llm"
@@ -133,12 +134,14 @@ type Runner struct {
 	history    *memory.HistoryStore
 	summary    *memory.SummaryStore
 	memStore   *memory.MemoryStore
+	events     *memory.EventStore
 	extractor  *memory.Extractor
 	retriever  *memory.Retriever
 	tools      *tool.Registry
 	sessions   *session.SessionManager
-	isTemporary bool   // 临时会话：启动时创建，有对话后才落盘
-	tempID      string // 临时会话 ID
+	isTemporary       bool   // 临时会话：启动时创建，有对话后才落盘
+	tempID            string // 临时会话 ID
+	pendingSessionName string // /new 指定的会话名，ensurePersisted 时使用
 }
 
 // NewRunner 构造 Agent 执行器。
@@ -147,6 +150,7 @@ func NewRunner(
 	history *memory.HistoryStore,
 	summary *memory.SummaryStore,
 	memStore *memory.MemoryStore,
+	events *memory.EventStore,
 	extractor *memory.Extractor,
 	retriever *memory.Retriever,
 	tools *tool.Registry,
@@ -157,6 +161,7 @@ func NewRunner(
 		history:   history,
 		summary:   summary,
 		memStore:  memStore,
+		events:    events,
 		extractor: extractor,
 		retriever: retriever,
 		tools:     tools,
@@ -178,21 +183,22 @@ func (r *Runner) Run(ctx context.Context) error {
 	printBanner(r.sessions)
 	printSessionHint()
 
-	// 启动时使用临时会话：生成临时 ID，记忆写入临时目录，不写 manifest。
+	// 启动时使用临时会话：生成临时 ID，只设置路径，不创建目录。
+	// 目录在首次对话写入时惰性创建，无对话则不留痕迹。
 	r.isTemporary = true
 	tempID, err := session.GenerateID()
 	if err != nil {
 		return fmt.Errorf("generate temp session id failed: %w", err)
 	}
 	r.tempID = tempID
-	// SessionDir 返回 <dir>/<id>/，需要先创建目录。
 	tempDir := r.sessions.SessionDir(tempID)
-	if err := os.MkdirAll(tempDir, 0o755); err != nil {
-		return fmt.Errorf("create temp session dir failed: %w", err)
-	}
 	r.history.SetPath(tempDir)
 	r.summary.SetPath(tempDir)
 	r.memStore.SetPath(tempDir)
+	r.events.SetPath(tempDir)
+
+	// 清理上次异常退出留下的孤立临时目录。
+	r.cleanOrphanTempDirs()
 
 	rl, err := newReadline("")
 	if err != nil {
@@ -235,6 +241,13 @@ func (r *Runner) Run(ctx context.Context) error {
 			continue
 		}
 
+		// 记录用户输入事件。
+		r.events.Append(memory.Event{
+			Type:    memory.EventUser,
+			Round:   round,
+			Content: input,
+		})
+
 		// 先规划 todo 列表，再逐步执行。
 		answer, err := r.planAndExecute(ctx, round, input)
 		if err != nil {
@@ -243,8 +256,16 @@ func (r *Runner) Run(ctx context.Context) error {
 
 		printAnswer(round, answer)
 
+		// 记录模型回答事件。
+		r.events.Append(memory.Event{
+			Type:    memory.EventAssistant,
+			Round:   round,
+			Content: answer,
+			Model:   r.llm.Model(),
+		})
+
 		// ── 保存记忆（三层） ──
-		// L1: 原始对话日志。
+		// L1: 原始对话日志（兼容保留）。
 		if err := r.history.Append(round, input, answer); err != nil {
 			return fmt.Errorf("save history failed at round %d: %w", round, err)
 		}
@@ -310,13 +331,29 @@ func (r *Runner) ensurePersisted() error {
 	tempDir := r.sessions.SessionDir(r.tempID)
 
 	// 创建正式会话（会自动设为 Active）。
-	realID, err := r.sessions.Create("新会话")
+	sessionName := r.pendingSessionName
+	if sessionName == "" {
+		sessionName = "新会话"
+	}
+	r.pendingSessionName = ""
+	realID, err := r.sessions.Create(sessionName)
 	if err != nil {
 		return err
 	}
 	realDir := r.sessions.SessionDir(realID)
 
 	// 将临时目录下的文件移动到正式目录。
+	// events.jsonl
+	tempEvents := tempDir + "/events.jsonl"
+	realEvents := realDir + "/events.jsonl"
+	if _, err := os.Stat(tempEvents); err == nil {
+		os.MkdirAll(realDir, 0o755)
+		if err := os.Rename(tempEvents, realEvents); err != nil {
+			if !os.IsNotExist(err) {
+				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("⚠️ 临时事件文件迁移失败: %v", err)))
+			}
+		}
+	}
 	// history.jsonl
 	tempHistory := tempDir + "/history.jsonl"
 	realHistory := realDir + "/history.jsonl"
@@ -350,10 +387,32 @@ func (r *Runner) ensurePersisted() error {
 	r.history.SetPath(realDir)
 	r.summary.SetPath(realDir)
 	r.memStore.SetPath(realDir)
+	r.events.SetPath(realDir)
 	r.isTemporary = false
 	r.tempID = ""
 	fmt.Printf("\n%s\n", mutedStyle.Render("💾 会话已保存"))
 	return nil
+}
+
+// cleanOrphanTempDirs 清理不在 manifest 中的孤立会话目录。
+// 上次异常退出时临时目录可能未被清理。
+func (r *Runner) cleanOrphanTempDirs() {
+	entries, err := os.ReadDir(r.sessions.Dir())
+	if err != nil {
+		return
+	}
+	known := make(map[string]bool)
+	for _, s := range r.sessions.List() {
+		known[s.ID] = true
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if !known[e.Name()] {
+			os.RemoveAll(filepath.Join(r.sessions.Dir(), e.Name()))
+		}
+	}
 }
 
 // switchSession 切换会话时重新初始化所有 store 路径。
@@ -363,39 +422,59 @@ func (r *Runner) switchSession() {
 	r.history.SetPath(activeDir)
 	r.summary.SetPath(activeDir)
 	r.memStore.SetPath(activeDir)
+	r.events.SetPath(activeDir)
 }
 
 // printSessionHistory 读取并展示指定会话的历史记录。
 func (r *Runner) printSessionHistory() {
-	records, err := r.history.ReadHistory()
-	if err != nil || len(records) == 0 {
+	events, err := r.events.ReadAll()
+	if err != nil || len(events) == 0 {
 		fmt.Printf("\n%s\n", mutedStyle.Render("  (无历史记录)"))
 		return
 	}
 
-	fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("  📜 最近 %d 条记录:", len(records))))
-	for _, rec := range records {
-		userLine := rec.UserInput
-		if len([]rune(userLine)) > 60 {
-			userLine = string([]rune(userLine)[:60]) + "..."
+	// 按轮次分组展示 user 和 assistant 事件。
+	fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("  📜 共 %d 条事件:", len(events))))
+	currentRound := 0
+	for _, e := range events {
+		switch e.Type {
+		case memory.EventUser:
+			if e.Round != currentRound {
+				currentRound = e.Round
+				fmt.Printf("  %s\n", mutedStyle.Render(fmt.Sprintf("Round %d:", e.Round)))
+			}
+			userLine := e.Content
+			if len([]rune(userLine)) > 60 {
+				userLine = string([]rune(userLine)[:60]) + "..."
+			}
+			fmt.Printf("    %s\n", promptStyle.Render("You> ")+userLine)
+		case memory.EventAssistant:
+			assistantLine := e.Content
+			if idx := strings.IndexByte(assistantLine, '\n'); idx >= 0 {
+				assistantLine = assistantLine[:idx]
+			}
+			if len([]rune(assistantLine)) > 80 {
+				assistantLine = string([]rune(assistantLine)[:80]) + "..."
+			}
+			fmt.Printf("    %s\n", answerLabelStyle.Render("Agent> ")+assistantLine)
+		case memory.EventToolUse:
+			for _, tc := range e.ToolCalls {
+				fmt.Printf("    %s\n", mutedStyle.Render(fmt.Sprintf("🔧 %s(%s)", tc.Name, trimArgs(tc.Arguments))))
+			}
 		}
-		assistantLine := rec.AssistantOutput
-		// 去掉换行，取第一行
-		if idx := strings.IndexByte(assistantLine, '\n'); idx >= 0 {
-			assistantLine = assistantLine[:idx]
-		}
-		if len([]rune(assistantLine)) > 80 {
-			assistantLine = string([]rune(assistantLine)[:80]) + "..."
-		}
-		fmt.Printf("  %s\n", mutedStyle.Render(fmt.Sprintf("Round %d:", rec.Round)))
-		fmt.Printf("    %s\n", promptStyle.Render("You> ")+userLine)
-		fmt.Printf("    %s\n", answerLabelStyle.Render("Agent> ")+assistantLine)
 	}
 }
 
 // handleSessionCommand 处理 / 开头的会话管理命令。
 // 返回值：新的轮次号（切换会话时重置为 1），是否已处理。
 func (r *Runner) handleSessionCommand(input string) (int, bool) {
+	// 记录系统命令事件。
+	r.events.Append(memory.Event{
+		Type:    memory.EventSystem,
+		Command: input,
+		Content: input,
+	})
+
 	parts := strings.Fields(input)
 	cmd := strings.ToLower(parts[0])
 
@@ -405,11 +484,29 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 		if len(parts) > 1 {
 			name = strings.Join(parts[1:], " ")
 		}
-		// 如果当前是临时会话，先清理临时文件。
 		if r.isTemporary {
+			// 临时模式下 /new：清理可能已创建的临时目录，重置临时状态。
+			// 不立即创建正式会话，延迟到首次对话后 ensurePersisted。
 			os.RemoveAll(r.sessions.SessionDir(r.tempID))
-			r.isTemporary = false
-			r.tempID = ""
+			newTempID, err := session.GenerateID()
+			if err != nil {
+				fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("生成会话 ID 失败: %v", err)))
+				return 0, true
+			}
+			r.tempID = newTempID
+			tempDir := r.sessions.SessionDir(newTempID)
+			r.history.SetPath(tempDir)
+			r.summary.SetPath(tempDir)
+			r.memStore.SetPath(tempDir)
+			r.events.SetPath(tempDir)
+			// 记住用户指定的会话名，ensurePersisted 时使用。
+			r.pendingSessionName = name
+			displayName := "新会话"
+			if name != "" {
+				displayName = name
+			}
+			fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 已切换到新会话: %s（对话后自动保存）", displayName)))
+			return 1, true
 		}
 		id, err := r.sessions.Create(name)
 		if err != nil {
@@ -631,8 +728,8 @@ func (r *Runner) planAndExecute(ctx context.Context, round int, userInput string
 	// 构建上下文（从三层记忆中检索）。
 	contextDigest, err := r.retriever.BuildContext(userInput)
 	if err != nil {
-		// 降级：从原始日志生成简易摘要。
-		contextDigest = r.history.Digest(10)
+		// 降级：从事件日志生成简易摘要。
+		contextDigest = r.events.Digest(10)
 	}
 
 	// 自动压缩检查：估算上下文 token 用量，接近阈值时压缩 L2。
@@ -659,6 +756,17 @@ func (r *Runner) planAndExecute(ctx context.Context, round int, userInput string
 		return "", fmt.Errorf("plan phase failed: %w", err)
 	}
 	printPlan(todos)
+
+	// 记录规划事件。
+	todoEvents := make([]memory.TodoEvent, len(todos))
+	for i, t := range todos {
+		todoEvents[i] = memory.TodoEvent{ID: t.ID, Content: t.Content, Status: t.Status}
+	}
+	r.events.Append(memory.Event{
+		Type:   memory.EventPlan,
+		Round:  round,
+		Todos:  todoEvents,
+	})
 
 	// ── 执行阶段 ──
 	answer, err := r.execPhase(ctx, round, contextDigest, userInput, todos)
@@ -779,6 +887,17 @@ func (r *Runner) execToolLoop(ctx context.Context, resp *llm.ChatResponse, tools
 			seenToolCalls[currentToolCall] = true
 		}
 
+		// 记录工具调用事件。
+		toolCallEvents := make([]memory.ToolCallEvent, len(resp.ToolCalls))
+		for i, tc := range resp.ToolCalls {
+			toolCallEvents[i] = memory.ToolCallEvent{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
+		}
+		r.events.Append(memory.Event{
+			Type:      memory.EventToolUse,
+			Round:     0, // 工具调用属于执行阶段，不标记轮次
+			ToolCalls: toolCallEvents,
+		})
+
 		// 逐个执行工具调用。
 		for i, tc := range resp.ToolCalls {
 			printToolCall(iter+1, i+1, len(resp.ToolCalls), tc.Name, tc.Arguments)
@@ -787,6 +906,14 @@ func (r *Runner) execToolLoop(ctx context.Context, resp *llm.ChatResponse, tools
 			if t == nil {
 				errMsg := fmt.Sprintf("未知工具: %s", tc.Name)
 				printToolResult(errMsg, true)
+				// 记录工具错误结果。
+				r.events.Append(memory.Event{
+					Type:       memory.EventToolResult,
+					ToolCallID: tc.ID,
+					ToolName:   tc.Name,
+					ToolResult: errMsg,
+					IsError:    true,
+				})
 				messages = append(messages, llm.ChatMessage{
 					Role:       "tool",
 					Content:    errMsg,
@@ -802,6 +929,15 @@ func (r *Runner) execToolLoop(ctx context.Context, resp *llm.ChatResponse, tools
 			} else {
 				printToolResult(result, false)
 			}
+
+			// 记录工具执行结果。
+			r.events.Append(memory.Event{
+				Type:       memory.EventToolResult,
+				ToolCallID: tc.ID,
+				ToolName:   tc.Name,
+				ToolResult: result,
+				IsError:    execErr != nil,
+			})
 
 			messages = append(messages, llm.ChatMessage{
 				Role:       "tool",
@@ -841,6 +977,14 @@ func (r *Runner) execToolLoop(ctx context.Context, resp *llm.ChatResponse, tools
 		return nil, fmt.Errorf("tool loop reached max iterations (%d)", maxIterations)
 	}
 	return finalResp, nil
+}
+
+// trimArgs 截断工具参数用于展示。
+func trimArgs(args string) string {
+	if len(args) > 60 {
+		return args[:60] + "..."
+	}
+	return args
 }
 
 // toolCallSignature 生成工具调用的签名，用于检测重复调用。
@@ -956,6 +1100,17 @@ func (r *Runner) reactLoop(ctx context.Context, round int, userInput string) (st
 			ToolCalls: resp.ToolCalls,
 		})
 
+		// 记录工具调用事件。
+		toolCallEvents := make([]memory.ToolCallEvent, len(resp.ToolCalls))
+		for i, tc := range resp.ToolCalls {
+			toolCallEvents[i] = memory.ToolCallEvent{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
+		}
+		r.events.Append(memory.Event{
+			Type:      memory.EventToolUse,
+			Round:     round,
+			ToolCalls: toolCallEvents,
+		})
+
 		for i, tc := range resp.ToolCalls {
 			printToolCall(iter+1, i+1, len(resp.ToolCalls), tc.Name, tc.Arguments)
 
@@ -963,6 +1118,13 @@ func (r *Runner) reactLoop(ctx context.Context, round int, userInput string) (st
 			if t == nil {
 				errMsg := fmt.Sprintf("未知工具: %s", tc.Name)
 				printToolResult(errMsg, true)
+				r.events.Append(memory.Event{
+					Type:       memory.EventToolResult,
+					ToolCallID: tc.ID,
+					ToolName:   tc.Name,
+					ToolResult: errMsg,
+					IsError:    true,
+				})
 				messages = append(messages, llm.ChatMessage{
 					Role:       "tool",
 					Content:    errMsg,
@@ -981,6 +1143,15 @@ func (r *Runner) reactLoop(ctx context.Context, round int, userInput string) (st
 			if execErr != nil {
 				result = fmt.Sprintf("工具执行出错: %v", execErr)
 			}
+
+			r.events.Append(memory.Event{
+				Type:       memory.EventToolResult,
+				ToolCallID: tc.ID,
+				ToolName:   tc.Name,
+				ToolResult: result,
+				IsError:    execErr != nil,
+			})
+
 			messages = append(messages, llm.ChatMessage{
 				Role:       "tool",
 				Content:    result,

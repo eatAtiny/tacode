@@ -18,11 +18,8 @@ type HistoryStore struct {
 	path string // history.jsonl 的完整路径
 }
 
-// NewHistoryStore 构造 HistoryStore，确保目录存在。
+// NewHistoryStore 构造 HistoryStore，不立即创建目录（惰性创建）。
 func NewHistoryStore(sessionDir string) (*HistoryStore, error) {
-	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create session dir failed: %w", err)
-	}
 	return &HistoryStore{path: filepath.Join(sessionDir, "history.jsonl")}, nil
 }
 
@@ -117,8 +114,11 @@ func (s *HistoryStore) readAll() ([]Record, error) {
 	return all, nil
 }
 
-// writeAll 覆盖写回全部记录。
+// writeAll 覆盖写回全部记录，写入前惰性创建目录。
 func (s *HistoryStore) writeAll(records []Record) error {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return fmt.Errorf("create session dir failed: %w", err)
+	}
 	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return fmt.Errorf("open history file failed: %w", err)
