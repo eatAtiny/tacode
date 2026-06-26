@@ -354,8 +354,11 @@ func (lc *queryLoopContext) checkToolPermission(tc llm.ToolCall, iter int) bool 
 	}
 
 	if permResult.Action == "confirm" {
-		// 需要用户确认（留好扩展接口，后续可通知上层 UI）。
-		// 目前暂时直接允许。
+		// TODO: 实现用户确认回调，通知上层 UI 等待用户决策
+		// 目前暂时直接允许，后续需要：
+		// 1. yield 一个 ConfirmEvent 给上层
+		// 2. 等待上层返回用户决策
+		// 3. 根据用户决策继续或取消
 		lc.events <- QueryEvent{
 			Type:      QueryEventThink,
 			Content:   fmt.Sprintf("⚠️ 工具 %s 需要确认，暂时允许执行", tc.Name),
@@ -499,6 +502,11 @@ func estimateMessagesTokens(messages []llm.ChatMessage) int {
 //   - 保留最近 2 轮的工具调用（完整保留）
 //   - 压缩更早的工具调用（只保留摘要）
 //   - 压缩后的消息格式："[已压缩] 工具: xxx, 结果: 成功/失败"
+//
+// TODO: 实现更复杂的压缩策略
+//   - 基于语义相似度压缩，保留关键信息
+//   - 支持自定义压缩比例
+//   - 支持保留特定类型的工具调用
 //
 // 参数：
 //   - messages: 原始消息数组

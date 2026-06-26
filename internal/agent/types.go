@@ -20,6 +20,11 @@ const (
 	QueryEventContinue   QueryEventType = "continue"    // 继续推理
 	QueryEventFinal      QueryEventType = "final"       // 最终回答
 	QueryEventError      QueryEventType = "error"       // 错误
+
+	// TODO: 添加更多事件类型
+	// QueryEventConfirm   QueryEventType = "confirm"   // 用户确认请求
+	// QueryEventProgress  QueryEventType = "progress"  // 进度更新
+	// QueryEventCost      QueryEventType = "cost"      // 费用统计
 )
 
 // QueryEvent 表示 queryLoop 的中间事件，通过 channel 传递给上层。
@@ -43,4 +48,10 @@ type QueryEvent struct {
 	InputTokens  int // 本次调用的输入 token 数
 	OutputTokens int // 本次调用的输出 token 数
 	TotalTokens  int // 累计总 token 数
+
+	// TODO: 添加更多字段
+	// Duration    time.Duration  // 执行耗时
+	// Cost        float64        // 费用（美元）
+	// Model       string         // 使用的模型
+	// Metadata    map[string]interface{} // 自定义元数据
 }

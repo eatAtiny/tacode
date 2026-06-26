@@ -41,11 +41,21 @@ type ToolPermissionChecker interface {
 // 实现简单的权限策略：
 //   - 危险工具（shell、file）需要确认
 //   - 其他工具直接允许
+//
+// TODO: 扩展权限检查器功能
+//   - 支持基于用户角色的权限控制
+//   - 支持基于资源路径的权限控制
+//   - 支持权限缓存机制
+//   - 支持权限审计日志
 type DefaultPermissionChecker struct {
 	// 危险工具列表，需要确认
 	DangerousTools []string
 	// 禁止的工具列表
 	ForbiddenTools []string
+	// TODO: 添加用户角色字段
+	// UserRole string
+	// TODO: 添加权限缓存
+	// PermissionCache map[string]PermissionResult
 }
 
 // NewDefaultPermissionChecker 创建默认权限检查器。
@@ -97,6 +107,12 @@ func (c *DefaultPermissionChecker) CheckPermission(toolName string, args string)
 
 // isHighRiskOperation 检查是否是高风险操作。
 // 留好扩展接口，后续可以实现更复杂的风险评估。
+//
+// TODO: 实现更复杂的风险评估
+//   - 基于机器学习的风险评估
+//   - 基于历史行为的风险评估
+//   - 基于上下文的风险评估
+//   - 支持自定义风险规则
 func isHighRiskOperation(toolName string, args string) bool {
 	switch toolName {
 	case "shell":
@@ -198,6 +214,16 @@ func init() {
 //   - 可以通过替换 globalPermissionChecker 实现自定义权限策略
 //   - 后续可以添加用户确认回调函数
 //   - 后续可以添加权限缓存机制
+//
+// TODO: 实现用户确认回调机制
+//   - 添加 ConfirmCallback 类型
+//   - 在 confirm 动作时调用回调函数
+//   - 支持异步确认（非阻塞）
+//
+// TODO: 实现权限缓存机制
+//   - 添加缓存过期时间
+//   - 支持缓存清理
+//   - 避免重复检查相同权限
 func checkToolPermission(toolName string, args string) PermissionResult {
 	return globalPermissionChecker.CheckPermission(toolName, args)
 }
