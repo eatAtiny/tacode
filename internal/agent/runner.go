@@ -18,18 +18,11 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/chzyer/readline"
-	openai "github.com/sashabaranov/go-openai"
 )
 
 // ReAct 最大循环次数，防止无限循环。
 const maxIterations = 10
 
-// TodoItem 表示规划中的一个待办步骤。
-type TodoItem struct {
-	ID      int    `json:"id"`
-	Content string `json:"content"` // 步骤描述
-	Status  string `json:"status"`  // "pending" | "done" | "failed"
-}
 
 // ──────────────────────────────────────────────────────────
 // Lip Gloss 样式定义
@@ -86,25 +79,6 @@ var (
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(lipgloss.Color("10")).
 				Padding(0, 1)
-
-	// planBoxStyle 用于规划阶段的提示框。
-	planBoxStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("13")).
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("13")).
-			Padding(0, 1)
-
-	// todoPendingStyle 用于待执行的 todo 项。
-	todoPendingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-
-	// todoDoneStyle 用于已完成的 todo 项。
-	todoDoneStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-
-	// todoFailedStyle 用于失败的 todo 项。
-	todoFailedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-
-	// todoCurrentStyle 用于正在执行的 todo 项。
-	todoCurrentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
 
 	// memoryBoxStyle 用于记忆信息的提示框。
 	memoryBoxStyle = lipgloss.NewStyle().
@@ -248,10 +222,10 @@ func (r *Runner) Run(ctx context.Context) error {
 			Content: input,
 		})
 
-		// 先规划 todo 列表，再逐步执行。
-		answer, err := r.planAndExecute(ctx, round, input)
+		// 执行 Agent Loop：调用 LLM → 检查 tool_use → 执行工具 → 结果推入消息 → 重复。
+		answer, err := r.agentLoop(ctx, round, input)
 		if err != nil {
-			return fmt.Errorf("react loop failed at round %d: %w", round, err)
+			return fmt.Errorf("agent loop failed at round %d: %w", round, err)
 		}
 
 		printAnswer(round, answer)
@@ -720,11 +694,11 @@ func (r *Runner) deleteMemory(name string) {
 	fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 记忆已删除: %s", name)))
 }
 
-// planAndExecute 实现 Plan & Execute 流程：
-// 1. 规划阶段：LLM 生成 todo 列表
-// 2. 执行阶段：逐条执行 todo，每步可调用工具
-// 3. 汇总阶段：LLM 根据所有执行结果给出最终答案
-func (r *Runner) planAndExecute(ctx context.Context, round int, userInput string) (string, error) {
+// agentLoop 实现纯 Agent Loop 核心循环：
+// 1. 构建上下文和系统提示
+// 2. while(true) 循环：调用 LLM → 检查 tool_use → 执行工具 → 结果推入消息 → 重复
+// 3. 直到 LLM 给出最终回答（无 tool_use）
+func (r *Runner) agentLoop(ctx context.Context, round int, userInput string) (string, error) {
 	// 构建上下文（从三层记忆中检索）。
 	contextDigest, err := r.retriever.BuildContext(userInput)
 	if err != nil {
@@ -750,136 +724,50 @@ func (r *Runner) planAndExecute(ctx context.Context, round int, userInput string
 		}
 	}
 
-	// ── 规划阶段 ──
-	todos, err := r.planPhase(ctx, round, contextDigest, userInput)
-	if err != nil {
-		return "", fmt.Errorf("plan phase failed: %w", err)
-	}
-	printPlan(todos)
+	// 构建系统提示和用户提示。
+	systemPrompt := prompt.BuildReActSystemPrompt(r.tools.Descriptions())
+	userPrompt := prompt.BuildReActUserPrompt(round, contextDigest, userInput)
 
-	// 记录规划事件。
-	todoEvents := make([]memory.TodoEvent, len(todos))
-	for i, t := range todos {
-		todoEvents[i] = memory.TodoEvent{ID: t.ID, Content: t.Content, Status: t.Status}
-	}
-	r.events.Append(memory.Event{
-		Type:   memory.EventPlan,
-		Round:  round,
-		Todos:  todoEvents,
-	})
-
-	// ── 执行阶段 ──
-	answer, err := r.execPhase(ctx, round, contextDigest, userInput, todos)
-	if err != nil {
-		return "", fmt.Errorf("exec phase failed: %w", err)
+	// 初始化消息数组。
+	messages := []llm.ChatMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
 	}
 
-	return answer, nil
-}
-
-// planPhase 调用 LLM 生成结构化的 todo 列表。
-func (r *Runner) planPhase(ctx context.Context, round int, contextDigest, userInput string) ([]TodoItem, error) {
-	systemPrompt := prompt.BuildPlanPrompt(r.tools.Descriptions())
-	userPrompt := prompt.BuildPlanUserPrompt(round, contextDigest, userInput)
-
-	printPlanStart()
-
-	result, err := r.llm.Chat(ctx, systemPrompt, userPrompt)
-	if err != nil {
-		return nil, fmt.Errorf("plan llm call failed: %w", err)
-	}
-
-	// 解析 JSON 数组。
-	var todos []TodoItem
-	if err := json.Unmarshal([]byte(result), &todos); err != nil {
-		// 解析失败，降级为单步 todo。
-		todos = []TodoItem{{ID: 1, Content: userInput, Status: "pending"}}
-		return todos, nil
-	}
-
-	// 确保所有 todo 的 Status 初始化为 pending。
-	for i := range todos {
-		todos[i].Status = "pending"
-	}
-	return todos, nil
-}
-
-// execPhase 逐条执行 todo 列表，完成后汇总最终答案。
-func (r *Runner) execPhase(ctx context.Context, round int, contextDigest, userInput string, todos []TodoItem) (string, error) {
+	// 获取工具定义。
 	tools := r.tools.FunctionDefinitions()
-	var doneSummaries []string
 
-	for i := range todos {
-		todos[i].Status = "current"
-		printTodoList(todos)
-
-		// 如果步骤是"直接完成任务"类的简单指令，跳过工具调用，直接让 LLM 回答。
-		if isDirectTask(todos[i].Content) {
-			todos[i].Status = "done"
-			doneSummaries = append(doneSummaries, fmt.Sprintf("步骤 %d 完成: 直接回答", todos[i].ID))
-			continue
-		}
-
-		// 构建执行 prompt。
-		todosText := formatTodoList(todos)
-		currentStep := fmt.Sprintf("步骤 %d：%s", todos[i].ID, todos[i].Content)
-		doneSummary := "(无)"
-		if len(doneSummaries) > 0 {
-			doneSummary = strings.Join(doneSummaries, "\n")
-		}
-		execSystemPrompt := prompt.BuildExecPrompt(todosText, currentStep, doneSummary)
-
-		messages := []llm.ChatMessage{
-			{Role: "system", Content: execSystemPrompt},
-			{Role: "user", Content: fmt.Sprintf("请执行步骤 %d：%s", todos[i].ID, todos[i].Content)},
-		}
-
-		// 调用 LLM（带工具）。
-		resp, err := r.llm.ChatWithTools(ctx, messages, tools)
-		if err != nil {
-			todos[i].Status = "failed"
-			doneSummaries = append(doneSummaries, fmt.Sprintf("步骤 %d 失败: %v", todos[i].ID, err))
-			continue
-		}
-
-		// 如果 LLM 需要调用工具，进入 ReAct 子循环。
-		if !resp.Finish {
-			printExecToolStart(i + 1)
-			resp, err = r.execToolLoop(ctx, resp, tools, messages)
-			if err != nil {
-				todos[i].Status = "failed"
-				doneSummaries = append(doneSummaries, fmt.Sprintf("步骤 %d 工具执行失败: %v", todos[i].ID, err))
-				continue
-			}
-		}
-
-		// 步骤完成。
-		todos[i].Status = "done"
-		summary := resp.Content
-		if len(summary) > 200 {
-			summary = summary[:200] + "..."
-		}
-		doneSummaries = append(doneSummaries, fmt.Sprintf("步骤 %d 完成: %s", todos[i].ID, summary))
-	}
-
-	// ── 汇总阶段 ──
-	printTodoList(todos)
-	return r.summarizePhase(ctx, round, contextDigest, userInput, todos, doneSummaries)
-}
-
-// execToolLoop 在单个 todo 步骤内执行 ReAct 子循环（调用工具直到 LLM 给出文本回答）。
-// initMessages 是进入子循环前的完整消息历史（system + user），确保 LLM 保留任务上下文。
-func (r *Runner) execToolLoop(ctx context.Context, resp *llm.ChatResponse, tools []openai.Tool, initMessages []llm.ChatMessage) (*llm.ChatResponse, error) {
-	messages := append([]llm.ChatMessage{}, initMessages...) // 复制初始消息，保留上下文
-	seenToolCalls := make(map[string]bool)                    // 记录所有工具调用签名，检测重复
+	// ── Agent Loop 核心循环 ──
+	printReActStart()
+	seenToolCalls := make(map[string]bool) // 记录所有工具调用签名，检测重复
 
 	for iter := 0; iter < maxIterations; iter++ {
+		// 检查上下文是否被取消。
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("agent loop cancelled: %w", ctx.Err())
+		}
+
+		// 调用 LLM。
+		printThink()
+		resp, err := r.llm.ChatWithTools(ctx, messages, tools)
+		if err != nil {
+			return "", fmt.Errorf("llm call failed: %w", err)
+		}
+
+		// assistant 响应推入历史。
 		messages = append(messages, llm.ChatMessage{
 			Role:      "assistant",
 			Content:   resp.Content,
 			ToolCalls: resp.ToolCalls,
 		})
 
+		// 没有工具调用 → 任务完成，输出最终回答。
+		if resp.Finish {
+			printReActEnd(iter + 1)
+			return resp.Content, nil
+		}
+
+		// ── 有工具调用，执行工具 ──
 		// 生成本次工具调用的签名（工具名+参数），用于重复检测。
 		currentToolCall := toolCallSignature(resp.ToolCalls)
 		isDuplicate := currentToolCall != "" && seenToolCalls[currentToolCall]
@@ -894,7 +782,7 @@ func (r *Runner) execToolLoop(ctx context.Context, resp *llm.ChatResponse, tools
 		}
 		r.events.Append(memory.Event{
 			Type:      memory.EventToolUse,
-			Round:     0, // 工具调用属于执行阶段，不标记轮次
+			Round:     round,
 			ToolCalls: toolCallEvents,
 		})
 
@@ -939,6 +827,7 @@ func (r *Runner) execToolLoop(ctx context.Context, resp *llm.ChatResponse, tools
 				IsError:    execErr != nil,
 			})
 
+			// 工具结果以 tool 消息推入（OpenAI API 要求）。
 			messages = append(messages, llm.ChatMessage{
 				Role:       "tool",
 				Content:    result,
@@ -954,30 +843,23 @@ func (r *Runner) execToolLoop(ctx context.Context, resp *llm.ChatResponse, tools
 			})
 		}
 
-		printThink()
-		resp, err := r.llm.ChatWithTools(ctx, messages, tools)
-		if err != nil {
-			return nil, fmt.Errorf("llm call failed: %w", err)
-		}
-
-		if resp.Finish {
-			return resp, nil
-		}
-
 		printContinue()
 	}
 
-	// 达到最大迭代次数，让 LLM 做最终总结而不是直接报错。
+	// 达到最大迭代次数，让 LLM 做最终总结。
 	messages = append(messages, llm.ChatMessage{
 		Role:    "user",
 		Content: "你已经尝试了多次工具调用。请根据已有信息直接给出回答，不要再调用工具。",
 	})
 	finalResp, err := r.llm.ChatWithTools(ctx, messages, tools)
 	if err != nil {
-		return nil, fmt.Errorf("tool loop reached max iterations (%d)", maxIterations)
+		return "", fmt.Errorf("reached max iterations (%d) without final answer", maxIterations)
 	}
-	return finalResp, nil
+	return finalResp.Content, nil
 }
+
+
+
 
 // trimArgs 截断工具参数用于展示。
 func trimArgs(args string) string {
@@ -999,182 +881,9 @@ func toolCallSignature(calls []llm.ToolCall) string {
 	return strings.Join(parts, "|")
 }
 
-// summarizePhase 让 LLM 根据所有步骤的执行结果生成最终答案。
-func (r *Runner) summarizePhase(ctx context.Context, round int, contextDigest, userInput string, todos []TodoItem, doneSummaries []string) (string, error) {
-	todosText := formatTodoList(todos)
-	summariesText := "(无)"
-	if len(doneSummaries) > 0 {
-		summariesText = strings.Join(doneSummaries, "\n")
-	}
 
-	systemPrompt := fmt.Sprintf(`你是一个任务执行的汇总者。用户的任务已经通过多步骤计划执行完毕。
-请根据执行结果，给出简洁的最终回答。
 
-## 执行计划
-%s
 
-## 各步骤执行结果
-%s
-
-## 要求
-- 用中文回复
-- 如果有步骤失败，说明失败原因和影响
-- 给出完整的最终结果`, todosText, summariesText)
-
-	userPrompt := fmt.Sprintf("轮次: %d\n用户任务: %s\n\n请根据以上执行结果给出最终回答。", round, userInput)
-
-	result, err := r.llm.Chat(ctx, systemPrompt, userPrompt)
-	if err != nil {
-		// 汇总失败，降级为直接拼接结果。
-		return fmt.Sprintf("任务执行完毕：\n\n%s\n\n%s", todosText, summariesText), nil
-	}
-	return result, nil
-}
-
-// isDirectTask 判断步骤是否是"直接完成任务"类的简单指令（不需要工具调用）。
-func isDirectTask(content string) bool {
-	c := strings.TrimSpace(strings.ToLower(content))
-	directPatterns := []string{
-		"直接完成任务",
-		"直接回答",
-		"直接回复",
-		"直接输出",
-	}
-	for _, p := range directPatterns {
-		if strings.Contains(c, p) {
-			return true
-		}
-	}
-	return false
-}
-
-// formatTodoList 将 todo 列表格式化为可读文本。
-func formatTodoList(todos []TodoItem) string {
-	var lines []string
-	for _, t := range todos {
-		var icon string
-		switch t.Status {
-		case "done":
-			icon = "✅"
-		case "failed":
-			icon = "❌"
-		case "current":
-			icon = "👉"
-		default:
-			icon = "⬜"
-		}
-		lines = append(lines, fmt.Sprintf("%s %d. %s", icon, t.ID, t.Content))
-	}
-	return strings.Join(lines, "\n")
-}
-
-// reactLoop 保留作为降级方案，当规划阶段完全失败时使用。
-func (r *Runner) reactLoop(ctx context.Context, round int, userInput string) (string, error) {
-	systemPrompt := prompt.BuildReActSystemPrompt(r.tools.Descriptions())
-	contextDigest, err := r.retriever.BuildContext(userInput)
-	if err != nil {
-		contextDigest = r.history.Digest(10)
-	}
-	userPrompt := prompt.BuildReActUserPrompt(round, contextDigest, userInput)
-
-	messages := []llm.ChatMessage{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: userPrompt},
-	}
-	tools := r.tools.FunctionDefinitions()
-
-	resp, err := r.llm.ChatWithTools(ctx, messages, tools)
-	if err != nil {
-		return "", fmt.Errorf("llm call failed: %w", err)
-	}
-
-	if resp.Finish {
-		return resp.Content, nil
-	}
-
-	printReActStart()
-	for iter := 0; iter < maxIterations; iter++ {
-		messages = append(messages, llm.ChatMessage{
-			Role:      "assistant",
-			Content:   resp.Content,
-			ToolCalls: resp.ToolCalls,
-		})
-
-		// 记录工具调用事件。
-		toolCallEvents := make([]memory.ToolCallEvent, len(resp.ToolCalls))
-		for i, tc := range resp.ToolCalls {
-			toolCallEvents[i] = memory.ToolCallEvent{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
-		}
-		r.events.Append(memory.Event{
-			Type:      memory.EventToolUse,
-			Round:     round,
-			ToolCalls: toolCallEvents,
-		})
-
-		for i, tc := range resp.ToolCalls {
-			printToolCall(iter+1, i+1, len(resp.ToolCalls), tc.Name, tc.Arguments)
-
-			t := r.tools.Get(tc.Name)
-			if t == nil {
-				errMsg := fmt.Sprintf("未知工具: %s", tc.Name)
-				printToolResult(errMsg, true)
-				r.events.Append(memory.Event{
-					Type:       memory.EventToolResult,
-					ToolCallID: tc.ID,
-					ToolName:   tc.Name,
-					ToolResult: errMsg,
-					IsError:    true,
-				})
-				messages = append(messages, llm.ChatMessage{
-					Role:       "tool",
-					Content:    errMsg,
-					ToolCallID: tc.ID,
-				})
-				continue
-			}
-
-			result, execErr := t.Execute(tc.Arguments)
-			if execErr != nil {
-				printToolResult(fmt.Sprintf("%v", execErr), true)
-			} else {
-				printToolResult(result, false)
-			}
-
-			if execErr != nil {
-				result = fmt.Sprintf("工具执行出错: %v", execErr)
-			}
-
-			r.events.Append(memory.Event{
-				Type:       memory.EventToolResult,
-				ToolCallID: tc.ID,
-				ToolName:   tc.Name,
-				ToolResult: result,
-				IsError:    execErr != nil,
-			})
-
-			messages = append(messages, llm.ChatMessage{
-				Role:       "tool",
-				Content:    result,
-				ToolCallID: tc.ID,
-			})
-		}
-
-		printThink()
-		resp, err = r.llm.ChatWithTools(ctx, messages, tools)
-		if err != nil {
-			return "", fmt.Errorf("llm call failed: %w", err)
-		}
-
-		if resp.Finish {
-			printReActEnd(iter + 1)
-			return resp.Content, nil
-		}
-
-		printContinue()
-	}
-
-	return "", fmt.Errorf("reached max iterations (%d) without final answer", maxIterations)
-}
 
 // ──────────────────────────────────────────────────────────
 // 终端美化输出函数（Lip Gloss + Glamour）
@@ -1220,60 +929,6 @@ func printReActStart() {
 	fmt.Println(reActBoxStyle.Render(content))
 }
 
-// ──────────────────────────────────────────────────────────
-// Plan & Execute UI 函数
-// ──────────────────────────────────────────────────────────
-
-func printPlanStart() {
-	fmt.Println()
-	content := "📋 正在规划任务步骤..."
-	fmt.Println(planBoxStyle.Render(content))
-}
-
-func printPlan(todos []TodoItem) {
-	fmt.Println()
-	header := planBoxStyle.Render("📋 执行计划")
-	fmt.Println(header)
-	for _, t := range todos {
-		printTodoItem(t, false)
-	}
-	fmt.Println()
-}
-
-func printTodoItem(t TodoItem, showStatus bool) {
-	var icon string
-	var style lipgloss.Style
-	switch t.Status {
-	case "done":
-		icon = "✅"
-		style = todoDoneStyle
-	case "failed":
-		icon = "❌"
-		style = todoFailedStyle
-	case "current":
-		icon = "👉"
-		style = todoCurrentStyle
-	default:
-		icon = "⬜"
-		style = todoPendingStyle
-	}
-	fmt.Printf("  %s\n", style.Render(fmt.Sprintf("%s %d. %s", icon, t.ID, t.Content)))
-}
-
-func printTodoList(todos []TodoItem) {
-	fmt.Println()
-	header := todoCurrentStyle.Render("📋 当前进度")
-	fmt.Println(header)
-	for _, t := range todos {
-		printTodoItem(t, true)
-	}
-}
-
-func printExecToolStart(step int) {
-	fmt.Println()
-	content := fmt.Sprintf("🔧 步骤 %d 需要调用工具，进入执行循环...", step)
-	fmt.Println(reActBoxStyle.Render(content))
-}
 
 func printReActEnd(steps int) {
 	fmt.Println()

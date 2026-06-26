@@ -19,7 +19,6 @@ const (
 	EventAssistant    EventType = "assistant"     // 模型最终回答
 	EventToolUse      EventType = "tool_use"      // 工具调用请求
 	EventToolResult   EventType = "tool_result"   // 工具执行结果
-	EventPlan         EventType = "plan"          // 规划阶段的 todo 列表
 	EventSystem       EventType = "system"        // 系统命令（/new, /rename 等）
 	EventSessionStart EventType = "session_start" // 会话启动/恢复
 )
@@ -44,9 +43,6 @@ type Event struct {
 	ToolCallID  string `json:"toolCallId,omitempty"`
 	ToolName    string `json:"toolName,omitempty"`
 
-	// plan
-	Todos []TodoEvent `json:"todos,omitempty"`
-
 	// system
 	Command string `json:"command,omitempty"`
 
@@ -59,13 +55,6 @@ type ToolCallEvent struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
-}
-
-// TodoEvent 记录一个规划步骤。
-type TodoEvent struct {
-	ID      int    `json:"id"`
-	Content string `json:"content"`
-	Status  string `json:"status"`
 }
 
 // EventStore 负责全量事件日志的持久化。
