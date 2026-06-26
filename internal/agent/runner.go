@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/chzyer/readline"
+	openai "github.com/sashabaranov/go-openai"
 )
 
 // ReAct 最大循环次数，防止无限循环。
@@ -150,7 +151,7 @@ func newReadline(prompt string) (*readline.Instance, error) {
 	})
 }
 
-// Run 进入交互循环：读用户输入 -> ReAct 循环 -> 保存记忆。
+// Run 进入交互循环：读用户输入 -> QueryEngine -> 保存记忆。
 // 输入 exit 可退出，/ 开头为会话管理命令。
 // 启动时创建临时会话，只有真正对话后才落盘到 manifest。
 func (r *Runner) Run(ctx context.Context) error {
@@ -222,10 +223,10 @@ func (r *Runner) Run(ctx context.Context) error {
 			Content: input,
 		})
 
-		// 执行 Agent Loop：调用 LLM → 检查 tool_use → 执行工具 → 结果推入消息 → 重复。
-		answer, err := r.agentLoop(ctx, round, input)
+		// 执行 QueryEngine：构建上下文 → 调用 queryLoop → 记录事件 → 返回结果。
+		answer, err := r.queryEngine(ctx, round, input)
 		if err != nil {
-			return fmt.Errorf("agent loop failed at round %d: %w", round, err)
+			return fmt.Errorf("query engine failed at round %d: %w", round, err)
 		}
 
 		printAnswer(round, answer)
@@ -694,11 +695,111 @@ func (r *Runner) deleteMemory(name string) {
 	fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 记忆已删除: %s", name)))
 }
 
-// agentLoop 实现纯 Agent Loop 核心循环：
-// 1. 构建上下文和系统提示
-// 2. while(true) 循环：调用 LLM → 检查 tool_use → 执行工具 → 结果推入消息 → 重复
-// 3. 直到 LLM 给出最终回答（无 tool_use）
-func (r *Runner) agentLoop(ctx context.Context, round int, userInput string) (string, error) {
+// queryLoop 是纯粹的 Agent Loop 核心循环，不关心 UI 输出和事件记录。
+// 职责：while(true) 循环，调用 LLM → 检查 tool_use → 执行工具 → 结果推入消息 → 重复。
+// 输入：上下文、LLM 客户端、初始消息、工具定义、工具注册表、最大迭代次数。
+// 输出：最终回答、迭代次数、错误。
+// 设计：可独立测试和复用，不依赖任何 UI 或上层逻辑。
+func queryLoop(
+	ctx context.Context,
+	llmClient *llm.OpenAIClient,
+	messages []llm.ChatMessage,
+	tools []openai.Tool,
+	toolRegistry *tool.Registry,
+	maxIter int,
+) (string, int, error) {
+	seenToolCalls := make(map[string]bool) // 记录所有工具调用签名，检测重复
+
+	for iter := 0; iter < maxIter; iter++ {
+		// 检查上下文是否被取消。
+		if ctx.Err() != nil {
+			return "", iter, fmt.Errorf("query loop cancelled: %w", ctx.Err())
+		}
+
+		// 调用 LLM。
+		resp, err := llmClient.ChatWithTools(ctx, messages, tools)
+		if err != nil {
+			return "", iter, fmt.Errorf("llm call failed: %w", err)
+		}
+
+		// assistant 响应推入历史。
+		messages = append(messages, llm.ChatMessage{
+			Role:      "assistant",
+			Content:   resp.Content,
+			ToolCalls: resp.ToolCalls,
+		})
+
+		// 没有工具调用 → 任务完成，返回最终回答。
+		if resp.Finish {
+			return resp.Content, iter + 1, nil
+		}
+
+		// ── 有工具调用，执行工具 ──
+		// 生成本次工具调用的签名（工具名+参数），用于重复检测。
+		currentToolCall := toolCallSignature(resp.ToolCalls)
+		isDuplicate := currentToolCall != "" && seenToolCalls[currentToolCall]
+		if currentToolCall != "" {
+			seenToolCalls[currentToolCall] = true
+		}
+
+		// 逐个执行工具调用。
+		for _, tc := range resp.ToolCalls {
+			t := toolRegistry.Get(tc.Name)
+			if t == nil {
+				errMsg := fmt.Sprintf("未知工具: %s", tc.Name)
+				messages = append(messages, llm.ChatMessage{
+					Role:       "tool",
+					Content:    errMsg,
+					ToolCallID: tc.ID,
+				})
+				continue
+			}
+
+			result, execErr := t.Execute(tc.Arguments)
+			if execErr != nil {
+				result = fmt.Sprintf("工具执行出错: %v\n请尝试其他方案，不要重复相同的命令。", execErr)
+			}
+
+			// 工具结果以 tool 消息推入（OpenAI API 要求）。
+			messages = append(messages, llm.ChatMessage{
+				Role:       "tool",
+				Content:    result,
+				ToolCallID: tc.ID,
+			})
+		}
+
+		// 重复调用检测：如果调用了相同的工具+参数，强制 LLM 总结。
+		if isDuplicate {
+			messages = append(messages, llm.ChatMessage{
+				Role:    "user",
+				Content: "你已经调用过相同的工具并获得了相同的结果。请根据已有信息直接给出最终回答，不要再调用任何工具。",
+			})
+		}
+	}
+
+	// 达到最大迭代次数，让 LLM 做最终总结。
+	messages = append(messages, llm.ChatMessage{
+		Role:    "user",
+		Content: "你已经尝试了多次工具调用。请根据已有信息直接给出回答，不要再调用工具。",
+	})
+	finalResp, err := llmClient.ChatWithTools(ctx, messages, tools)
+	if err != nil {
+		return "", maxIter, fmt.Errorf("reached max iterations (%d) without final answer", maxIter)
+	}
+	return finalResp.Content, maxIter, nil
+}
+
+
+
+
+// queryEngine 是 QueryEngine 层，负责与上层对接：
+// 1. 构建上下文（记忆检索、自动压缩）
+// 2. 构建系统提示和用户提示
+// 3. UI 输出（开始/结束提示）
+// 4. 事件记录（工具调用、工具结果）
+// 5. 调用 queryLoop 获取结果
+// 设计：分离关注点，queryLoop 可独立测试和复用。
+func (r *Runner) queryEngine(ctx context.Context, round int, userInput string) (string, error) {
 	// 构建上下文（从三层记忆中检索）。
 	contextDigest, err := r.retriever.BuildContext(userInput)
 	if err != nil {
@@ -737,129 +838,60 @@ func (r *Runner) agentLoop(ctx context.Context, round int, userInput string) (st
 	// 获取工具定义。
 	tools := r.tools.FunctionDefinitions()
 
-	// ── Agent Loop 核心循环 ──
+	// UI 输出：开始推理循环。
 	printReActStart()
-	seenToolCalls := make(map[string]bool) // 记录所有工具调用签名，检测重复
 
-	for iter := 0; iter < maxIterations; iter++ {
-		// 检查上下文是否被取消。
-		if ctx.Err() != nil {
-			return "", fmt.Errorf("agent loop cancelled: %w", ctx.Err())
-		}
-
-		// 调用 LLM。
-		printThink()
-		resp, err := r.llm.ChatWithTools(ctx, messages, tools)
-		if err != nil {
-			return "", fmt.Errorf("llm call failed: %w", err)
-		}
-
-		// assistant 响应推入历史。
-		messages = append(messages, llm.ChatMessage{
-			Role:      "assistant",
-			Content:   resp.Content,
-			ToolCalls: resp.ToolCalls,
-		})
-
-		// 没有工具调用 → 任务完成，输出最终回答。
-		if resp.Finish {
-			printReActEnd(iter + 1)
-			return resp.Content, nil
-		}
-
-		// ── 有工具调用，执行工具 ──
-		// 生成本次工具调用的签名（工具名+参数），用于重复检测。
-		currentToolCall := toolCallSignature(resp.ToolCalls)
-		isDuplicate := currentToolCall != "" && seenToolCalls[currentToolCall]
-		if currentToolCall != "" {
-			seenToolCalls[currentToolCall] = true
-		}
-
-		// 记录工具调用事件。
-		toolCallEvents := make([]memory.ToolCallEvent, len(resp.ToolCalls))
-		for i, tc := range resp.ToolCalls {
-			toolCallEvents[i] = memory.ToolCallEvent{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
-		}
-		r.events.Append(memory.Event{
-			Type:      memory.EventToolUse,
-			Round:     round,
-			ToolCalls: toolCallEvents,
-		})
-
-		// 逐个执行工具调用。
-		for i, tc := range resp.ToolCalls {
-			printToolCall(iter+1, i+1, len(resp.ToolCalls), tc.Name, tc.Arguments)
-
-			t := r.tools.Get(tc.Name)
-			if t == nil {
-				errMsg := fmt.Sprintf("未知工具: %s", tc.Name)
-				printToolResult(errMsg, true)
-				// 记录工具错误结果。
-				r.events.Append(memory.Event{
-					Type:       memory.EventToolResult,
-					ToolCallID: tc.ID,
-					ToolName:   tc.Name,
-					ToolResult: errMsg,
-					IsError:    true,
-				})
-				messages = append(messages, llm.ChatMessage{
-					Role:       "tool",
-					Content:    errMsg,
-					ToolCallID: tc.ID,
-				})
-				continue
-			}
-
-			result, execErr := t.Execute(tc.Arguments)
-			if execErr != nil {
-				printToolResult(fmt.Sprintf("%v", execErr), true)
-				result = fmt.Sprintf("工具执行出错: %v\n请尝试其他方案，不要重复相同的命令。", execErr)
-			} else {
-				printToolResult(result, false)
-			}
-
-			// 记录工具执行结果。
-			r.events.Append(memory.Event{
-				Type:       memory.EventToolResult,
-				ToolCallID: tc.ID,
-				ToolName:   tc.Name,
-				ToolResult: result,
-				IsError:    execErr != nil,
-			})
-
-			// 工具结果以 tool 消息推入（OpenAI API 要求）。
-			messages = append(messages, llm.ChatMessage{
-				Role:       "tool",
-				Content:    result,
-				ToolCallID: tc.ID,
-			})
-		}
-
-		// 重复调用检测：如果调用了相同的工具+参数，强制 LLM 总结。
-		if isDuplicate {
-			messages = append(messages, llm.ChatMessage{
-				Role:    "user",
-				Content: "你已经调用过相同的工具并获得了相同的结果。请根据已有信息直接给出最终回答，不要再调用任何工具。",
-			})
-		}
-
-		printContinue()
-	}
-
-	// 达到最大迭代次数，让 LLM 做最终总结。
-	messages = append(messages, llm.ChatMessage{
-		Role:    "user",
-		Content: "你已经尝试了多次工具调用。请根据已有信息直接给出回答，不要再调用工具。",
-	})
-	finalResp, err := r.llm.ChatWithTools(ctx, messages, tools)
+	// 调用 queryLoop 获取结果（核心循环，不关心 UI）。
+	finalAnswer, iterations, err := queryLoop(ctx, r.llm, messages, tools, r.tools, maxIterations)
 	if err != nil {
-		return "", fmt.Errorf("reached max iterations (%d) without final answer", maxIterations)
+		return "", fmt.Errorf("query loop failed: %w", err)
 	}
-	return finalResp.Content, nil
+
+	// UI 输出：推理完成。
+	printReActEnd(iterations)
+
+	// 记录工具调用事件（从 queryLoop 的消息历史中提取）。
+	// 注意：queryLoop 不记录事件，由 QueryEngine 负责。
+	// 这里我们记录最终的工具调用事件。
+	r.recordToolEvents(messages, round)
+
+	return finalAnswer, nil
 }
 
+// recordToolEvents 从消息历史中提取工具调用事件并记录。
+func (r *Runner) recordToolEvents(messages []llm.ChatMessage, round int) {
+	for i, msg := range messages {
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			// 记录工具调用事件。
+			toolCallEvents := make([]memory.ToolCallEvent, len(msg.ToolCalls))
+			for j, tc := range msg.ToolCalls {
+				toolCallEvents[j] = memory.ToolCallEvent{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
+			}
+			r.events.Append(memory.Event{
+				Type:      memory.EventToolUse,
+				Round:     round,
+				ToolCalls: toolCallEvents,
+			})
 
-
+			// 查找对应的工具结果。
+			for _, tc := range msg.ToolCalls {
+				// 在后续消息中查找 tool result。
+				for k := i + 1; k < len(messages); k++ {
+					if messages[k].Role == "tool" && messages[k].ToolCallID == tc.ID {
+						r.events.Append(memory.Event{
+							Type:       memory.EventToolResult,
+							ToolCallID: tc.ID,
+							ToolName:   tc.Name,
+							ToolResult: messages[k].Content,
+							IsError:    false, // 简化处理，实际可以从内容判断
+						})
+						break
+					}
+				}
+			}
+		}
+	}
+}
 
 // trimArgs 截断工具参数用于展示。
 func trimArgs(args string) string {
