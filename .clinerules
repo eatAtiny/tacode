@@ -1,0 +1,396 @@
+# Go 代码编写规范
+
+## 📏 函数设计原则
+
+### 1. 单一职责原则（SRP）
+每个函数只做一件事，做好一件事。
+
+```go
+// ❌ 错误：一个函数做太多事情
+func processUser(input string) {
+    // 验证输入
+    // 查询数据库
+    // 调用外部 API
+    // 更新缓存
+    // 发送通知
+}
+
+// ✅ 正确：拆分为多个小函数
+func validateInput(input string) error { ... }
+func queryUser(id string) (*User, error) { ... }
+func callExternalAPI(user *User) error { ... }
+func updateCache(user *User) error { ... }
+func sendNotification(user *User) error { ... }
+```
+
+### 2. 函数长度限制
+- **目标**：20-50 行
+- **上限**：80 行（超过必须拆分）
+- **例外**：简单的 switch/case 或数据表可以更长
+
+```go
+// ❌ 错误：200 行的大函数
+func queryLoop(...) <-chan QueryEvent {
+    // 200 行代码...
+}
+
+// ✅ 正确：拆分为多个小函数
+func queryLoop(...) <-chan QueryEvent {
+    // 20 行主逻辑
+    checkAndCompressContext(...)
+    result := callLLMStream(...)
+    processStreamEvents(...)
+    executeToolCalls(...)
+}
+```
+
+### 3. 嵌套层级限制
+- **目标**：2-3 层
+- **上限**：4 层（超过必须重构）
+
+```go
+// ❌ 错误：嵌套太深
+func process(data interface{}) {
+    if condition1 {
+        for _, item := range items {
+            if condition2 {
+                switch item.Type {
+                case "A":
+                    // 第 5 层嵌套
+                }
+            }
+        }
+    }
+}
+
+// ✅ 正确：使用 early return 减少嵌套
+func process(data interface{}) {
+    if !condition1 {
+        return
+    }
+    for _, item := range items {
+        if !condition2 {
+            continue
+        }
+        processItem(item)
+    }
+}
+
+func processItem(item Item) {
+    switch item.Type {
+    case "A":
+        // 第 2 层嵌套
+    }
+}
+```
+
+## 📝 命名规范
+
+### 1. 变量命名
+```go
+// 驼峰命名法
+userName := "John"
+maxRetryCount := 3
+
+// 缩写词保持大写
+userID := "123"      // ✅
+httpClient := &http.Client{}  // ✅
+
+// 布尔变量用 is/has/can 前缀
+isActive := true
+hasPermission := false
+canExecute := true
+```
+
+### 2. 函数命名
+```go
+// 动词 + 名词
+func getUserByID(id string) (*User, error) { ... }
+func validateInput(input string) error { ... }
+func processMessage(msg Message) error { ... }
+
+// 返回布尔值用 Is/Has/Can
+func IsValid(email string) bool { ... }
+func HasPermission(user User, resource string) bool { ... }
+func CanExecute(action string) bool { ... }
+```
+
+### 3. 常量命名
+```go
+// 单个常量
+const defaultTimeout = 30 * time.Second
+
+// 常量组
+const (
+    StatusActive   = "active"
+    StatusInactive = "inactive"
+    StatusDeleted  = "deleted"
+)
+```
+
+## 📚 注释规范
+
+### 1. 包注释
+```go
+// Package agent 实现了 AI Agent 的核心循环逻辑。
+//
+// 主要功能：
+//   - queryLoop: 异步生成器模式的核心循环
+//   - queryEngine: 上层协调器
+//   - checkToolPermission: 权限检查
+package agent
+```
+
+### 2. 导出函数注释
+```go
+// queryLoop 是纯粹的 Agent Loop 核心循环，使用异步生成器模式。
+//
+// 职责：
+//   - while(true) 循环，调用 LLM → 检查 tool_use → 执行工具 → 结果推入消息 → 重复
+//   - 通过 channel yield 中间事件（思考、工具调用、工具结果等）
+//   - 直到 LLM 给出最终回答（无 tool_use）或达到最大迭代次数
+//
+// 参数：
+//   - ctx: 上下文，用于取消和超时控制
+//   - llmClient: LLM 客户端，用于调用模型
+//   - messages: 初始消息数组
+//
+// 返回：
+//   - <-chan QueryEvent: 只读 channel，上层可以读取中间事件
+//
+// 使用示例：
+//
+//	eventChan := queryLoop(ctx, llm, messages, tools, registry, 10, 128000)
+//	for event := range eventChan {
+//	    switch event.Type {
+//	    case QueryEventThink:
+//	        fmt.Println("思考中...")
+//	    }
+//	}
+func queryLoop(...) <-chan QueryEvent { ... }
+```
+
+### 3. 行内注释
+```go
+// ❌ 错误：注释显而易见
+i++ // 递增 i
+
+// ✅ 正确：解释为什么
+// 使用索引而不是 ID，因为流式响应中后续分片的 ID 可能为空
+idx := *tc.Index
+
+// ✅ 正确：解释复杂逻辑
+// 压缩策略：保留最近 2 轮的工具调用，压缩更早的
+// 这样既保证了 LLM 能看到最近的上下文，又控制了 token 用量
+```
+
+## 🔧 错误处理
+
+### 1. 错误检查
+```go
+// ❌ 错误：忽略错误
+result, _ := doSomething()
+
+// ✅ 正确：检查并处理错误
+result, err := doSomething()
+if err != nil {
+    return fmt.Errorf("do something failed: %w", err)
+}
+```
+
+### 2. 错误包装
+```go
+// ❌ 错误：丢失错误上下文
+if err != nil {
+    return err
+}
+
+// ✅ 正确：添加上下文
+if err != nil {
+    return fmt.Errorf("query user failed: %w", err)
+}
+```
+
+### 3. 错误返回位置
+```go
+// ❌ 错误：在循环中直接返回错误
+for _, item := range items {
+    if err := process(item); err != nil {
+        return err
+    }
+}
+
+// ✅ 正确：收集错误，统一处理
+var errs []error
+for _, item := range items {
+    if err := process(item); err != nil {
+        errs = append(errs, err)
+    }
+}
+if len(errs) > 0 {
+    return errors.Join(errs...)
+}
+```
+
+## 🏗️ 文件组织
+
+### 1. 文件长度
+- **目标**：200-300 行
+- **上限**：500 行（超过必须拆分）
+
+### 2. 文件职责
+每个文件应该有明确的职责：
+
+```
+agent/
+├── types.go           # 类型定义
+├── query_loop.go      # 核心循环
+├── query_engine.go    # 上层协调
+├── permission.go      # 权限检查
+├── ui.go              # UI 输出
+├── session.go         # 会话管理
+└── memory.go          # 记忆管理
+```
+
+### 3. 函数顺序
+```go
+// 1. 包级别的常量和变量
+const maxIterations = 10
+
+// 2. 类型定义
+type QueryEvent struct { ... }
+
+// 3. 构造函数
+func NewRunner(...) *Runner { ... }
+
+// 4. 公开方法
+func (r *Runner) Run(ctx context.Context) error { ... }
+
+// 5. 私有方法
+func (r *Runner) queryEngine(...) (string, error) { ... }
+
+// 6. 辅助函数
+func toolCallSignature(...) string { ... }
+```
+
+## 🧪 测试规范
+
+### 1. 测试文件命名
+```
+query_loop.go      → query_loop_test.go
+permission.go      → permission_test.go
+```
+
+### 2. 测试函数命名
+```go
+func TestQueryLoop_SimpleConversation(t *testing.T) { ... }
+func TestQueryLoop_ToolCall(t *testing.T) { ... }
+func TestQueryLoop_ErrorHandling(t *testing.T) { ... }
+```
+
+### 3. 表驱动测试
+```go
+func TestCheckPermission(t *testing.T) {
+    tests := []struct {
+        name     string
+        toolName string
+        args     string
+        want     PermissionAction
+    }{
+        {
+            name:     "shell command needs confirm",
+            toolName: "shell",
+            args:     `{"command": "ls"}`,
+            want:     PermissionConfirm,
+        },
+        {
+            name:     "read file is allowed",
+            toolName: "file",
+            args:     `{"action": "read"}`,
+            want:     PermissionAllow,
+        },
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            got := checkToolPermission(tt.toolName, tt.args)
+            if got.Action != tt.want {
+                t.Errorf("got %v, want %v", got.Action, tt.want)
+            }
+        })
+    }
+}
+```
+
+## 📦 依赖管理
+
+### 1. 导入分组
+```go
+import (
+    // 标准库
+    "context"
+    "fmt"
+    "strings"
+
+    // 第三方库
+    "github.com/sashabaranov/go-openai"
+
+    // 项目内部包
+    "agentic/internal/llm"
+    "agentic/internal/memory"
+    "agentic/internal/tool"
+)
+```
+
+### 2. 循环依赖
+- 严禁循环依赖
+- 使用接口解耦
+- 提取公共包
+
+## 🎯 性能优化
+
+### 1. 预分配容量
+```go
+// ❌ 错误：多次扩容
+var items []string
+for _, item := range data {
+    items = append(items, item)
+}
+
+// ✅ 正确：预分配容量
+items := make([]string, 0, len(data))
+for _, item := range data {
+    items = append(items, item)
+}
+```
+
+### 2. 避免重复计算
+```go
+// ❌ 错误：循环中重复计算
+for i := 0; i < len(items); i++ {
+    result := expensiveFunction(items[i]) // 每次迭代都调用
+}
+
+// ✅ 正确：缓存结果
+cache := make(map[string]Result)
+for i := 0; i < len(items); i++ {
+    if cached, ok := cache[items[i]]; ok {
+        result = cached
+    } else {
+        result = expensiveFunction(items[i])
+        cache[items[i]] = result
+    }
+}
+```
+
+## 📋 代码审查清单
+
+- [ ] 函数是否遵循单一职责原则？
+- [ ] 函数长度是否在 80 行以内？
+- [ ] 嵌套层级是否在 4 层以内？
+- [ ] 命名是否清晰易懂？
+- [ ] 是否有充分的文档注释？
+- [ ] 错误处理是否完善？
+- [ ] 是否有重复代码？
+- [ ] 是否有性能问题？
+- [ ] 是否有测试覆盖？
