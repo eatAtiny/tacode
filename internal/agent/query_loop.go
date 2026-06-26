@@ -140,8 +140,16 @@ func queryLoop(
 			for streamEvent := range streamChan {
 				switch streamEvent.Type {
 				case llm.StreamEventDelta:
-					// 增量文本，累加到 fullContent。
+					// 增量文本，累加到 fullContent 并流式传递给上层。
 					fullContent += streamEvent.Content
+					// yield: 增量文本（上层可以实时显示）。
+					events <- QueryEvent{
+						Type:         QueryEventDelta,
+						Content:      streamEvent.Content,
+						Iteration:    iter + 1,
+						InputTokens:  streamEvent.InputTokens,
+						OutputTokens: streamEvent.OutputTokens,
+					}
 
 				case llm.StreamEventDone:
 					// 完成，保存工具调用和 token 信息。

@@ -98,6 +98,10 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string) (
 			// LLM 思考中，显示 loading 动画。
 			printThink()
 
+		case QueryEventDelta:
+			// 增量文本，实时显示（流式输出）。
+			printDelta(event.Content)
+
 		case QueryEventToolCall:
 			// 工具调用请求，记录事件并显示 UI。
 			toolCallEvents := make([]memory.ToolCallEvent, len(event.ToolCalls))

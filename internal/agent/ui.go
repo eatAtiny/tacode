@@ -154,6 +154,12 @@ func printContinue() {
 	fmt.Printf("\n  %s\n", thinkStyle.Render("🔄 继续推理..."))
 }
 
+// printDelta 打印增量文本（流式输出）。
+// 直接输出到终端，实现真正的流式显示。
+func printDelta(content string) {
+	fmt.Print(content)
+}
+
 // printToolCall 打印工具调用信息，包含标题、参数。
 func printToolCall(step, index, total int, name, args string) {
 	// 标题行

@@ -14,6 +14,7 @@ type QueryEventType string
 
 const (
 	QueryEventThink      QueryEventType = "think"       // LLM 思考中
+	QueryEventDelta      QueryEventType = "delta"       // 增量文本（流式输出）
 	QueryEventToolCall   QueryEventType = "tool_call"   // 工具调用请求
 	QueryEventToolResult QueryEventType = "tool_result" // 工具执行结果
 	QueryEventContinue   QueryEventType = "continue"    // 继续推理
