@@ -37,4 +37,9 @@ type QueryEvent struct {
 	IsError   bool           // 是否是错误（tool_result 类型）
 	Iteration int            // 当前迭代次数（从 1 开始）
 	Error     error          // 错误信息（error 类型）
+
+	// Token 追踪
+	InputTokens  int // 本次调用的输入 token 数
+	OutputTokens int // 本次调用的输出 token 数
+	TotalTokens  int // 累计总 token 数
 }

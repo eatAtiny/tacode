@@ -93,6 +93,8 @@ func queryLoop(
 		defer close(events) // 循环结束时关闭 channel。
 
 		seenToolCalls := make(map[string]bool) // 记录所有工具调用签名，用于重复检测。
+		totalInputTokens := 0                  // 累计输入 token 数
+		totalOutputTokens := 0                 // 累计输出 token 数
 
 		// ── 核心循环：while(true) ──
 		for iter := 0; iter < maxIter; iter++ {
@@ -126,30 +128,62 @@ func queryLoop(
 				Iteration: iter + 1,
 			}
 
-			// 调用 LLM，获取响应。
-			resp, err := llmClient.ChatWithTools(ctx, messages, tools)
-			if err != nil {
-				events <- QueryEvent{
-					Type:    QueryEventError,
-					Content: "llm call failed",
-					Error:   err,
+			// 使用流式调用 LLM。
+			streamChan := llmClient.ChatWithToolsStream(ctx, messages, tools)
+
+			// 收集流式响应。
+			var fullContent string
+			var toolCalls []llm.ToolCall
+			var inputTokens, outputTokens int
+
+			// 读取流式事件。
+			for streamEvent := range streamChan {
+				switch streamEvent.Type {
+				case llm.StreamEventDelta:
+					// 增量文本，累加到 fullContent。
+					fullContent += streamEvent.Content
+
+				case llm.StreamEventDone:
+					// 完成，保存工具调用和 token 信息。
+					toolCalls = streamEvent.ToolCalls
+					inputTokens = streamEvent.InputTokens
+					outputTokens = streamEvent.OutputTokens
+					// 如果有文本内容，累加到 fullContent。
+					if streamEvent.Content != "" {
+						fullContent = streamEvent.Content
+					}
+
+				case llm.StreamEventError:
+					// 错误。
+					events <- QueryEvent{
+						Type:    QueryEventError,
+						Content: "stream error",
+						Error:   streamEvent.Error,
+					}
+					return
 				}
-				return
 			}
+
+			// 累计 token 用量。
+			totalInputTokens += inputTokens
+			totalOutputTokens += outputTokens
 
 			// assistant 响应推入消息历史。
 			messages = append(messages, llm.ChatMessage{
 				Role:      "assistant",
-				Content:   resp.Content,
-				ToolCalls: resp.ToolCalls,
+				Content:   fullContent,
+				ToolCalls: toolCalls,
 			})
 
 			// 没有工具调用 → 任务完成，yield 最终回答。
-			if resp.Finish {
+			if len(toolCalls) == 0 {
 				events <- QueryEvent{
-					Type:      QueryEventFinal,
-					Content:   resp.Content,
-					Iteration: iter + 1,
+					Type:         QueryEventFinal,
+					Content:      fullContent,
+					Iteration:    iter + 1,
+					InputTokens:  totalInputTokens,
+					OutputTokens: totalOutputTokens,
+					TotalTokens:  totalInputTokens + totalOutputTokens,
 				}
 				return
 			}
@@ -158,20 +192,52 @@ func queryLoop(
 
 			// yield: 工具调用请求（上层可以显示工具调用 UI）。
 			events <- QueryEvent{
-				Type:      QueryEventToolCall,
-				ToolCalls: resp.ToolCalls,
-				Iteration: iter + 1,
+				Type:         QueryEventToolCall,
+				ToolCalls:    toolCalls,
+				Iteration:    iter + 1,
+				InputTokens:  inputTokens,
+				OutputTokens: outputTokens,
+				TotalTokens:  totalInputTokens + totalOutputTokens,
 			}
 
 			// 生成本次工具调用的签名（工具名+参数），用于重复检测。
-			currentToolCall := toolCallSignature(resp.ToolCalls)
+			currentToolCall := toolCallSignature(toolCalls)
 			isDuplicate := currentToolCall != "" && seenToolCalls[currentToolCall]
 			if currentToolCall != "" {
 				seenToolCalls[currentToolCall] = true
 			}
 
 			// 逐个执行工具调用。
-			for _, tc := range resp.ToolCalls {
+			for _, tc := range toolCalls {
+				// 权限检查（留好扩展接口）。
+				permResult := checkToolPermission(tc.Name, tc.Arguments)
+				if permResult.Action == "deny" {
+					// 权限拒绝，返回错误信息。
+					errMsg := fmt.Sprintf("权限拒绝: %s", permResult.Message)
+					events <- QueryEvent{
+						Type:       QueryEventToolResult,
+						ToolName:   tc.Name,
+						ToolResult: errMsg,
+						IsError:    true,
+						Iteration:  iter + 1,
+					}
+					messages = append(messages, llm.ChatMessage{
+						Role:       "tool",
+						Content:    errMsg,
+						ToolCallID: tc.ID,
+					})
+					continue
+				}
+				if permResult.Action == "confirm" {
+					// 需要用户确认（留好扩展接口，后续可通知上层 UI）。
+					// 目前暂时直接允许。
+					events <- QueryEvent{
+						Type:      QueryEventThink,
+						Content:   fmt.Sprintf("⚠️ 工具 %s 需要确认，暂时允许执行", tc.Name),
+						Iteration: iter + 1,
+					}
+				}
+
 				// 查找工具。
 				t := toolRegistry.Get(tc.Name)
 				if t == nil {
@@ -226,8 +292,11 @@ func queryLoop(
 
 			// yield: 继续推理（上层可以显示继续动画）。
 			events <- QueryEvent{
-				Type:      QueryEventContinue,
-				Iteration: iter + 1,
+				Type:         QueryEventContinue,
+				Iteration:    iter + 1,
+				InputTokens:  totalInputTokens,
+				OutputTokens: totalOutputTokens,
+				TotalTokens:  totalInputTokens + totalOutputTokens,
 			}
 		}
 
@@ -236,19 +305,40 @@ func queryLoop(
 			Role:    "user",
 			Content: "你已经尝试了多次工具调用。请根据已有信息直接给出回答，不要再调用工具。",
 		})
-		finalResp, err := llmClient.ChatWithTools(ctx, messages, tools)
-		if err != nil {
-			events <- QueryEvent{
-				Type:    QueryEventError,
-				Content: fmt.Sprintf("reached max iterations (%d) without final answer", maxIter),
-				Error:   err,
+
+		// 使用流式调用获取最终回答。
+		streamChan := llmClient.ChatWithToolsStream(ctx, messages, tools)
+		var finalContent string
+		var finalInputTokens, finalOutputTokens int
+
+		for streamEvent := range streamChan {
+			switch streamEvent.Type {
+			case llm.StreamEventDelta:
+				finalContent += streamEvent.Content
+			case llm.StreamEventDone:
+				finalInputTokens = streamEvent.InputTokens
+				finalOutputTokens = streamEvent.OutputTokens
+			case llm.StreamEventError:
+				events <- QueryEvent{
+					Type:    QueryEventError,
+					Content: fmt.Sprintf("reached max iterations (%d) without final answer", maxIter),
+					Error:   streamEvent.Error,
+				}
+				return
 			}
-			return
 		}
+
+		// 累计 token 用量。
+		totalInputTokens += finalInputTokens
+		totalOutputTokens += finalOutputTokens
+
 		events <- QueryEvent{
-			Type:      QueryEventFinal,
-			Content:   finalResp.Content,
-			Iteration: maxIter,
+			Type:         QueryEventFinal,
+			Content:      finalContent,
+			Iteration:    maxIter,
+			InputTokens:  totalInputTokens,
+			OutputTokens: totalOutputTokens,
+			TotalTokens:  totalInputTokens + totalOutputTokens,
 		}
 	}()
 
