@@ -3,12 +3,17 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"agentic/internal/llm"
+	"agentic/internal/memory"
 	"agentic/internal/tool"
 
 	openai "github.com/sashabaranov/go-openai"
 )
+
+// 压缩阈值：token 使用率超过 80% 触发压缩。
+const compressThreshold = 0.8
 
 // ──────────────────────────────────────────────────────────
 // queryLoop 核心循环（异步生成器模式）
@@ -20,6 +25,7 @@ import (
 //   - while(true) 循环，调用 LLM → 检查 tool_use → 执行工具 → 结果推入消息 → 重复
 //   - 通过 channel yield 中间事件（思考、工具调用、工具结果等）
 //   - 直到 LLM 给出最终回答（无 tool_use）或达到最大迭代次数
+//   - 自动检查 token 用量，接近上限时压缩旧的工具调用消息
 //
 // 设计：
 //   - 返回一个只读 channel，上层可以实时读取中间事件
@@ -34,6 +40,7 @@ import (
 //   - tools: 工具定义列表（OpenAI function calling 格式）
 //   - toolRegistry: 工具注册表，用于查找和执行工具
 //   - maxIter: 最大迭代次数，防止无限循环
+//   - contextLimit: 模型的上下文窗口大小（token 数），用于压缩检查
 //
 // 返回：
 //   - <-chan QueryEvent: 只读 channel，上层可以读取中间事件
@@ -46,9 +53,15 @@ import (
 //   - final: 最终回答（包含 Content 字段）
 //   - error: 错误（包含 Error 字段）
 //
+// 压缩机制：
+//   - 每次迭代检查 token 用量
+//   - 当使用率超过 80% 时，压缩早期的工具调用消息
+//   - 保留最近 2 轮的工具调用，压缩更早的
+//   - 压缩后的消息只保留工具名称和成功/失败状态
+//
 // 使用示例：
 //
-//	eventChan := queryLoop(ctx, llm, messages, tools, registry, 10)
+//	eventChan := queryLoop(ctx, llm, messages, tools, registry, 10, 128000)
 //	for event := range eventChan {
 //	    switch event.Type {
 //	    case QueryEventThink:
@@ -70,6 +83,7 @@ func queryLoop(
 	tools []openai.Tool,
 	toolRegistry *tool.Registry,
 	maxIter int,
+	contextLimit int,
 ) <-chan QueryEvent {
 	// 创建事件 channel，用于传递中间状态。
 	events := make(chan QueryEvent)
@@ -82,6 +96,20 @@ func queryLoop(
 
 		// ── 核心循环：while(true) ──
 		for iter := 0; iter < maxIter; iter++ {
+			// 检查 token 用量，接近上限时压缩旧的工具调用消息。
+			if contextLimit > 0 {
+				totalTokens := estimateMessagesTokens(messages)
+				usageRatio := float64(totalTokens) / float64(contextLimit)
+				if usageRatio > compressThreshold {
+					// yield: 压缩事件（上层可以显示压缩提示）。
+					events <- QueryEvent{
+						Type:      QueryEventThink,
+						Content:   "🗜️ 上下文接近上限，正在压缩...",
+						Iteration: iter + 1,
+					}
+					messages = compressMessages(messages, iter)
+				}
+			}
 			// 检查上下文是否被取消（用户中断或超时）。
 			if ctx.Err() != nil {
 				events <- QueryEvent{
@@ -225,4 +253,94 @@ func queryLoop(
 	}()
 
 	return events
+}
+
+// estimateMessagesTokens 估算消息数组的 token 数。
+//
+// 计算方式：
+//   - 遍历所有消息，拼接内容
+//   - 使用 memory.EstimateTokens 估算
+//
+// 参数：
+//   - messages: 消息数组
+//
+// 返回：
+//   - int: 估算的 token 数
+func estimateMessagesTokens(messages []llm.ChatMessage) int {
+	var totalContent string
+	for _, msg := range messages {
+		totalContent += msg.Content
+		for _, tc := range msg.ToolCalls {
+			totalContent += tc.Name + tc.Arguments
+		}
+	}
+	return memory.EstimateTokens(totalContent)
+}
+
+// compressMessages 压缩旧的工具调用消息，减少 token 用量。
+//
+// 策略：
+//   - 保留 system prompt（第 0 条）
+//   - 保留最近 2 轮的工具调用（完整保留）
+//   - 压缩更早的工具调用（只保留摘要）
+//   - 压缩后的消息格式："[已压缩] 工具: xxx, 结果: 成功/失败"
+//
+// 参数：
+//   - messages: 原始消息数组
+//   - currentIter: 当前迭代次数
+//
+// 返回：
+//   - []llm.ChatMessage: 压缩后的消息数组
+func compressMessages(messages []llm.ChatMessage, currentIter int) []llm.ChatMessage {
+	if len(messages) <= 3 {
+		return messages // 消息太少，不需要压缩
+	}
+
+	// 找到需要压缩的消息范围。
+	// 保留：system prompt + 最近 2 轮的工具调用（4 条消息：assistant + tool + assistant + tool）
+	// 压缩：更早的工具调用
+	compressEnd := len(messages) - 4 // 保留最后 4 条消息
+	if compressEnd < 1 {
+		compressEnd = 1
+	}
+
+	// 创建压缩后的消息数组。
+	compressed := make([]llm.ChatMessage, 0, len(messages))
+	compressed = append(compressed, messages[0]) // 保留 system prompt
+
+	// 压缩早期的工具调用消息。
+	for i := 1; i < compressEnd; i++ {
+		msg := messages[i]
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			// 压缩 assistant 的工具调用消息。
+			toolNames := make([]string, len(msg.ToolCalls))
+			for j, tc := range msg.ToolCalls {
+				toolNames[j] = tc.Name
+			}
+			compressed = append(compressed, llm.ChatMessage{
+				Role:    "assistant",
+				Content: fmt.Sprintf("[已压缩] 调用工具: %s", strings.Join(toolNames, ", ")),
+			})
+		} else if msg.Role == "tool" {
+			// 压缩工具结果消息。
+			isSuccess := !strings.Contains(msg.Content, "出错") && !strings.Contains(msg.Content, "错误")
+			status := "成功"
+			if !isSuccess {
+				status = "失败"
+			}
+			compressed = append(compressed, llm.ChatMessage{
+				Role:       "tool",
+				Content:    fmt.Sprintf("[已压缩] 工具执行%s", status),
+				ToolCallID: msg.ToolCallID,
+			})
+		} else {
+			// 其他消息保留原样。
+			compressed = append(compressed, msg)
+		}
+	}
+
+	// 保留最近的工具调用消息（完整保留）。
+	compressed = append(compressed, messages[compressEnd:]...)
+
+	return compressed
 }

@@ -85,7 +85,8 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string) (
 
 	// ── 步骤 4: 调用 queryLoop 获取事件 channel ──
 	printReActStart() // UI 输出：开始推理循环。
-	eventChan := queryLoop(ctx, r.llm, messages, tools, r.tools, maxIterations)
+	contextLimit := r.llm.ContextLimit()
+	eventChan := queryLoop(ctx, r.llm, messages, tools, r.tools, maxIterations, contextLimit)
 
 	// ── 步骤 5: 从 channel 实时读取事件并处理 ──
 	var finalAnswer string
