@@ -45,19 +45,30 @@ func (m *ToolViewModel) Init() tea.Cmd {
 func (m *ToolViewModel) Update(msg tea.Msg) (*ToolViewModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
+		if m.confirming {
+			switch msg.String() {
+			case "left", "right", "tab":
+				m.ConfirmToggle()
+			case "enter":
+				m.ConfirmSelection()
+			case "q", "esc":
+				m.Close()
 			}
-		case "down", "j":
-			if m.cursor < len(m.tools)-1 {
-				m.cursor++
+		} else {
+			switch msg.String() {
+			case "up", "k":
+				if m.cursor > 0 {
+					m.cursor--
+				}
+			case "down", "j":
+				if m.cursor < len(m.tools)-1 {
+					m.cursor++
+				}
+			case "enter":
+				// 展开详情（TODO: 弹出详情子弹窗）
+			case "q", "esc":
+				m.Close()
 			}
-		case "enter":
-			// 展开详情（TODO: 弹出详情子弹窗）
-		case "q", "esc":
-			m.Close()
 		}
 	}
 	return m, nil
@@ -102,14 +113,14 @@ func (m *ToolViewModel) View() string {
 
 		// 截断 args
 		args := tool.args
-		if len(args) > 30 {
-			args = args[:27] + "..."
+		if len([]rune(args)) > 30 {
+			args = string([]rune(args)[:27]) + "..."
 		}
 
 		// 截断 result
 		result := tool.result
-		if len(result) > 20 {
-			result = result[:17] + "..."
+		if len([]rune(result)) > 20 {
+			result = string([]rune(result)[:17]) + "..."
 		}
 
 		line := fmt.Sprintf("%s🔧 %-20s %-30s %s %s",
