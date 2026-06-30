@@ -13,6 +13,7 @@ import (
 	"agentic/internal/memory"
 	"agentic/internal/session"
 	"agentic/internal/tool"
+	"agentic/internal/ui"
 )
 
 // loadEnvFile 从 .env 文件加载环境变量。
@@ -121,8 +122,11 @@ func main() {
 	tools.Register(tool.NewShellTool())
 	tools.Register(tool.NewFileTool())
 
+	// 创建 UI 实例（第一版用 TextUI，后续替换为 BubbleUI）。
+	uiInstance := ui.NewTextUI()
+
 	// 启动 ReAct agent 循环。
-	runner := agent.NewRunner(client, history, summary, memStore, events, extractor, retriever, tools, sessions)
+	runner := agent.NewRunner(client, history, summary, memStore, events, extractor, retriever, tools, sessions, uiInstance)
 	if err := runner.Run(context.Background()); err != nil {
 		fmt.Fprintf(os.Stderr, "agent run failed: %v\n", err)
 		os.Exit(1)
