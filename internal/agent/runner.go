@@ -3,15 +3,13 @@ package agent
 import (
 	"context"
 	"fmt"
-	"io"
 	"strings"
 
 	"agentic/internal/llm"
 	"agentic/internal/memory"
 	"agentic/internal/session"
 	"agentic/internal/tool"
-
-	"github.com/chzyer/readline"
+	"agentic/internal/ui"
 )
 
 // ReAct 最大循环次数，防止无限循环。
@@ -42,6 +40,7 @@ type Runner struct {
 	retriever *memory.Retriever       // 记忆检索器
 	tools     *tool.Registry          // 工具注册表
 	sessions  *session.SessionManager // 会话管理器
+	ui        ui.UI                   // UI 接口
 
 	isTemporary        bool   // 临时会话：启动时创建，有对话后才落盘
 	tempID             string // 临时会话 ID
@@ -60,6 +59,7 @@ type Runner struct {
 //   - retriever: 记忆检索器
 //   - tools: 工具注册表
 //   - sessions: 会话管理器
+//   - uiInstance: UI 接口
 func NewRunner(
 	client *llm.OpenAIClient,
 	history *memory.HistoryStore,
@@ -70,6 +70,7 @@ func NewRunner(
 	retriever *memory.Retriever,
 	tools *tool.Registry,
 	sessions *session.SessionManager,
+	uiInstance ui.UI,
 ) *Runner {
 	return &Runner{
 		llm:       client,
@@ -81,14 +82,8 @@ func NewRunner(
 		retriever: retriever,
 		tools:     tools,
 		sessions:  sessions,
+		ui:        uiInstance,
 	}
-}
-
-// newReadline 创建一个 readline 实例，用于逐行读取输入。
-func newReadline(prompt string) (*readline.Instance, error) {
-	return readline.NewEx(&readline.Config{
-		Prompt: prompt,
-	})
 }
 
 // Run 进入交互循环：读用户输入 -> QueryEngine -> 保存记忆。
@@ -109,8 +104,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	printBanner(r.sessions)
 	printSessionHint()
 
-	// 启动时使用临时会话：生成临时 ID，只设置路径，不创建目录。
-	// 目录在首次对话写入时惰性创建，无对话则不留痕迹。
+	// 启动临时会话（逻辑不变）
 	r.isTemporary = true
 	tempID, err := session.GenerateID()
 	if err != nil {
@@ -122,25 +116,15 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.summary.SetPath(tempDir)
 	r.memStore.SetPath(tempDir)
 	r.events.SetPath(tempDir)
-
-	// 清理上次异常退出留下的孤立临时目录。
 	r.cleanOrphanTempDirs()
 
-	rl, err := newReadline("")
-	if err != nil {
-		return fmt.Errorf("init readline failed: %w", err)
-	}
-	defer rl.Close()
-
+	// 移除 readline 初始化，使用 UI 接口
 	for round := 1; ; round++ {
-		rl.SetPrompt(promptStyle.Render(fmt.Sprintf("[Round %d] You> ", round)))
-		input, err := rl.Readline()
-		if err == readline.ErrInterrupt || err == io.EOF {
+		input, err := r.ui.ReadInput()
+		if err != nil {
+			// Ctrl+C 或 EOF
 			fmt.Printf("\n%s\n", mutedStyle.Render("Agent stopped by user."))
 			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read input failed: %w", err)
 		}
 
 		input = strings.TrimSpace(input)
@@ -152,29 +136,28 @@ func (r *Runner) Run(ctx context.Context) error {
 			return nil
 		}
 
-		// 处理会话管理斜杠命令。
+		// 处理会话管理斜杠命令（不变）
 		if strings.HasPrefix(input, "/") {
 			newRound, handled := r.handleSessionCommand(input)
 			if handled {
 				if newRound > 0 {
-					round = newRound - 1 // -1 因为 for 循环末尾会 ++
+					round = newRound - 1
 				}
 				continue
 			}
-			// 不是已知命令，提示用户
 			fmt.Printf("\n%s\n", errorStyle.Render("未知命令，可用: /new, /list, /switch, /delete, /rename, /current, /compress, /memory"))
-			round-- // 不消耗轮次
+			round--
 			continue
 		}
 
-		// 记录用户输入事件。
+		// 记录用户输入事件（不变）
 		r.events.Append(memory.Event{
 			Type:    memory.EventUser,
 			Round:   round,
 			Content: input,
 		})
 
-		// 执行 QueryEngine：构建上下文 → 调用 queryLoop → 记录事件 → 返回结果。
+		// 执行 QueryEngine（不变）
 		answer, err := r.queryEngine(ctx, round, input)
 		if err != nil {
 			return fmt.Errorf("query engine failed at round %d: %w", round, err)
@@ -182,7 +165,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 		printAnswer(round, answer)
 
-		// 记录模型回答事件。
+		// 记录模型回答事件（不变）
 		r.events.Append(memory.Event{
 			Type:    memory.EventAssistant,
 			Round:   round,
@@ -190,16 +173,12 @@ func (r *Runner) Run(ctx context.Context) error {
 			Model:   r.llm.Model(),
 		})
 
-		// ── 保存记忆（三层） ──
-		// L1: 原始对话日志（兼容保留）。
+		// 保存记忆（不变）
 		if err := r.history.Append(round, input, answer); err != nil {
 			return fmt.Errorf("save history failed at round %d: %w", round, err)
 		}
-
-		// L2 + L3: LLM 提取摘要和记忆。
 		r.extractMemory(ctx, round, input, answer)
 
-		// 首次对话后，将临时会话持久化到 manifest。
 		if r.isTemporary {
 			if err := r.ensurePersisted(); err != nil {
 				fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("保存会话失败: %v", err)))
