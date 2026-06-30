@@ -120,6 +120,12 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	// 移除 readline 初始化，使用 UI 接口
 	for round := 1; ; round++ {
+		// 更新 UI 元数据
+		if b, ok := r.ui.(*ui.BubbleUI); ok {
+			b.SetModel(r.llm.Model())
+			b.ResetTokens() // 重置本轮 token
+		}
+
 		input, err := r.ui.ReadInput()
 		if err != nil {
 			// Ctrl+C 或 EOF

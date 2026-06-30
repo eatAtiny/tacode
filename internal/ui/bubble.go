@@ -321,3 +321,10 @@ func (b *BubbleUI) UpdateTokens(input, output int) {
 	b.outputTokens += output
 	b.status.SetTokens(b.inputTokens, b.outputTokens)
 }
+
+// ResetTokens 重置本轮 token 计数并更新状态栏显示。
+func (b *BubbleUI) ResetTokens() {
+	b.inputTokens = 0
+	b.outputTokens = 0
+	b.status.SetTokens(0, 0)
+}
