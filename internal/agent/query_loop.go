@@ -354,15 +354,24 @@ func (lc *queryLoopContext) checkToolPermission(tc llm.ToolCall, iter int) bool 
 	}
 
 	if permResult.Action == "confirm" {
-		// TODO: 实现用户确认回调，通知上层 UI 等待用户决策
-		// 目前暂时直接允许，后续需要：
-		// 1. yield 一个 ConfirmEvent 给上层
-		// 2. 等待上层返回用户决策
-		// 3. 根据用户决策继续或取消
+		// yield 权限确认事件，等待上层返回结果
+		ch := make(chan bool, 1)
 		lc.events <- QueryEvent{
-			Type:      QueryEventThink,
-			Content:   fmt.Sprintf("⚠️ 工具 %s 需要确认，暂时允许执行", tc.Name),
-			Iteration: iter + 1,
+			Type:               QueryEventPermission,
+			PermissionRequired: true,
+			PermissionTool:     tc.Name,
+			PermissionArgs:     tc.Arguments,
+			PermissionReason:   permResult.Message,
+			PermissionCh:       ch,
+			Iteration:          iter + 1,
+		}
+
+		// 阻塞等待用户确认
+		approved := <-ch
+		if !approved {
+			errMsg := "用户拒绝执行"
+			lc.yieldToolError(tc, errMsg, iter)
+			return false
 		}
 	}
 
