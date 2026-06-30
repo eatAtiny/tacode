@@ -20,9 +20,9 @@ const (
 	QueryEventContinue   QueryEventType = "continue"    // 继续推理
 	QueryEventFinal      QueryEventType = "final"       // 最终回答
 	QueryEventError      QueryEventType = "error"       // 错误
+	QueryEventPermission QueryEventType = "permission"  // 权限确认请求
 
 	// TODO: 添加更多事件类型
-	// QueryEventConfirm   QueryEventType = "confirm"   // 用户确认请求
 	// QueryEventProgress  QueryEventType = "progress"  // 进度更新
 	// QueryEventCost      QueryEventType = "cost"      // 费用统计
 )
@@ -48,6 +48,13 @@ type QueryEvent struct {
 	InputTokens  int // 本次调用的输入 token 数
 	OutputTokens int // 本次调用的输出 token 数
 	TotalTokens  int // 累计总 token 数
+
+	// 权限请求（PermissionRequired 为 true 时有效）
+	PermissionRequired bool     // 是否需要权限确认
+	PermissionTool     string   // 需要确认的工具名
+	PermissionArgs     string   // 工具参数
+	PermissionReason   string   // 需要确认的原因
+	PermissionCh       chan bool // 上层写入确认结果
 
 	// TODO: 添加更多字段
 	// Duration    time.Duration  // 执行耗时
