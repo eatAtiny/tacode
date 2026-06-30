@@ -138,9 +138,10 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string) (
 			r.ui.OnContinue(event.Iteration)
 
 		case QueryEventFinal:
-			// 最终回答，保存结果。
+			// 最终回答，保存结果并通知 UI。
 			finalAnswer = event.Content
 			finalIteration = event.Iteration
+			r.ui.OnFinal(finalAnswer)
 
 		case QueryEventError:
 			// 错误，通知 UI 并返回错误信息。

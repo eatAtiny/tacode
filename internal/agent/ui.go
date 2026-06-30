@@ -137,13 +137,6 @@ func printReActStart() {
 	fmt.Println(reActBoxStyle.Render(content))
 }
 
-// printReActEnd 打印推理循环结束提示。
-func printReActEnd(steps int) {
-	fmt.Println()
-	content := successStyle.Render(fmt.Sprintf("✅ 推理完成，共 %d 步", steps))
-	fmt.Println(reActDoneBoxStyle.Render(content))
-}
-
 // printThink 打印思考中提示。
 func printThink() {
 	fmt.Printf("\n  %s\n", thinkStyle.Render("💭 思考中..."))
