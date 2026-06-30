@@ -84,7 +84,7 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string) (
 	tools := r.tools.FunctionDefinitions()
 
 	// ── 步骤 4: 调用 queryLoop 获取事件 channel ──
-	printReActStart() // UI 输出：开始推理循环。
+	r.ui.OnThink(0) // 通知开始推理
 	contextLimit := r.llm.ContextLimit()
 	eventChan := queryLoop(ctx, r.llm, messages, tools, r.tools, maxIterations, contextLimit)
 
@@ -95,15 +95,13 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string) (
 	for event := range eventChan {
 		switch event.Type {
 		case QueryEventThink:
-			// LLM 思考中，显示 loading 动画。
-			printThink()
+			r.ui.OnThink(event.Iteration)
 
 		case QueryEventDelta:
-			// 增量文本，实时显示（流式输出）。
-			printDelta(event.Content)
+			r.ui.OnDelta(event.Content)
 
 		case QueryEventToolCall:
-			// 工具调用请求，记录事件并显示 UI。
+			// 工具调用请求，记录事件并通知 UI。
 			toolCallEvents := make([]memory.ToolCallEvent, len(event.ToolCalls))
 			for i, tc := range event.ToolCalls {
 				toolCallEvents[i] = memory.ToolCallEvent{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
@@ -113,26 +111,31 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string) (
 				Round:     round,
 				ToolCalls: toolCallEvents,
 			})
-			// UI 输出：显示工具调用。
-			for i, tc := range event.ToolCalls {
-				printToolCall(event.Iteration, i+1, len(event.ToolCalls), tc.Name, tc.Arguments)
+			// 通知 UI 显示工具调用。
+			for _, tc := range event.ToolCalls {
+				r.ui.OnToolCall(tc.Name, tc.Arguments)
 			}
 
 		case QueryEventToolResult:
-			// 工具执行结果，记录事件并显示 UI。
+			// 工具执行结果，记录事件并通知 UI。
 			r.events.Append(memory.Event{
 				Type:       memory.EventToolResult,
-				ToolCallID: "", // 简化处理，实际可以从 tool_call 事件中关联
+				ToolCallID: "",
 				ToolName:   event.ToolName,
 				ToolResult: event.ToolResult,
 				IsError:    event.IsError,
 			})
-			// UI 输出：显示工具结果。
-			printToolResult(event.ToolResult, event.IsError)
+			r.ui.OnToolResult(event.ToolName, event.ToolResult, event.IsError)
+
+		case QueryEventPermission:
+			// 权限确认：调用 UI，结果写回 channel。
+			approved, _ := r.ui.ConfirmPermission(event.PermissionTool, event.PermissionArgs)
+			if event.PermissionCh != nil {
+				event.PermissionCh <- approved
+			}
 
 		case QueryEventContinue:
-			// 继续推理，显示继续动画。
-			printContinue()
+			r.ui.OnContinue(event.Iteration)
 
 		case QueryEventFinal:
 			// 最终回答，保存结果。
@@ -140,13 +143,13 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string) (
 			finalIteration = event.Iteration
 
 		case QueryEventError:
-			// 错误，返回错误信息。
+			// 错误，通知 UI 并返回错误信息。
+			r.ui.OnError(event.Error)
 			return "", fmt.Errorf("query loop error: %w", event.Error)
 		}
 	}
 
-	// ── 步骤 6: UI 输出：推理完成 ──
-	printReActEnd(finalIteration)
-
+	// ── 步骤 6: 返回最终结果 ──
+	_ = finalIteration
 	return finalAnswer, nil
 }
