@@ -5,7 +5,30 @@
       "Bash(go build *)",
       "Bash(go get *)",
       "Bash(git init *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git remote *)",
+      "Bash(git push *)",
+      "Bash(ssh-keygen *)",
+      "Read(//home/ubuntu/.claude/**)",
+      "Read(//home/ubuntu/.agents/skills/**)",
+      "Bash(cc-switch skills *)",
+      "Bash(rm -f /home/ubuntu/.agents/skills/agent-browser /home/ubuntu/.agents/skills/find-skills)",
+      "Bash(rm -f ~/.claude/skills/agent-browser ~/.claude/skills/find-skills)",
+      "Bash(git config *)",
+      "Bash(env)",
+      "Bash(timeout 15 curl -sI https://github.com)",
+      "Bash(timeout 15 git ls-remote --heads https://ghproxy.net/https://github.com/vercel-labs/skills.git)",
+      "Bash(timeout 15 git ls-remote --heads https://ghfast.top/https://github.com/vercel-labs/skills.git)",
+      "Bash(timeout 15 git ls-remote --heads https://gh-proxy.com/https://github.com/vercel-labs/skills.git)",
+      "WebSearch",
+      "Bash(go mod *)",
+      "Bash(go vet *)",
+      "Bash(CLAUDE_CODE_AUTO_UPDATE=0 claude --version)",
+      "Bash(curl *)",
+      "Bash(go run *)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 -c \"import sys,json; [print\\(json.dumps\\(json.loads\\(line\\), indent=2, ensure_ascii=False\\)[:2000]\\) for line in sys.stdin]\")"
     ]
   }
 }
