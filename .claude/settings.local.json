@@ -28,7 +28,16 @@
       "Bash(curl *)",
       "Bash(go run *)",
       "Bash(python3 -m json.tool)",
-      "Bash(python3 -c \"import sys,json; [print\\(json.dumps\\(json.loads\\(line\\), indent=2, ensure_ascii=False\\)[:2000]\\) for line in sys.stdin]\")"
+      "Bash(python3 -c \"import sys,json; [print\\(json.dumps\\(json.loads\\(line\\), indent=2, ensure_ascii=False\\)[:2000]\\) for line in sys.stdin]\")",
+      "Bash(npx skills *)",
+      "Bash(~/.agents/skills/subagent-driven-development/scripts/task-brief *)",
+      "Bash(git *)",
+      "Bash(~/.agents/skills/subagent-driven-development/scripts/review-package 217056b *)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(~/.agents/skills/subagent-driven-development/scripts/review-package 7b5fa95 *)",
+      "Bash(~/.agents/skills/subagent-driven-development/scripts/review-package *)",
+      "Bash(go list *)",
+      "Bash(go test *)"
     ]
   }
 }

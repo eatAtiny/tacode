@@ -2,6 +2,9 @@ package ui
 
 import (
 	"fmt"
+
+	"agentic/internal/ui/components"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -37,10 +40,10 @@ type BubbleUI struct {
 	program *tea.Program
 
 	// 子组件
-	conversation *ConversationModel
-	input        *InputModel
-	status       *StatusModel
-	toolView     *ToolViewModel
+	conversation *components.ConversationModel
+	input        components.InputModel
+	status       components.StatusModel
+	toolView     *components.ToolViewModel
 
 	// 状态
 	waitingInput bool
@@ -61,10 +64,10 @@ type BubbleUI struct {
 // NewBubbleUI 创建 BubbleUI 实例。
 func NewBubbleUI() *BubbleUI {
 	b := &BubbleUI{
-		conversation: NewConversationModel(),
-		input:        NewInputModel(),
-		status:       NewStatusModel(),
-		toolView:     NewToolViewModel(),
+		conversation: components.NewConversationModel(),
+		input:        components.NewInputModel(),
+		status:       components.NewStatusModel(),
+		toolView:     components.NewToolViewModel(),
 		confirmCh:    make(chan bool, 1),
 		inputCh:      make(chan string, 1),
 	}

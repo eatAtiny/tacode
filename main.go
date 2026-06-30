@@ -122,8 +122,8 @@ func main() {
 	tools.Register(tool.NewShellTool())
 	tools.Register(tool.NewFileTool())
 
-	// 创建 UI 实例（第一版用 TextUI，后续替换为 BubbleUI）。
-	uiInstance := ui.NewTextUI()
+	// 创建 UI 实例（使用 BubbleUI）。
+	uiInstance := ui.NewBubbleUI()
 
 	// 启动 ReAct agent 循环。
 	runner := agent.NewRunner(client, history, summary, memStore, events, extractor, retriever, tools, sessions, uiInstance)
