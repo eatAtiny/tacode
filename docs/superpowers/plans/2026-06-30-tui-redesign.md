@@ -666,7 +666,11 @@ git commit -m "refactor: main.go 创建 UI 实例并传入 Runner
 // internal/ui/styles.go
 package ui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 // ──────────────────────────────────────────────────────────
 // TUI 样式定义
@@ -1130,6 +1134,8 @@ git commit -m "feat(ui): 添加 BubbleUI 核心模型框架
 package components
 
 import (
+	"strings"
+
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
