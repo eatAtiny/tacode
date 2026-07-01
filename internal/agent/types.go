@@ -4,6 +4,12 @@ import (
 	"agentic/internal/llm"
 )
 
+// queryResult 异步查询结果。
+type queryResult struct {
+	answer string
+	err    error
+}
+
 // ──────────────────────────────────────────────────────────
 // QueryEvent 异步生成器事件类型
 // ──────────────────────────────────────────────────────────

@@ -6,6 +6,10 @@ type UI interface {
 	// ReadInput 读取用户输入，阻塞直到用户按下 Enter。
 	ReadInput() (string, error)
 
+	// ReadInputChan 返回一个只读 channel，后台持续读取用户输入。
+	// 首次调用启动后台 goroutine，后续调用返回同一个 channel。
+	ReadInputChan() <-chan string
+
 	// OnThink 通知 LLM 正在思考。
 	OnThink(iteration int)
 
@@ -32,7 +36,11 @@ type UI interface {
 
 	// ConfirmPermission 请求用户确认权限。
 	// 返回 true 表示允许，false 表示拒绝。
-	ConfirmPermission(tool, args string) (bool, error)
+	// inputForward 不为 nil 时从此 channel 读取用户输入。
+	ConfirmPermission(tool, args string, inputForward <-chan string) (bool, error)
+
+	// Welcome 打印启动欢迎信息。
+	Welcome(model string)
 
 	// Close 关闭 UI，释放资源。
 	Close() error

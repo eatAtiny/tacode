@@ -52,8 +52,6 @@ func (r *Runner) extractMemory(ctx context.Context, round int, userInput, assist
 			}
 			if err := r.memStore.SaveEntry(entry); err != nil {
 				r.ui.OnMessage(fmt.Sprintf("⚠️ 保存记忆失败: %v", err))
-			} else {
-				r.ui.OnMessage(fmt.Sprintf("💾 记忆已保存: %s", action.Description))
 			}
 		case "delete":
 			if err := r.memStore.DeleteEntry(action.Name); err != nil {

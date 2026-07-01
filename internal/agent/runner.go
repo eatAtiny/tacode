@@ -91,17 +91,14 @@ func NewRunner(
 // 流程：
 //  1. 打印启动横幅和会话提示
 //  2. 初始化临时会话
-//  3. 进入主循环：
-//     - 读取用户输入
-//     - 处理会话管理命令（/ 开头）
-//     - 调用 QueryEngine 执行任务
-//     - 保存记忆（三层）
-//     - 首次对话后持久化临时会话
+//  3. 进入主循环（channel select 模式）：
+//     - 从 inputCh 读取用户输入
+//     - 从 queryResultCh 读取查询结果
+//     - 查询运行中输入 /stop 可取消
 //
-// 输入 exit 可退出，/ 开头为会话管理命令。
 // 启动时创建临时会话，只有真正对话后才落盘到 manifest。
 func (r *Runner) Run(ctx context.Context) error {
-	// 启动临时会话（逻辑不变）
+	// 启动临时会话
 	r.isTemporary = true
 	tempID, err := session.GenerateID()
 	if err != nil {
@@ -121,77 +118,147 @@ func (r *Runner) Run(ctx context.Context) error {
 		b.SetModel(r.llm.Model())
 	}
 
-	// 移除 readline 初始化，使用 UI 接口
-	for round := 1; ; round++ {
-		// 更新 UI 元数据
-		if b, ok := r.ui.(*ui.BubbleUI); ok {
-			b.ResetTokens() // 重置本轮 token
-		}
+	// 显示欢迎信息
+	r.ui.Welcome(r.llm.Model())
 
-		input, err := r.ui.ReadInput()
-		if err != nil {
-			// Ctrl+C 或 EOF
-			return nil
-		}
+	// 启动异步输入读取
+	inputCh := r.ui.ReadInputChan()
 
-		input = strings.TrimSpace(input)
-		if input == "" {
-			continue
-		}
-		if strings.EqualFold(input, "exit") {
-			return nil
-		}
+	// 查询状态
+	var queryResultCh <-chan queryResult
+	var queryCancel context.CancelFunc
+	var queryRunning bool
+	var round int
+	var currentInput string    // 当前查询的用户输入，用于保存记忆
+	var inputForward chan string // 查询期间转发输入到此 channel（权限确认等）
 
-		// 处理会话管理斜杠命令（不变）
-		if strings.HasPrefix(input, "/") {
-			newRound, handled := r.handleSessionCommand(input)
-			if handled {
-				if newRound > 0 {
-					round = newRound - 1
+	// 显示初始提示符
+	fmt.Print("> ")
+
+	for {
+		select {
+		case input, ok := <-inputCh:
+			if !ok {
+				// EOF，退出。
+				if queryRunning {
+					queryCancel()
+				}
+				return nil
+			}
+
+			if input == "" {
+				if !queryRunning {
+					fmt.Print("> ")
 				}
 				continue
 			}
-			r.ui.OnError(fmt.Errorf("未知命令，可用: /new, /list, /switch, /delete, /rename, /current, /compress, /memory"))
-			round--
-			continue
-		}
 
-		// 记录用户输入事件（不变）
-		r.events.Append(memory.Event{
-			Type:    memory.EventUser,
-			Round:   round,
-			Content: input,
-		})
-
-		// 执行 QueryEngine（不变）
-		answer, err := r.queryEngine(ctx, round, input)
-		if err != nil {
-			return fmt.Errorf("query engine failed at round %d: %w", round, err)
-		}
-
-		// 记录模型回答事件（不变）
-		r.events.Append(memory.Event{
-			Type:    memory.EventAssistant,
-			Round:   round,
-			Content: answer,
-			Model:   r.llm.Model(),
-		})
-
-		// 保存记忆（后台执行，不阻塞下一轮输入）
-		go func() {
-			if err := r.history.Append(round, input, answer); err != nil {
-				r.ui.OnError(fmt.Errorf("save history failed at round %d: %w", round, err))
-				return
-			}
-			r.extractMemory(ctx, round, input, answer)
-
-			if r.isTemporary {
-				if err := r.ensurePersisted(); err != nil {
-					r.ui.OnError(fmt.Errorf("保存会话失败: %v", err))
+			if strings.EqualFold(input, "exit") {
+				if queryRunning {
+					queryCancel()
 				}
+				return nil
 			}
-		}()
+
+			// 查询运行中：转发输入到 query 侧（/stop 优先）
+			if queryRunning {
+				if input == "/stop" {
+					queryCancel()
+					queryRunning = false
+					inputForward = nil
+					r.ui.OnMessage("⏹️  已停止")
+					round++
+					fmt.Print("> ")
+				} else if inputForward != nil {
+					// 转发给 query 侧（权限确认等场景）
+					inputForward <- input
+				}
+				continue
+			}
+
+			// 空闲状态：处理输入
+			if strings.HasPrefix(input, "/") {
+				newRound, handled := r.handleSessionCommand(input)
+				if handled {
+					if newRound > 0 {
+						round = newRound - 1
+					}
+				} else {
+					r.ui.OnError(fmt.Errorf("未知命令，可用: /new, /list, /switch, /delete, /rename, /current, /compress, /memory"))
+				}
+				round++
+				fmt.Print("> ")
+				continue
+			}
+
+			// 普通输入：启动异步查询
+			round++
+			if b, ok := r.ui.(*ui.BubbleUI); ok {
+				b.ResetTokens()
+			}
+
+			r.events.Append(memory.Event{
+				Type:    memory.EventUser,
+				Round:   round,
+				Content: input,
+			})
+
+			queryCtx, cancel := context.WithCancel(ctx)
+			queryCancel = cancel
+			queryRunning = true
+			currentInput = input
+			inputForward = make(chan string, 1)
+
+			queryResultCh = r.runQueryAsync(queryCtx, round, input, inputForward)
+
+		case result, ok := <-queryResultCh:
+			if !ok {
+				queryResultCh = nil
+				continue
+			}
+
+			queryRunning = false
+			queryResultCh = nil
+			inputForward = nil
+
+			if result.err != nil {
+				r.ui.OnError(result.err)
+			} else {
+				r.events.Append(memory.Event{
+					Type:    memory.EventAssistant,
+					Round:   round,
+					Content: result.answer,
+					Model:   r.llm.Model(),
+				})
+
+				// 保存记忆（后台执行）
+				go func(round int, input, answer string) {
+					if err := r.history.Append(round, input, answer); err != nil {
+						r.ui.OnError(fmt.Errorf("save history failed at round %d: %w", round, err))
+						return
+					}
+					r.extractMemory(ctx, round, input, answer)
+					if r.isTemporary {
+						if err := r.ensurePersisted(); err != nil {
+							r.ui.OnError(fmt.Errorf("保存会话失败: %v", err))
+						}
+					}
+				}(round, currentInput, result.answer)
+			}
+
+			fmt.Print("> ")
+		}
 	}
+}
+
+// runQueryAsync 在后台 goroutine 中执行查询，返回结果 channel。
+func (r *Runner) runQueryAsync(ctx context.Context, round int, input string, inputForward <-chan string) <-chan queryResult {
+	ch := make(chan queryResult, 1)
+	go func() {
+		answer, err := r.queryEngine(ctx, round, input, inputForward)
+		ch <- queryResult{answer: answer, err: err}
+	}()
+	return ch
 }
 
 // handleListCommand 处理 /list 命令，管理 Pause/Resume 生命周期。

@@ -19,6 +19,12 @@ func (t *TextUI) ReadInput() (string, error) {
 	return "", fmt.Errorf("TextUI: ReadInput not implemented")
 }
 
+func (t *TextUI) ReadInputChan() <-chan string {
+	ch := make(chan string)
+	close(ch)
+	return ch
+}
+
 func (t *TextUI) OnThink(iteration int) {
 	if t.OnEvent != nil {
 		t.OnEvent("think", iteration)
@@ -67,7 +73,11 @@ func (t *TextUI) OnMessage(msg string) {
 	}
 }
 
-func (t *TextUI) ConfirmPermission(tool, args string) (bool, error) {
+func (t *TextUI) Welcome(model string) {
+	// 子 agent 模式不输出欢迎信息。
+}
+
+func (t *TextUI) ConfirmPermission(tool, args string, inputForward <-chan string) (bool, error) {
 	if t.OnEvent != nil {
 		t.OnEvent("permission", map[string]string{"tool": tool, "args": args})
 	}

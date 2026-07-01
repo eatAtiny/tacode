@@ -43,7 +43,7 @@ import (
 //  4. 调用 queryLoop 获取事件 channel
 //  5. 从 channel 实时读取事件并处理
 //  6. 返回最终回答
-func (r *Runner) queryEngine(ctx context.Context, round int, userInput string) (string, error) {
+func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, inputForward <-chan string) (string, error) {
 	// ── 步骤 1: 构建上下文（从三层记忆中检索） ──
 	contextDigest, err := r.retriever.BuildContext(userInput)
 	if err != nil {
@@ -128,7 +128,7 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string) (
 
 		case QueryEventPermission:
 			// 权限确认：调用 UI，结果写回 channel。
-			approved, _ := r.ui.ConfirmPermission(event.PermissionTool, event.PermissionArgs)
+			approved, _ := r.ui.ConfirmPermission(event.PermissionTool, event.PermissionArgs, inputForward)
 			if event.PermissionCh != nil {
 				event.PermissionCh <- approved
 			}
