@@ -124,11 +124,12 @@ func main() {
 
 	// 创建 UI 实例（使用 BubbleUI）。
 	uiInstance := ui.NewBubbleUI()
+	defer uiInstance.Close() // 确保退出时恢复终端状态
 
 	// 启动 ReAct agent 循环。
 	runner := agent.NewRunner(client, history, summary, memStore, events, extractor, retriever, tools, sessions, uiInstance)
 	if err := runner.Run(context.Background()); err != nil {
 		fmt.Fprintf(os.Stderr, "agent run failed: %v\n", err)
-		os.Exit(1)
+		// 不用 os.Exit(1)，让 defer Close() 执行以恢复终端状态
 	}
 }

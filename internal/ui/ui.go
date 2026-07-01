@@ -27,6 +27,9 @@ type UI interface {
 	// OnError 通知错误。
 	OnError(err error)
 
+	// OnMessage 输出一般性消息（成功提示、帮助信息等）。
+	OnMessage(msg string)
+
 	// ConfirmPermission 请求用户确认权限。
 	// 返回 true 表示允许，false 表示拒绝。
 	ConfirmPermission(tool, args string) (bool, error)

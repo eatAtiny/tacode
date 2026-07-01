@@ -61,6 +61,12 @@ func (t *TextUI) OnError(err error) {
 	}
 }
 
+func (t *TextUI) OnMessage(msg string) {
+	if t.OnEvent != nil {
+		t.OnEvent("message", msg)
+	}
+}
+
 func (t *TextUI) ConfirmPermission(tool, args string) (bool, error) {
 	if t.OnEvent != nil {
 		t.OnEvent("permission", map[string]string{"tool": tool, "args": args})

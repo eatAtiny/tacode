@@ -28,25 +28,25 @@ func (r *Runner) switchSession() {
 func (r *Runner) printSessionHistory() {
 	events, err := r.events.ReadAll()
 	if err != nil || len(events) == 0 {
-		fmt.Printf("\n%s\n", mutedStyle.Render("  (无历史记录)"))
+		r.ui.OnMessage("  (无历史记录)")
 		return
 	}
 
 	// 按轮次分组展示 user 和 assistant 事件。
-	fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("  📜 共 %d 条事件:", len(events))))
+	r.ui.OnMessage(fmt.Sprintf("  📜 共 %d 条事件:", len(events)))
 	currentRound := 0
 	for _, e := range events {
 		switch e.Type {
 		case memory.EventUser:
 			if e.Round != currentRound {
 				currentRound = e.Round
-				fmt.Printf("  %s\n", mutedStyle.Render(fmt.Sprintf("Round %d:", e.Round)))
+				r.ui.OnMessage(fmt.Sprintf("  Round %d:", e.Round))
 			}
 			userLine := e.Content
 			if len([]rune(userLine)) > 60 {
 				userLine = string([]rune(userLine)[:60]) + "..."
 			}
-			fmt.Printf("    %s\n", promptStyle.Render("You> ")+userLine)
+			r.ui.OnMessage(fmt.Sprintf("    You> %s", userLine))
 		case memory.EventAssistant:
 			assistantLine := e.Content
 			if idx := strings.IndexByte(assistantLine, '\n'); idx >= 0 {
@@ -55,10 +55,10 @@ func (r *Runner) printSessionHistory() {
 			if len([]rune(assistantLine)) > 80 {
 				assistantLine = string([]rune(assistantLine)[:80]) + "..."
 			}
-			fmt.Printf("    %s\n", answerLabelStyle.Render("Agent> ")+assistantLine)
+			r.ui.OnMessage(fmt.Sprintf("    Agent> %s", assistantLine))
 		case memory.EventToolUse:
 			for _, tc := range e.ToolCalls {
-				fmt.Printf("    %s\n", mutedStyle.Render(fmt.Sprintf("🔧 %s(%s)", tc.Name, trimArgs(tc.Arguments))))
+				r.ui.OnMessage(fmt.Sprintf("    🔧 %s(%s)", tc.Name, trimArgs(tc.Arguments)))
 			}
 		}
 	}
@@ -89,7 +89,7 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 			os.RemoveAll(r.sessions.SessionDir(r.tempID))
 			newTempID, err := session.GenerateID()
 			if err != nil {
-				fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("生成会话 ID 失败: %v", err)))
+				r.ui.OnError(fmt.Errorf("生成会话 ID 失败: %v", err))
 				return 0, true
 			}
 			r.tempID = newTempID
@@ -104,12 +104,12 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 			if name != "" {
 				displayName = name
 			}
-			fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 已切换到新会话: %s（对话后自动保存）", displayName)))
+			r.ui.OnMessage(fmt.Sprintf("✅ 已切换到新会话: %s（对话后自动保存）", displayName))
 			return 1, true
 		}
 		id, err := r.sessions.Create(name)
 		if err != nil {
-			fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("创建会话失败: %v", err)))
+			r.ui.OnError(fmt.Errorf("创建会话失败: %v", err))
 			return 0, true
 		}
 		r.switchSession()
@@ -118,43 +118,20 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 		if meta != nil {
 			displayName = meta.Name
 		}
-		fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 已创建并切换到新会话: %s", displayName)))
+		r.ui.OnMessage(fmt.Sprintf("✅ 已创建并切换到新会话: %s", displayName))
 		return 1, true
 
 	case "/list":
-		selected, err := session.RunSessionPicker(r.sessions.List(), r.sessions.ActiveID())
-		if err != nil {
-			fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("选择器错误: %v", err)))
-			return 0, true
-		}
-		if selected == "" {
-			// 用户取消
-			return 0, true
-		}
-		// 用户选中了一个会话，执行切换
-		if err := r.sessions.Switch(selected); err != nil {
-			fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("切换失败: %v", err)))
-			return 0, true
-		}
-		r.isTemporary = false // 切换到已持久化会话
-		r.switchSession()
-		meta := r.sessions.FindMeta(r.sessions.ActiveID())
-		displayName := r.sessions.ActiveID()
-		if meta != nil {
-			displayName = meta.Name
-		}
-		fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 已切换到会话: %s", displayName)))
-		r.printSessionHistory()
-		return 1, true
+		return r.handleListCommand()
 
 	case "/switch":
 		if len(parts) < 2 {
-			fmt.Printf("\n%s\n", errorStyle.Render("用法: /switch <会话ID>"))
+			r.ui.OnError(fmt.Errorf("用法: /switch <会话ID>"))
 			return 0, true
 		}
 		id := parts[1]
 		if err := r.sessions.Switch(id); err != nil {
-			fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("切换失败: %v", err)))
+			r.ui.OnError(fmt.Errorf("切换失败: %v", err))
 			return 0, true
 		}
 		r.isTemporary = false // 切换到已持久化会话
@@ -164,47 +141,47 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 		if meta != nil {
 			displayName = meta.Name
 		}
-		fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 已切换到会话: %s", displayName)))
+		r.ui.OnMessage(fmt.Sprintf("✅ 已切换到会话: %s", displayName))
 		r.printSessionHistory()
 		return 1, true
 
 	case "/delete":
 		if len(parts) < 2 {
-			fmt.Printf("\n%s\n", errorStyle.Render("用法: /delete <会话ID>"))
+			r.ui.OnError(fmt.Errorf("用法: /delete <会话ID>"))
 			return 0, true
 		}
 		id := parts[1]
 		if err := r.sessions.Delete(id); err != nil {
-			fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("删除失败: %v", err)))
+			r.ui.OnError(fmt.Errorf("删除失败: %v", err))
 			return 0, true
 		}
-		fmt.Printf("\n%s\n", successStyle.Render("✅ 会话已删除"))
+		r.ui.OnMessage("✅ 会话已删除")
 		return 0, true
 
 	case "/rename":
 		if len(parts) < 2 {
-			fmt.Printf("\n%s\n", errorStyle.Render("用法: /rename <新名称>"))
+			r.ui.OnError(fmt.Errorf("用法: /rename <新名称>"))
 			return 0, true
 		}
 		name := strings.Join(parts[1:], " ")
 		activeID := r.sessions.ActiveID()
 		if err := r.sessions.Rename(activeID, name); err != nil {
-			fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("重命名失败: %v", err)))
+			r.ui.OnError(fmt.Errorf("重命名失败: %v", err))
 			return 0, true
 		}
-		fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 会话已重命名为: %s", name)))
+		r.ui.OnMessage(fmt.Sprintf("✅ 会话已重命名为: %s", name))
 		return 0, true
 
 	case "/current":
 		if r.isTemporary {
-			fmt.Printf("\n%s\n", mutedStyle.Render("当前会话: (临时会话，对话后自动保存)"))
+			r.ui.OnMessage("当前会话: (临时会话，对话后自动保存)")
 		} else {
 			activeID := r.sessions.ActiveID()
 			meta := r.sessions.FindMeta(activeID)
 			if meta != nil {
-				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("当前会话: %s (%s)", meta.Name, meta.ID)))
+				r.ui.OnMessage(fmt.Sprintf("当前会话: %s (%s)", meta.Name, meta.ID))
 			} else {
-				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("当前会话: %s", activeID)))
+				r.ui.OnMessage(fmt.Sprintf("当前会话: %s", activeID))
 			}
 		}
 		return 0, true
@@ -248,7 +225,7 @@ func (r *Runner) ensurePersisted() error {
 		os.MkdirAll(realDir, 0o755)
 		if err := os.Rename(tempEvents, realEvents); err != nil {
 			if !os.IsNotExist(err) {
-				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("⚠️ 临时事件文件迁移失败: %v", err)))
+				r.ui.OnMessage(fmt.Sprintf("⚠️ 临时事件文件迁移失败: %v", err))
 			}
 		}
 	}
@@ -259,7 +236,7 @@ func (r *Runner) ensurePersisted() error {
 		os.MkdirAll(realDir, 0o755)
 		if err := os.Rename(tempHistory, realHistory); err != nil {
 			if !os.IsNotExist(err) {
-				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("⚠️ 临时历史文件迁移失败: %v", err)))
+				r.ui.OnMessage(fmt.Sprintf("⚠️ 临时历史文件迁移失败: %v", err))
 			}
 		}
 	}
@@ -288,7 +265,6 @@ func (r *Runner) ensurePersisted() error {
 	r.events.SetPath(realDir)
 	r.isTemporary = false
 	r.tempID = ""
-	fmt.Printf("\n%s\n", mutedStyle.Render("💾 会话已保存"))
 	return nil
 }
 

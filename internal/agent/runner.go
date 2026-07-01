@@ -101,9 +101,6 @@ func NewRunner(
 // 输入 exit 可退出，/ 开头为会话管理命令。
 // 启动时创建临时会话，只有真正对话后才落盘到 manifest。
 func (r *Runner) Run(ctx context.Context) error {
-	printBanner(r.sessions)
-	printSessionHint()
-
 	// 启动临时会话（逻辑不变）
 	r.isTemporary = true
 	tempID, err := session.GenerateID()
@@ -118,18 +115,22 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.events.SetPath(tempDir)
 	r.cleanOrphanTempDirs()
 
+	// 设置 UI 初始状态
+	if b, ok := r.ui.(*ui.BubbleUI); ok {
+		b.SetSessionName("new")
+		b.SetModel(r.llm.Model())
+	}
+
 	// 移除 readline 初始化，使用 UI 接口
 	for round := 1; ; round++ {
 		// 更新 UI 元数据
 		if b, ok := r.ui.(*ui.BubbleUI); ok {
-			b.SetModel(r.llm.Model())
 			b.ResetTokens() // 重置本轮 token
 		}
 
 		input, err := r.ui.ReadInput()
 		if err != nil {
 			// Ctrl+C 或 EOF
-			fmt.Printf("\n%s\n", mutedStyle.Render("Agent stopped by user."))
 			return nil
 		}
 
@@ -138,7 +139,6 @@ func (r *Runner) Run(ctx context.Context) error {
 			continue
 		}
 		if strings.EqualFold(input, "exit") {
-			fmt.Printf("\n%s\n", mutedStyle.Render("Agent stopped by user."))
 			return nil
 		}
 
@@ -151,7 +151,7 @@ func (r *Runner) Run(ctx context.Context) error {
 				}
 				continue
 			}
-			fmt.Printf("\n%s\n", errorStyle.Render("未知命令，可用: /new, /list, /switch, /delete, /rename, /current, /compress, /memory"))
+			r.ui.OnError(fmt.Errorf("未知命令，可用: /new, /list, /switch, /delete, /rename, /current, /compress, /memory"))
 			round--
 			continue
 		}
@@ -169,8 +169,6 @@ func (r *Runner) Run(ctx context.Context) error {
 			return fmt.Errorf("query engine failed at round %d: %w", round, err)
 		}
 
-		printAnswer(round, answer)
-
 		// 记录模型回答事件（不变）
 		r.events.Append(memory.Event{
 			Type:    memory.EventAssistant,
@@ -179,18 +177,49 @@ func (r *Runner) Run(ctx context.Context) error {
 			Model:   r.llm.Model(),
 		})
 
-		// 保存记忆（不变）
-		if err := r.history.Append(round, input, answer); err != nil {
-			return fmt.Errorf("save history failed at round %d: %w", round, err)
-		}
-		r.extractMemory(ctx, round, input, answer)
-
-		if r.isTemporary {
-			if err := r.ensurePersisted(); err != nil {
-				fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("保存会话失败: %v", err)))
+		// 保存记忆（后台执行，不阻塞下一轮输入）
+		go func() {
+			if err := r.history.Append(round, input, answer); err != nil {
+				r.ui.OnError(fmt.Errorf("save history failed at round %d: %w", round, err))
+				return
 			}
-		}
+			r.extractMemory(ctx, round, input, answer)
+
+			if r.isTemporary {
+				if err := r.ensurePersisted(); err != nil {
+					r.ui.OnError(fmt.Errorf("保存会话失败: %v", err))
+				}
+			}
+		}()
 	}
+}
+
+// handleListCommand 处理 /list 命令，管理 Pause/Resume 生命周期。
+func (r *Runner) handleListCommand() (int, bool) {
+	// 运行选择器（独占终端输入，主 UI 不用 Bubble Tea 所以无需暂停）。
+	selected, err := session.RunSessionPicker(r.sessions.List(), r.sessions.ActiveID())
+	if err != nil {
+		r.ui.OnError(fmt.Errorf("选择器错误: %v", err))
+		return 0, true
+	}
+	if selected == "" {
+		return 0, true
+	}
+	// 用户选中了一个会话，执行切换。
+	if err := r.sessions.Switch(selected); err != nil {
+		r.ui.OnError(fmt.Errorf("切换失败: %v", err))
+		return 0, true
+	}
+	r.isTemporary = false
+	r.switchSession()
+	meta := r.sessions.FindMeta(r.sessions.ActiveID())
+	displayName := r.sessions.ActiveID()
+	if meta != nil {
+		displayName = meta.Name
+	}
+	r.ui.OnMessage(fmt.Sprintf("✅ 已切换到会话: %s", displayName))
+	r.printSessionHistory()
+	return 1, true
 }
 
 // trimArgs 截断工具参数用于展示。

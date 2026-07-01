@@ -59,9 +59,9 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string) (
 		compressed, compErr := r.retriever.CheckAndCompress(ctx, r.llm, limit, totalTokens)
 		if compressed {
 			if compErr != nil {
-				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("⚠️ 自动压缩失败: %v", compErr)))
+				r.ui.OnMessage(fmt.Sprintf("⚠️ 自动压缩失败: %v", compErr))
 			} else {
-				fmt.Printf("\n%s\n", mutedStyle.Render("🗜️ 上下文接近上限，已自动压缩摘要"))
+				r.ui.OnMessage("🗜️ 上下文接近上限，已自动压缩摘要")
 				// 压缩后重新构建上下文。
 				if newCtx, err := r.retriever.BuildContext(userInput); err == nil {
 					contextDigest = newCtx
@@ -84,7 +84,6 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string) (
 	tools := r.tools.FunctionDefinitions()
 
 	// ── 步骤 4: 调用 queryLoop 获取事件 channel ──
-	r.ui.OnThink(0) // 通知开始推理
 	contextLimit := r.llm.ContextLimit()
 	eventChan := queryLoop(ctx, r.llm, messages, tools, r.tools, maxIterations, contextLimit)
 

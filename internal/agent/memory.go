@@ -27,14 +27,14 @@ import (
 func (r *Runner) extractMemory(ctx context.Context, round int, userInput, assistantOutput string) {
 	result, err := r.extractor.Extract(ctx, userInput, assistantOutput)
 	if err != nil {
-		fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("⚠️ 记忆提取失败: %v", err)))
+		r.ui.OnMessage(fmt.Sprintf("⚠️ 记忆提取失败: %v", err))
 		return
 	}
 
 	// 保存 L2 摘要。
 	if result.Summary != "" {
 		if err := r.summary.Append(round, result.Summary); err != nil {
-			fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("⚠️ 保存摘要失败: %v", err)))
+			r.ui.OnMessage(fmt.Sprintf("⚠️ 保存摘要失败: %v", err))
 		}
 	}
 
@@ -51,15 +51,15 @@ func (r *Runner) extractMemory(ctx context.Context, round int, userInput, assist
 				Content:     action.Content,
 			}
 			if err := r.memStore.SaveEntry(entry); err != nil {
-				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("⚠️ 保存记忆失败: %v", err)))
+				r.ui.OnMessage(fmt.Sprintf("⚠️ 保存记忆失败: %v", err))
 			} else {
-				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("💾 记忆已保存: %s", action.Description)))
+				r.ui.OnMessage(fmt.Sprintf("💾 记忆已保存: %s", action.Description))
 			}
 		case "delete":
 			if err := r.memStore.DeleteEntry(action.Name); err != nil {
-				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("⚠️ 删除记忆失败: %v", err)))
+				r.ui.OnMessage(fmt.Sprintf("⚠️ 删除记忆失败: %v", err))
 			} else {
-				fmt.Printf("\n%s\n", mutedStyle.Render(fmt.Sprintf("🗑️ 记忆已删除: %s", action.Name)))
+				r.ui.OnMessage(fmt.Sprintf("🗑️ 记忆已删除: %s", action.Name))
 			}
 		}
 	}
@@ -67,18 +67,18 @@ func (r *Runner) extractMemory(ctx context.Context, round int, userInput, assist
 
 // handleCompress 手动触发摘要压缩。
 func (r *Runner) handleCompress() {
-	fmt.Printf("\n%s\n", memoryBoxStyle.Render("🗜️ 正在压缩摘要..."))
+	r.ui.OnMessage("🗜️ 正在压缩摘要...")
 
 	// 使用一个简单的上下文。
 	ctx := context.Background()
 	err := r.retriever.CompressSummaries(ctx, r.llm)
 	if err != nil {
-		fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("压缩失败: %v", err)))
+		r.ui.OnError(fmt.Errorf("压缩失败: %v", err))
 		return
 	}
 
 	count, _ := r.summary.Count()
-	fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 压缩完成，当前 %d 条摘要", count)))
+	r.ui.OnMessage(fmt.Sprintf("✅ 压缩完成，当前 %d 条摘要", count))
 }
 
 // handleMemoryCommand 处理 /memory 子命令。
@@ -100,20 +100,20 @@ func (r *Runner) handleMemoryCommand(parts []string) {
 		r.listMemories()
 	case "add":
 		if len(parts) < 3 {
-			fmt.Printf("\n%s\n", errorStyle.Render("用法: /memory add <内容>"))
+			r.ui.OnError(fmt.Errorf("用法: /memory add <内容>"))
 			return
 		}
 		content := strings.Join(parts[2:], " ")
 		r.addMemory(content)
 	case "rm", "delete":
 		if len(parts) < 3 {
-			fmt.Printf("\n%s\n", errorStyle.Render("用法: /memory rm <name>"))
+			r.ui.OnError(fmt.Errorf("用法: /memory rm <name>"))
 			return
 		}
 		name := parts[2]
 		r.deleteMemory(name)
 	default:
-		fmt.Printf("\n%s\n", errorStyle.Render("用法: /memory [list|add|rm]"))
+		r.ui.OnError(fmt.Errorf("用法: /memory [list|add|rm]"))
 	}
 }
 
@@ -121,19 +121,19 @@ func (r *Runner) handleMemoryCommand(parts []string) {
 func (r *Runner) listMemories() {
 	entries, err := r.memStore.ListEntries()
 	if err != nil {
-		fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("读取记忆失败: %v", err)))
+		r.ui.OnError(fmt.Errorf("读取记忆失败: %v", err))
 		return
 	}
 	if len(entries) == 0 {
-		fmt.Printf("\n%s\n", mutedStyle.Render("  (暂无记忆)"))
+		r.ui.OnMessage("  (暂无记忆)")
 		return
 	}
 
-	fmt.Printf("\n%s\n", memoryBoxStyle.Render(fmt.Sprintf("🧠 共 %d 条记忆:", len(entries))))
+	r.ui.OnMessage(fmt.Sprintf("🧠 共 %d 条记忆:", len(entries)))
 	for _, e := range entries {
 		importanceIcon := strings.Repeat("⭐", e.Importance)
-		fmt.Printf("  %s %s\n", mutedStyle.Render(fmt.Sprintf("[%s]", e.Type)), e.Description)
-		fmt.Printf("    %s name=%s\n", mutedStyle.Render(importanceIcon), e.Name)
+		r.ui.OnMessage(fmt.Sprintf("  [%s] %s", e.Type, e.Description))
+		r.ui.OnMessage(fmt.Sprintf("    %s name=%s", importanceIcon, e.Name))
 	}
 }
 
@@ -152,17 +152,17 @@ func (r *Runner) addMemory(content string) {
 		Content:     content,
 	}
 	if err := r.memStore.SaveEntry(entry); err != nil {
-		fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("保存记忆失败: %v", err)))
+		r.ui.OnError(fmt.Errorf("保存记忆失败: %v", err))
 		return
 	}
-	fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 记忆已保存: %s", content)))
+	r.ui.OnMessage(fmt.Sprintf("✅ 记忆已保存: %s", content))
 }
 
 // deleteMemory 删除一条记忆。
 func (r *Runner) deleteMemory(name string) {
 	if err := r.memStore.DeleteEntry(name); err != nil {
-		fmt.Printf("\n%s\n", errorStyle.Render(fmt.Sprintf("删除记忆失败: %v", err)))
+		r.ui.OnError(fmt.Errorf("删除记忆失败: %v", err))
 		return
 	}
-	fmt.Printf("\n%s\n", successStyle.Render(fmt.Sprintf("✅ 记忆已删除: %s", name)))
+	r.ui.OnMessage(fmt.Sprintf("✅ 记忆已删除: %s", name))
 }
