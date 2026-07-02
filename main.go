@@ -13,7 +13,7 @@ import (
 	"agentic/internal/memory"
 	"agentic/internal/session"
 	"agentic/internal/tool"
-	"agentic/internal/ui"
+	"agentic/internal/ui/bubble"
 )
 
 // loadEnvFile 从 .env 文件加载环境变量。
@@ -123,7 +123,7 @@ func main() {
 	tools.Register(tool.NewFileTool())
 
 	// 创建 UI 实例（使用 BubbleUI）。
-	uiInstance := ui.NewBubbleUI()
+	uiInstance := bubble.NewBubbleUI()
 	defer uiInstance.Close() // 确保退出时恢复终端状态
 
 	// 启动 ReAct agent 循环。

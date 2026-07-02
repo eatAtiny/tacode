@@ -1,4 +1,4 @@
-package ui
+package text
 
 import "fmt"
 
@@ -85,3 +85,15 @@ func (t *TextUI) ConfirmPermission(tool, args string, inputForward <-chan string
 }
 
 func (t *TextUI) Close() error { return nil }
+
+// SetSessionName 是 headless 模式下的空操作。
+func (t *TextUI) SetSessionName(name string) {}
+
+// SetModel 是 headless 模式下的空操作。
+func (t *TextUI) SetModel(model string) {}
+
+// UpdateTokens 是 headless 模式下的空操作。
+func (t *TextUI) UpdateTokens(input, output int) {}
+
+// ResetTokens 是 headless 模式下的空操作。
+func (t *TextUI) ResetTokens() {}

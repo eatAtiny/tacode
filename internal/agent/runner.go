@@ -113,10 +113,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.cleanOrphanTempDirs()
 
 	// 设置 UI 初始状态
-	if b, ok := r.ui.(*ui.BubbleUI); ok {
-		b.SetSessionName("new")
-		b.SetModel(r.llm.Model())
-	}
+	r.ui.SetSessionName("new")
+	r.ui.SetModel(r.llm.Model())
 
 	// 显示欢迎信息
 	r.ui.Welcome(r.llm.Model())
@@ -193,9 +191,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 			// 普通输入：启动异步查询
 			round++
-			if b, ok := r.ui.(*ui.BubbleUI); ok {
-				b.ResetTokens()
-			}
+			r.ui.ResetTokens()
 
 			r.events.Append(memory.Event{
 				Type:    memory.EventUser,

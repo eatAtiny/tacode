@@ -44,4 +44,16 @@ type UI interface {
 
 	// Close 关闭 UI，释放资源。
 	Close() error
+
+	// SetSessionName 设置当前会话的显示名称。
+	SetSessionName(name string)
+
+	// SetModel 设置当前使用的模型名称。
+	SetModel(model string)
+
+	// UpdateTokens 累计本轮 token 用量。
+	UpdateTokens(input, output int)
+
+	// ResetTokens 重置本轮 token 计数。
+	ResetTokens()
 }

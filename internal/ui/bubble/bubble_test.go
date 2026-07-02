@@ -1,4 +1,4 @@
-package ui
+package bubble
 
 import (
 	"testing"
@@ -9,8 +9,8 @@ func TestNewBubbleUI(t *testing.T) {
 	if b == nil {
 		t.Fatal("NewBubbleUI returned nil")
 	}
-	if b.scanner == nil {
-		t.Fatal("scanner should not be nil")
+	if b.conversation == nil {
+		t.Fatal("conversation should not be nil")
 	}
 }
 
