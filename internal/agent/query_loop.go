@@ -27,26 +27,49 @@ const compressThreshold = 0.8
 type queryLoopContext struct {
 	ctx             context.Context
 	llmClient       *llm.OpenAIClient
-	messages        []llm.ChatMessage
-	tools           []openai.Tool
-	toolRegistry    *tool.Registry
-	maxIter         int
-	contextLimit    int
-	events          chan<- QueryEvent
-	seenToolCalls   map[string]bool
-	totalInputTokens  int
-	totalOutputTokens int
-	lastInputTokens   int // 暂存每次调用的输入 token 数
-	lastOutputTokens  int // 暂存每次调用的输出 token 数
+	messages        []llm.ChatMessage     // 完整消息历史（system + user + assistant + tool）
+	tools           []openai.Tool         // 工具定义列表（OpenAI function calling 格式）
+	toolRegistry    *tool.Registry        // 工具注册表，用于查找和执行工具
+	maxIter         int                   // 最大迭代次数
+	contextLimit    int                   // 模型上下文窗口大小（token 数）
+	events          chan<- QueryEvent     // 事件输出 channel（yield 事件到此）
+	seenToolCalls   map[string]bool       // 已见过的工具调用签名（用于重复检测）
+	totalInputTokens  int                 // 累计输入 token 数
+	totalOutputTokens int                 // 累计输出 token 数
+	lastInputTokens   int                 // 暂存每次调用的输入 token 数
+	lastOutputTokens  int                 // 暂存每次调用的输出 token 数
 }
 
 // queryLoop 是纯粹的 Agent Loop 核心循环，使用异步生成器模式。
 //
-// 职责：
-//   - while(true) 循环，调用 LLM → 检查 tool_use → 执行工具 → 结果推入消息 → 重复
-//   - 通过 channel yield 中间事件（思考、工具调用、工具结果等）
-//   - 直到 LLM 给出最终回答（无 tool_use）或达到最大迭代次数
-//   - 自动检查 token 用量，接近上限时压缩旧的工具调用消息
+// 这是整个项目最核心的函数。负责 ReAct 的完整 while(true) 循环：
+//
+//	┌─────────────────────────────────────────────────────────┐
+//	│  for iter := 0; iter < maxIter; iter++                  │
+//	│    ├─ 步骤 4a: callLLMStream()                           │
+//	│    │    调用 LLM 流式接口，yield Think/Delta 事件         │
+//	│    │    返回: content（文本）+ toolCalls（工具调用列表）    │
+//	│    │                                                     │
+//	│    ├─ 步骤 4b: 检查 toolCalls                             │
+//	│    │    if len(toolCalls) == 0 → yield Final + return    │
+//	│    │                                                     │
+//	│    ├─ 步骤 4c: executeToolCalls()                        │
+//	│    │    对每个 toolCall:                                 │
+//	│    │      ├─ checkToolPermission() ← 权限检查            │
+//	│    │      ├─ toolRegistry.Get().Execute() ← 执行工具     │
+//	│    │      └─ yield ToolCall / ToolResult / Permission    │
+//	│    │                                                     │
+//	│    ├─ 步骤 4d: detectDuplicateAndWarn()                  │
+//	│    │    检测重复调用，注入警告消息                         │
+//	│    │                                                     │
+//	│    ├─ 步骤 4e: checkAndCompressContext()                 │
+//	│    │    token 超过 80% 阈值时压缩旧消息                   │
+//	│    │                                                     │
+//	│    └─ yield Continue → 进入下一轮迭代                     │
+//	│                                                          │
+//	│  超限处理: generateFinalSummary()                         │
+//	│    达到 maxIter → 强制 LLM 生成总结                       │
+//	└─────────────────────────────────────────────────────────┘
 //
 // 设计：
 //   - 返回一个只读 channel，上层可以实时读取中间事件
@@ -64,34 +87,7 @@ type queryLoopContext struct {
 //   - contextLimit: 模型的上下文窗口大小（token 数），用于压缩检查
 //
 // 返回：
-//   - <-chan QueryEvent: 只读 channel，上层可以读取中间事件
-//
-// 事件类型：
-//   - think: LLM 思考中
-//   - delta: 增量文本（流式输出）
-//   - tool_call: 工具调用请求（包含 ToolCalls 字段）
-//   - tool_result: 工具执行结果（包含 ToolName、ToolResult、IsError 字段）
-//   - continue: 继续推理（工具执行完毕，继续下一轮循环）
-//   - final: 最终回答（包含 Content 字段）
-//   - error: 错误（包含 Error 字段）
-//
-// 使用示例：
-//
-//	eventChan := queryLoop(ctx, llm, messages, tools, registry, 10, 128000)
-//	for event := range eventChan {
-//	    switch event.Type {
-//	    case QueryEventThink:
-//	        fmt.Println("思考中...")
-//	    case QueryEventToolCall:
-//	        fmt.Printf("调用工具: %v\n", event.ToolCalls)
-//	    case QueryEventToolResult:
-//	        fmt.Printf("工具结果: %s\n", event.ToolResult)
-//	    case QueryEventFinal:
-//	        fmt.Printf("最终回答: %s\n", event.Content)
-//	    case QueryEventError:
-//	        fmt.Printf("错误: %v\n", event.Error)
-//	    }
-//	}
+//   - <-chan QueryEvent: 只读 channel，上层通过 range 实时读取中间事件
 func queryLoop(
 	ctx context.Context,
 	llmClient *llm.OpenAIClient,
@@ -126,55 +122,82 @@ func queryLoop(
 	return events
 }
 
-// runLoop 执行核心循环。
+// runLoop 执行核心 ReAct 循环。
+//
+// 循环体（每次迭代）：
+//
+//	1. 检查 ctx 是否被取消（支持 /stop）
+//	2. 检查并压缩上下文（token 用量超过 80% 阈值）
+//	3. 调用 LLM 流式接口 → 收集 content + toolCalls
+//	4. 累计 token 用量
+//	5. 推入 assistant 消息到历史
+//	6. 如果无 toolCalls → 任务完成，yield Final + return
+//	7. 执行工具调用（含权限检查）
+//	8. 检测重复调用并警告
+//	9. yield Continue → 回到步骤 1
 func (lc *queryLoopContext) runLoop() {
 	for iter := 0; iter < lc.maxIter; iter++ {
-		// 检查上下文是否被取消。
+		// ── 步骤 4-前置: 检查上下文是否被取消 ──
+		// 支持 /stop 命令：Runner 调用 cancel() → ctx.Err() != nil
 		if lc.ctx.Err() != nil {
 			lc.yieldError("query loop cancelled", lc.ctx.Err())
 			return
 		}
 
-		// 检查并压缩上下文。
+		// ── 步骤 4e: 检查并压缩上下文 ──
+		// token 用量超过 80% 阈值时，压缩旧工具调用消息（保留 system + 最近 2 轮）。
 		if !lc.checkAndCompressContext(iter) {
 			return
 		}
 
-		// 调用 LLM 并处理流式响应。
+		// ── 步骤 4a: 调用 LLM 流式接口 ──
+		// 流式调用 LLM，通过 channel yield Delta 事件（实时增量文本）。
+		// 返回完整的 content 文本和 toolCalls 列表。
 		content, toolCalls, ok := lc.callLLMStream(iter)
 		if !ok {
 			return
 		}
 
-		// 累计 token 用量。
+		// ── 累计 token 用量 ──
 		lc.accumulateTokens()
 
-		// 推入 assistant 响应。
+		// ── 步骤 4a-后置: 推入 assistant 响应到消息历史 ──
 		lc.appendAssistantMessage(content, toolCalls)
 
-		// 如果没有工具调用，任务完成。
+		// ── 步骤 4b: 检查是否完成 ──
+		// 如果没有工具调用，LLM 直接给出了最终答案 → 任务完成。
 		if len(toolCalls) == 0 {
 			lc.yieldFinal(content, iter+1)
 			return
 		}
 
-		// 执行工具调用。
+		// ── 步骤 4c: 执行工具调用 ──
+		// 遍历所有工具调用：权限检查 → 查找工具 → 执行 → yield 结果。
+		// 权限被拒绝时跳过该工具但继续执行其他工具。
 		if !lc.executeToolCalls(toolCalls, iter) {
 			return
 		}
 
-		// 重复调用检测。
+		// ── 步骤 4d: 重复调用检测 ──
+		// 如果 LLM 重复调用相同的工具+参数，注入警告消息引导 LLM 改变策略。
 		lc.detectDuplicateAndWarn(toolCalls)
 
-		// yield: 继续推理。
+		// ── yield: 继续推理 ──
+		// 通知上层进入下一轮迭代。
 		lc.yieldContinue(iter + 1)
 	}
 
-	// 达到最大迭代次数，生成最终总结。
+	// ── 达到最大迭代次数 ──
+	// 强制 LLM 根据已有信息生成最终总结（不调用工具）。
 	lc.generateFinalSummary()
 }
 
 // checkAndCompressContext 检查 token 用量，接近上限时压缩。
+//
+// 压缩策略：
+//   - 保留 system prompt（第 0 条消息，始终不动）
+//   - 保留最近 2 轮的工具调用（4 条消息：assistant + tool × 2）
+//   - 压缩更早的工具调用：只保留摘要（"[已压缩] 调用工具: xxx" + "[已压缩] 工具执行成功/失败"）
 //
 // 返回：
 //   - true: 继续执行
@@ -204,9 +227,18 @@ func (lc *queryLoopContext) checkAndCompressContext(iter int) bool {
 
 // callLLMStream 调用 LLM 流式接口，收集响应。
 //
+// 流程：
+//   1. yield Think 事件（通知上层开始思考）
+//   2. 调用 llmClient.ChatWithToolsStream() → 获取 stream channel
+//   3. 遍历 stream channel：
+//      - StreamEventDelta → 累加 fullContent + yield Delta 事件
+//      - StreamEventDone → 提取 toolCalls 和 token 信息
+//      - StreamEventError → yield Error 事件
+//   4. 暂存 token 信息供后续累计
+//
 // 返回：
-//   - content: 完整的文本内容
-//   - toolCalls: 工具调用列表
+//   - content: 完整的文本内容（LLM 在工具调用前的思考文本）
+//   - toolCalls: 工具调用列表（OpenAI 流式累加组装）
 //   - ok: 是否成功
 func (lc *queryLoopContext) callLLMStream(iter int) (string, []llm.ToolCall, bool) {
 	// yield: 思考中。
@@ -224,8 +256,8 @@ func (lc *queryLoopContext) callLLMStream(iter int) (string, []llm.ToolCall, boo
 	for streamEvent := range streamChan {
 		switch streamEvent.Type {
 		case llm.StreamEventDelta:
+			// 增量文本：追加到 fullContent 并实时 yield 给上层。
 			fullContent += streamEvent.Content
-			// yield: 增量文本。
 			lc.events <- QueryEvent{
 				Type:         QueryEventDelta,
 				Content:      streamEvent.Content,
@@ -235,6 +267,7 @@ func (lc *queryLoopContext) callLLMStream(iter int) (string, []llm.ToolCall, boo
 			}
 
 		case llm.StreamEventDone:
+			// 流式完成：提取最终的工具调用列表和 token 统计。
 			toolCalls = streamEvent.ToolCalls
 			inputTokens = streamEvent.InputTokens
 			outputTokens = streamEvent.OutputTokens
@@ -243,12 +276,13 @@ func (lc *queryLoopContext) callLLMStream(iter int) (string, []llm.ToolCall, boo
 			}
 
 		case llm.StreamEventError:
+			// 流式错误：yield Error 事件并返回失败。
 			lc.yieldError("stream error", streamEvent.Error)
 			return "", nil, false
 		}
 	}
 
-	// 暂存 token 信息，供后续累计。
+	// 暂存 token 信息，供后续 accumulateTokens() 累计。
 	lc.lastInputTokens = inputTokens
 	lc.lastOutputTokens = outputTokens
 
@@ -272,11 +306,20 @@ func (lc *queryLoopContext) appendAssistantMessage(content string, toolCalls []l
 
 // executeToolCalls 执行工具调用列表。
 //
+// 流程：
+//   1. yield ToolCall 事件（通知上层显示工具调用信息）
+//   2. 遍历 toolCalls，对每个执行 executeSingleTool()
+//      - 权限检查：deny → 跳过；confirm → yield Permission + 阻塞等待
+//      - 查找工具：不存在 → yield 错误工具结果
+//      - 执行工具：调用 tool.Execute()
+//      - yield ToolResult 事件
+//      - 推入 tool 消息到历史
+//
 // 返回：
 //   - true: 继续执行
 //   - false: 发生错误，需要退出
 func (lc *queryLoopContext) executeToolCalls(toolCalls []llm.ToolCall, iter int) bool {
-	// yield: 工具调用请求。
+	// yield: 工具调用请求（含完整 toolCalls 列表和 token 统计）。
 	lc.events <- QueryEvent{
 		Type:         QueryEventToolCall,
 		ToolCalls:    toolCalls,
@@ -297,16 +340,23 @@ func (lc *queryLoopContext) executeToolCalls(toolCalls []llm.ToolCall, iter int)
 
 // executeSingleTool 执行单个工具调用。
 //
+// 子流程（按顺序）：
+//   1. checkToolPermission() → deny 跳过 / confirm 阻塞等待 / allow 继续
+//   2. toolRegistry.Get() → 查找工具实现
+//   3. tool.Execute() → 执行工具（shell 命令 / 文件读写）
+//   4. yield ToolResult 事件
+//   5. 推入 tool 消息到历史（LLM 下一轮可以看到工具结果）
+//
 // 返回：
-//   - true: 继续执行
-//   - false: 发生错误，需要退出
+//   - true: 继续执行（即使工具执行出错也继续，让 LLM 自行处理错误）
+//   - false: 发生致命错误，需要退出
 func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
-	// 权限检查。
+	// ── 子步骤 1: 权限检查 ──
 	if !lc.checkToolPermission(tc, iter) {
 		return true // 权限拒绝，但继续执行下一个工具
 	}
 
-	// 查找工具。
+	// ── 子步骤 2: 查找工具 ──
 	t := lc.toolRegistry.Get(tc.Name)
 	if t == nil {
 		errMsg := fmt.Sprintf("未知工具: %s", tc.Name)
@@ -314,13 +364,15 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 		return true
 	}
 
-	// 执行工具。
+	// ── 子步骤 3: 执行工具 ──
 	result, execErr := t.Execute(tc.Arguments)
 	if execErr != nil {
+		// 工具执行出错时，将错误信息作为结果返回给 LLM。
+		// LLM 会看到错误并尝试其他方案（而非直接失败）。
 		result = fmt.Sprintf("工具执行出错: %v\n请尝试其他方案，不要重复相同的命令。", execErr)
 	}
 
-	// yield: 工具执行结果。
+	// ── 子步骤 4: yield 工具执行结果 ──
 	lc.events <- QueryEvent{
 		Type:       QueryEventToolResult,
 		ToolName:   tc.Name,
@@ -329,7 +381,8 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 		Iteration:  iter + 1,
 	}
 
-	// 推入消息历史。
+	// ── 子步骤 5: 推入消息历史 ──
+	// tool 角色消息包含 ToolCallID，LLM 可以关联到对应的 tool_call。
 	lc.messages = append(lc.messages, llm.ChatMessage{
 		Role:       "tool",
 		Content:    result,
@@ -339,22 +392,30 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 	return true
 }
 
-// checkToolPermission 检查工具权限。
+// checkToolPermission 检查工具权限（queryLoop 内部调用）。
 //
-// 返回：
-//   - true: 允许执行
-//   - false: 权限拒绝
+// 三种结果：
+//   - allow: 直接允许，继续执行
+//   - deny: 拒绝执行，yield 错误工具结果（继续执行其他工具）
+//   - confirm: yield Permission 事件，阻塞等待 channel 返回用户决策
+//
+// 阻塞机制：
+//   queryLoop 创建 PermissionCh channel → yield Permission 事件
+//   → QueryEngine 收到事件 → 调用 UI.ConfirmPermission()
+//   → 用户在终端输入 y/N → 写入 PermissionCh
+//   → queryLoop 从 PermissionCh 读取结果 → 继续或拒绝
 func (lc *queryLoopContext) checkToolPermission(tc llm.ToolCall, iter int) bool {
 	permResult := checkToolPermission(tc.Name, tc.Arguments)
 
 	if permResult.Action == "deny" {
+		// 禁止的工具：直接拒绝，yield 错误工具结果。
 		errMsg := fmt.Sprintf("权限拒绝: %s", permResult.Message)
 		lc.yieldToolError(tc, errMsg, iter)
 		return false
 	}
 
 	if permResult.Action == "confirm" {
-		// yield 权限确认事件，等待上层返回结果
+		// 需要确认：创建 channel，yield Permission 事件，阻塞等待结果。
 		ch := make(chan bool, 1)
 		lc.events <- QueryEvent{
 			Type:               QueryEventPermission,
@@ -366,7 +427,8 @@ func (lc *queryLoopContext) checkToolPermission(tc llm.ToolCall, iter int) bool 
 			Iteration:          iter + 1,
 		}
 
-		// 阻塞等待用户确认
+		// 阻塞等待用户确认（QueryEngine 收到事件后调用 UI.ConfirmPermission
+		// 并将结果写入此 channel）。
 		approved := <-ch
 		if !approved {
 			errMsg := "用户拒绝执行"
@@ -379,6 +441,11 @@ func (lc *queryLoopContext) checkToolPermission(tc llm.ToolCall, iter int) bool 
 }
 
 // detectDuplicateAndWarn 检测重复调用并警告。
+//
+// 检测方式：将当前工具调用列表序列化为签名（工具名:参数），
+// 与 seenToolCalls 比较。如果签名已存在，注入 user 消息警告 LLM。
+//
+// 这避免了 LLM 陷入"重复调用相同工具"的死循环。
 func (lc *queryLoopContext) detectDuplicateAndWarn(toolCalls []llm.ToolCall) {
 	currentToolCall := toolCallSignature(toolCalls)
 	isDuplicate := currentToolCall != "" && lc.seenToolCalls[currentToolCall]
@@ -388,6 +455,7 @@ func (lc *queryLoopContext) detectDuplicateAndWarn(toolCalls []llm.ToolCall) {
 	}
 
 	if isDuplicate {
+		// 注入警告：告诉 LLM 不要重复调用。
 		lc.messages = append(lc.messages, llm.ChatMessage{
 			Role:    "user",
 			Content: "你已经调用过相同的工具并获得了相同的结果。请根据已有信息直接给出最终回答，不要再调用任何工具。",
@@ -396,6 +464,12 @@ func (lc *queryLoopContext) detectDuplicateAndWarn(toolCalls []llm.ToolCall) {
 }
 
 // generateFinalSummary 达到最大迭代次数时，生成最终总结。
+//
+// 流程：
+//   1. 注入 user 消息："请根据已有信息直接给出回答"
+//   2. 再次调用 LLM 流式接口（不带工具调用能力）
+//   3. 收集最终文本内容
+//   4. yield Final 事件
 func (lc *queryLoopContext) generateFinalSummary() {
 	lc.messages = append(lc.messages, llm.ChatMessage{
 		Role:    "user",
@@ -429,7 +503,7 @@ func (lc *queryLoopContext) generateFinalSummary() {
 // yield 辅助函数
 // ──────────────────────────────────────────────────────────
 
-// yieldError yield 错误事件。
+// yieldError yield 错误事件（通过 event channel 发送给上层）。
 func (lc *queryLoopContext) yieldError(content string, err error) {
 	lc.events <- QueryEvent{
 		Type:    QueryEventError,
@@ -438,7 +512,8 @@ func (lc *queryLoopContext) yieldError(content string, err error) {
 	}
 }
 
-// yieldFinal yield 最终回答事件。
+// yieldFinal yield 最终回答事件（通过 event channel 发送给上层）。
+// 包含完整的 token 统计。
 func (lc *queryLoopContext) yieldFinal(content string, iter int) {
 	lc.events <- QueryEvent{
 		Type:         QueryEventFinal,
@@ -450,7 +525,7 @@ func (lc *queryLoopContext) yieldFinal(content string, iter int) {
 	}
 }
 
-// yieldToolError yield 工具错误事件。
+// yieldToolError yield 工具错误事件并推入 tool 消息到历史。
 func (lc *queryLoopContext) yieldToolError(tc llm.ToolCall, errMsg string, iter int) {
 	lc.events <- QueryEvent{
 		Type:       QueryEventToolResult,
@@ -467,7 +542,8 @@ func (lc *queryLoopContext) yieldToolError(tc llm.ToolCall, errMsg string, iter 
 	})
 }
 
-// yieldContinue yield 继续推理事件。
+// yieldContinue yield 继续推理事件（通过 event channel 发送给上层）。
+// 包含当前累计的 token 统计。
 func (lc *queryLoopContext) yieldContinue(iter int) {
 	lc.events <- QueryEvent{
 		Type:         QueryEventContinue,
@@ -484,15 +560,8 @@ func (lc *queryLoopContext) yieldContinue(iter int) {
 
 // estimateMessagesTokens 估算消息数组的 token 数。
 //
-// 计算方式：
-//   - 遍历所有消息，拼接内容
-//   - 使用 memory.EstimateTokens 估算
-//
-// 参数：
-//   - messages: 消息数组
-//
-// 返回：
-//   - int: 估算的 token 数
+// 计算方式：遍历所有消息，拼接内容（含工具调用名和参数），
+// 使用 memory.EstimateTokens 估算（ASCII 约 4 字符/token，中文约 2 字符/token）。
 func estimateMessagesTokens(messages []llm.ChatMessage) int {
 	var totalContent string
 	for _, msg := range messages {
@@ -507,23 +576,14 @@ func estimateMessagesTokens(messages []llm.ChatMessage) int {
 // compressMessages 压缩旧的工具调用消息，减少 token 用量。
 //
 // 策略：
-//   - 保留 system prompt（第 0 条）
-//   - 保留最近 2 轮的工具调用（完整保留）
-//   - 压缩更早的工具调用（只保留摘要）
-//   - 压缩后的消息格式："[已压缩] 工具: xxx, 结果: 成功/失败"
+//   - 保留 system prompt（第 0 条，始终不动）
+//   - 保留最近 2 轮的工具调用（完整保留 4 条消息）
+//   - 压缩更早的 assistant(含 toolCalls) 消息 → "[已压缩] 调用工具: xxx"
+//   - 压缩更早的 tool(结果) 消息 → "[已压缩] 工具执行成功/失败"
+//   - 非工具消息保留原样
 //
-// TODO: 实现更复杂的压缩策略
-//   - 基于语义相似度压缩，保留关键信息
-//   - 支持自定义压缩比例
-//   - 支持保留特定类型的工具调用
-//
-// 参数：
-//   - messages: 原始消息数组
-//   - currentIter: 当前迭代次数
-//
-// 返回：
-//   - []llm.ChatMessage: 压缩后的消息数组
-func compressMessages(messages []llm.ChatMessage, currentIter int) []llm.ChatMessage {
+// 这样在 token 接近上限时仍能保留上下文的关键信息。
+func compressMessages(messages []llm.ChatMessage, _ int) []llm.ChatMessage {
 	if len(messages) <= 3 {
 		return messages // 消息太少，不需要压缩
 	}
@@ -554,7 +614,7 @@ func compressMessages(messages []llm.ChatMessage, currentIter int) []llm.ChatMes
 				Content: fmt.Sprintf("[已压缩] 调用工具: %s", strings.Join(toolNames, ", ")),
 			})
 		} else if msg.Role == "tool" {
-			// 压缩工具结果消息。
+			// 压缩工具结果消息（判断成功/失败）。
 			isSuccess := !strings.Contains(msg.Content, "出错") && !strings.Contains(msg.Content, "错误")
 			status := "成功"
 			if !isSuccess {

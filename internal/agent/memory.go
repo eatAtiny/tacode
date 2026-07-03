@@ -10,20 +10,33 @@ import (
 
 // ──────────────────────────────────────────────────────────
 // 记忆管理函数
+//
+// 调用链（每轮对话完成后，在后台 goroutine 中执行）：
+//
+//	Runner.Run() → 分支 B: 收到查询结果
+//	  └─ go func() {
+//	       └─ history.Append()          ← 步骤 7a: 保存 L1 原始对话
+//	       └─ extractMemory()           ← 步骤 7b: 提取 L2 摘要 + L3 记忆
+//	            └─ extractor.Extract()   ← 一次 LLM 调用，同时产出摘要和记忆操作
+//	            └─ summary.Append()      ← 保存 L2 摘要
+//	            └─ memStore.SaveEntry()  ← 保存/更新 L3 记忆
+//	            └─ memStore.DeleteEntry()← 删除 L3 记忆
+//	       └─ ensurePersisted()         ← 步骤 8: 临时会话落盘
+//	     }()
 // ──────────────────────────────────────────────────────────
 
 // extractMemory 调用 LLM 提取摘要和结构化记忆。
 //
-// 职责：
-//   - 调用 extractor 提取摘要和记忆
-//   - 保存 L2 摘要
-//   - 保存 L3 结构化记忆（创建/更新/删除）
+// 流程（每次对话后执行一次）：
+//   1. 调用 extractor.Extract(userInput, assistantOutput)
+//      → LLM 分析对话，返回 ExtractionResult{Summary, Memories[]}
+//   2. 保存 L2 摘要（追加到 summaries.jsonl）
+//   3. 处理 L3 记忆操作：
+//      - create/update → memStore.SaveEntry()（写入 .md 文件 + 更新 MEMORY.md）
+//      - delete → memStore.DeleteEntry()（删除 .md 文件 + 更新 MEMORY.md）
 //
-// 参数：
-//   - ctx: 上下文
-//   - round: 当前轮次号
-//   - userInput: 用户输入
-//   - assistantOutput: 助手回答
+// 这是后台操作，不阻塞主循环。失败时通过 UI.OnMessage 提示警告，
+// 不会中断 Agent 运行。
 func (r *Runner) extractMemory(ctx context.Context, round int, userInput, assistantOutput string) {
 	result, err := r.extractor.Extract(ctx, userInput, assistantOutput)
 	if err != nil {
@@ -31,14 +44,14 @@ func (r *Runner) extractMemory(ctx context.Context, round int, userInput, assist
 		return
 	}
 
-	// 保存 L2 摘要。
+	// ── 步骤 7b-1: 保存 L2 摘要 ──
 	if result.Summary != "" {
 		if err := r.summary.Append(round, result.Summary); err != nil {
 			r.ui.OnMessage(fmt.Sprintf("⚠️ 保存摘要失败: %v", err))
 		}
 	}
 
-	// 保存 L3 记忆。
+	// ── 步骤 7b-2: 处理 L3 记忆操作 ──
 	for _, action := range result.Memories {
 		switch action.Action {
 		case "create", "update":
@@ -63,11 +76,15 @@ func (r *Runner) extractMemory(ctx context.Context, round int, userInput, assist
 	}
 }
 
-// handleCompress 手动触发摘要压缩。
+// handleCompress 手动触发摘要压缩（/compress 命令）。
+//
+// 流程：
+//   1. 调用 Retriever.CompressSummaries()
+//   2. LLM 合并旧摘要 → 保留最近 3 条 + 1 条综合摘要
+//   3. 显示压缩后的摘要数量
 func (r *Runner) handleCompress() {
 	r.ui.OnMessage("🗜️ 正在压缩摘要...")
 
-	// 使用一个简单的上下文。
 	ctx := context.Background()
 	err := r.retriever.CompressSummaries(ctx, r.llm)
 	if err != nil {
@@ -82,9 +99,10 @@ func (r *Runner) handleCompress() {
 // handleMemoryCommand 处理 /memory 子命令。
 //
 // 子命令：
-//   - list: 列出所有记忆
-//   - add <内容>: 手动添加一条记忆
-//   - rm <name>: 删除一条记忆
+//   - /memory              → list（默认列出所有记忆）
+//   - /memory list         → 列出所有 L3 记忆（按重要性降序）
+//   - /memory add <内容>    → 手动添加一条记忆（type=user, importance=3）
+//   - /memory rm <name>    → 删除指定记忆
 func (r *Runner) handleMemoryCommand(parts []string) {
 	if len(parts) < 2 {
 		// 默认列出所有记忆。
@@ -115,7 +133,7 @@ func (r *Runner) handleMemoryCommand(parts []string) {
 	}
 }
 
-// listMemories 列出所有记忆。
+// listMemories 列出所有 L3 记忆（按重要性降序，带 ⭐ 重要度图标）。
 func (r *Runner) listMemories() {
 	entries, err := r.memStore.ListEntries()
 	if err != nil {
@@ -135,9 +153,9 @@ func (r *Runner) listMemories() {
 	}
 }
 
-// addMemory 手动添加一条记忆。
+// addMemory 手动添加一条 L3 记忆。
+// name 自动生成：manual-<内容前20字符的kebab-case>
 func (r *Runner) addMemory(content string) {
-	// 生成一个简单的 name。
 	name := fmt.Sprintf("manual-%s", strings.ReplaceAll(strings.ToLower(content[:min(20, len(content))]), " ", "-"))
 	name = strings.TrimRight(name, "-")
 
@@ -156,7 +174,7 @@ func (r *Runner) addMemory(content string) {
 	r.ui.OnMessage(fmt.Sprintf("✅ 记忆已保存: %s", content))
 }
 
-// deleteMemory 删除一条记忆。
+// deleteMemory 删除一条 L3 记忆（按 name 匹配）。
 func (r *Runner) deleteMemory(name string) {
 	if err := r.memStore.DeleteEntry(name); err != nil {
 		r.ui.OnError(fmt.Errorf("删除记忆失败: %v", err))

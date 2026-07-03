@@ -1,59 +1,164 @@
+// Package ui 定义了 Agent 与用户交互的抽象接口。
+//
+// 设计目标：
+//   - 可插拔：通过 UI 接口，可以切换不同的交互实现（终端 TUI、Web、headless 等）
+//   - 关注点分离：Agent 核心逻辑不关心 UI 细节，只通过接口方法通信
+//   - 两种内置实现：BubbleUI（终端美化）和 TextUI（headless 回调模式）
+//
+// 接口方法按职责分为四组：
+//  1. 输入组：ReadInput / ReadInputChan — 读取用户输入
+//  2. 事件通知组：OnThink / OnDelta / OnToolCall / OnToolResult / OnContinue / OnFinal / OnError / OnMessage
+//  3. 交互组：ConfirmPermission — 权限确认
+//  4. 生命周期组：Welcome / Close / SetSessionName / SetModel / UpdateTokens / ResetTokens
 package ui
 
 // UI 定义了 Agent 与用户交互的接口。
-// 所有 UI 操作都通过此接口完成，实现可插拔。
+// 所有 UI 操作都通过此接口完成，Agent 核心不直接操作终端或 Web。
+//
+// 实现者需要处理以下场景：
+//   - 流式输出：OnThink → 多次 OnDelta → OnFinal（或 OnToolCall）
+//   - 工具调用：OnToolCall → OnToolResult → OnContinue → 重复或结束
+//   - 错误处理：任何阶段都可能收到 OnError
+//   - 权限确认：工具执行前可能触发 ConfirmPermission（阻塞等待用户决策）
+//
+// 并发安全：方法可能被不同 goroutine 调用（如 ReadInputChan 的后台读取
+// 和 queryLoop 的事件推送），实现者需自行保证线程安全。
 type UI interface {
+	// ── 输入组 ──────────────────────────────────────────
+
 	// ReadInput 读取用户输入，阻塞直到用户按下 Enter。
+	// 返回去除首尾空白的输入字符串，或在 EOF 时返回错误。
+	//
+	// 与 ReadInputChan 的区别：
+	//   - ReadInput：同步阻塞，适合简单的"一问一答"场景
+	//   - ReadInputChan：异步 channel，适合需要 select 多路复用的主循环
 	ReadInput() (string, error)
 
 	// ReadInputChan 返回一个只读 channel，后台持续读取用户输入。
-	// 首次调用启动后台 goroutine，后续调用返回同一个 channel。
+	// 首次调用启动后台 goroutine（通过 sync.Once 保证只启动一次），
+	// 后续调用返回同一个 channel。channel 在输入流结束时关闭（EOF）。
+	//
+	// 使用场景：
+	//   - Runner 的主循环通过 select 同时监听输入 channel 和查询结果 channel
+	//   - 查询运行中可以继续接收 /stop 等控制命令
 	ReadInputChan() <-chan string
 
-	// OnThink 通知 LLM 正在思考。
+	// ── 事件通知组 ──────────────────────────────────────
+
+	// OnThink 通知 LLM 正在思考（开始新一轮推理）。
+	// iteration 从 1 开始，表示当前是第几轮 ReAct 迭代。
+	//
+	// 典型实现：
+	//   - BubbleUI：打印 "⏳ 思考中..." 并保存光标位置，为后续流式输出做准备
+	//   - TextUI：通过 OnEvent 回调转发
 	OnThink(iteration int)
 
 	// OnDelta 流式输出增量文本。
+	// LLM 每次返回一个 token 时调用，content 是增量片段（可能只有几个字符）。
+	//
+	// 典型实现：
+	//   - BubbleUI：直接 fmt.Print 增量文本（不换行），配合 ANSI 光标控制
+	//   - TextUI：通过 OnEvent 回调转发
+	//
+	// 生命周期：OnThink → 多次 OnDelta → OnFinal（或 OnToolCall 中断流式输出）
 	OnDelta(content string)
 
-	// OnToolCall 通知工具调用请求。
+	// OnToolCall 通知 LLM 请求调用工具。
+	// name 是工具名称，args 是 JSON 格式的参数。
+	//
+	// 调用时机：queryLoop 收到 LLM 返回的 tool_calls 后立即调用。
+	// 此时应中断流式输出显示（如果之前有 OnDelta 输出的话），转而展示工具调用信息。
+	//
+	// 后续事件：紧接着会收到 OnToolResult（工具执行结果）。
 	OnToolCall(name, args string)
 
 	// OnToolResult 通知工具执行结果。
+	// name 是工具名称，result 是执行输出，isError 表示是否执行出错。
+	//
+	// 调用时机：工具执行完成后（无论成功或失败）。
+	// 注意：工具执行出错时 isError=true，但 result 中已包含错误描述，
+	// Agent 会继续推理而非终止。
 	OnToolResult(name, result string, isError bool)
 
-	// OnContinue 通知继续推理。
+	// OnContinue 通知继续推理（工具执行完毕，进入下一轮）。
+	// iteration 是下一轮的迭代次数。
+	//
+	// 调用时机：所有工具执行完毕后，queryLoop 准备进入下一轮时。
+	// 此时可以清除流式状态，准备接收新一轮的 OnDelta。
 	OnContinue(iteration int)
 
 	// OnFinal 通知最终回答。
+	// answer 是 LLM 的完整最终回答（Markdown 格式）。
+	//
+	// 调用时机：queryLoop 完成，LLM 不再需要调用工具时。
+	// 这是每轮查询的终点，此后 Agent 回到空闲状态等待下一条用户输入。
+	//
+	// 典型实现：使用 Glamour 渲染 Markdown，添加分隔线标记本轮结束。
 	OnFinal(answer string)
 
 	// OnError 通知错误。
+	// err 可能来自 LLM 调用失败、工具执行异常、或业务逻辑错误。
+	//
+	// 注意：OnError 不会终止 Agent 运行，Agent 会继续等待下一条用户输入。
+	// 致命错误由 runner.Run() 的返回值处理。
 	OnError(err error)
 
-	// OnMessage 输出一般性消息（成功提示、帮助信息等）。
+	// OnMessage 输出一般性消息（成功提示、帮助信息、状态更新等）。
+	// 与 OnError 的区别：OnMessage 是中性/正面消息，OnError 是错误消息。
+	//
+	// 使用场景：
+	//   - 会话切换成功提示
+	//   - 记忆提取状态
+	//   - 压缩完成通知
 	OnMessage(msg string)
 
+	// ── 交互组 ──────────────────────────────────────────
+
 	// ConfirmPermission 请求用户确认权限。
-	// 返回 true 表示允许，false 表示拒绝。
-	// inputForward 不为 nil 时从此 channel 读取用户输入。
+	// tool 是工具名称，args 是 JSON 格式的参数。
+	// inputForward 是输入转发 channel：实现应从该 channel 读取用户确认输入
+	// （而非从 ReadInputChan），这样 Runner 可以在确认期间继续接收控制命令。
+	//
+	// 返回值：true 表示允许执行，false 表示拒绝。
+	//
+	// 调用时机：权限检查器对工具返回 "confirm" 动作时。
+	// 此方法是阻塞的——queryLoop 会等待确认结果后才继续执行。
+	//
+	// inputForward 说明：
+	//   - 不为 nil 时，从此 channel 读取用户输入（与主循环共享输入流）
+	//   - 为 nil 时，实现应自行读取输入（如直接调用 ReadInput）
 	ConfirmPermission(tool, args string, inputForward <-chan string) (bool, error)
 
+	// ── 生命周期组 ──────────────────────────────────────
+
 	// Welcome 打印启动欢迎信息。
+	// model 是当前使用的 LLM 模型名称。
+	//
+	// 调用时机：Runner.Run() 开始时调用一次。
+	// 典型实现：打印 ASCII art banner、版本号、模型名称、使用提示。
 	Welcome(model string)
 
 	// Close 关闭 UI，释放资源。
+	// 调用时机：Runner.Run() 退出时（正常退出或错误退出）。
+	// 典型实现：恢复终端状态（raw mode → cooked mode）、关闭文件句柄。
 	Close() error
 
 	// SetSessionName 设置当前会话的显示名称。
+	// 调用时机：会话创建/切换时，Runner 更新 UI 显示的会话名。
 	SetSessionName(name string)
 
 	// SetModel 设置当前使用的模型名称。
+	// 调用时机：初始化时设置一次，后续模型不变（目前不支持运行时切换模型）。
 	SetModel(model string)
 
 	// UpdateTokens 累计本轮 token 用量。
+	// input 是输入 token 增量，output 是输出 token 增量。
+	//
+	// 调用时机：每次 LLM 调用完成后（在 queryEngine 消费事件时）。
+	// 配合 ResetTokens 使用，每轮查询开始时重置，结束时显示总用量。
 	UpdateTokens(input, output int)
 
 	// ResetTokens 重置本轮 token 计数。
+	// 调用时机：每轮新查询开始前。
 	ResetTokens()
 }

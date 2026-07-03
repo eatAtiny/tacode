@@ -13,19 +13,38 @@ import (
 const (
 	defaultSummaryCount = 10  // 默认加载最近 10 条摘要
 	maxMemoryEntries    = 10  // 默认最多加载 10 条记忆
-	minImportance       = 2   // 默认最低重要性
+	minImportance       = 2   // 默认最低重要性（1-5，>=2 才会注入 prompt）
 	compressThreshold   = 0.8 // token 使用率超过 80% 触发压缩
 )
 
+// ──────────────────────────────────────────────────────────
+// Retriever — 三层记忆检索器
+//
+// 调用链中的角色：
+//   QueryEngine（步骤 1）
+//     → Retriever.BuildContext(query)
+//       → 返回上下文文本（注入 system/user prompt）
+//
+//   QueryEngine（步骤 2）
+//     → Retriever.CheckAndCompress(ctx, client, tokenLimit, currentUsage)
+//       → 超过 80% 阈值时调用 CompressSummaries()
+//
+// 检索顺序（优先级从高到低）：
+//   1. L3 记忆索引（MEMORY.md）—— 所有记忆的目录
+//   2. L3 高重要性记忆内容（importance >= 2，最多 10 条）
+//   3. L2 最近摘要（最近 10 条，LLM 提取的对话摘要）
+//   4. 降级方案：L2 为空时 → EventStore 摘要 → HistoryStore 摘要
+// ──────────────────────────────────────────────────────────
+
 // Retriever 负责从三层存储中检索信息，构建注入 prompt 的上下文。
 type Retriever struct {
-	history  *HistoryStore
-	summary  *SummaryStore
-	memory   *MemoryStore
-	events   *EventStore
+	history *HistoryStore
+	summary *SummaryStore
+	memory  *MemoryStore
+	events  *EventStore
 }
 
-// NewRetriever 构造 Retriever。
+// NewRetriever 构造 Retriever，组合三层存储。
 func NewRetriever(history *HistoryStore, summary *SummaryStore, memory *MemoryStore, events *EventStore) *Retriever {
 	return &Retriever{
 		history: history,
@@ -36,29 +55,43 @@ func NewRetriever(history *HistoryStore, summary *SummaryStore, memory *MemorySt
 }
 
 // BuildContext 构建注入 prompt 的上下文文本。
-// 优先使用 L2 摘要，L2 为空时降级到 L1 原始日志摘要。
-// 始终包含 L3 记忆索引和高重要性记忆。
+//
+// 这是每轮查询前调用的核心方法（QueryEngine 步骤 1）。
+//
+// 检索流程（优先级从高到低）：
+//
+//	步骤 1.1: 加载 L3 记忆索引（MEMORY.md）
+//	步骤 1.2: 加载 L3 高重要性记忆内容（importance >= 2，最多 10 条）
+//	步骤 1.3: 加载 L2 最近摘要（最近 10 条）
+//	步骤 1.4: 降级方案
+//	          L2 为空 → EventStore.Digest()（从事件日志生成文本摘要）
+//	          EventStore 为空 → HistoryStore.Digest()（从原始日志生成摘要）
+//
+// 返回：
+//   - string: 拼接后的上下文文本（可直接注入 prompt）
+//   - error: 读取错误（降级方案也会尝试，尽最大努力返回可用上下文）
 func (r *Retriever) BuildContext(query string) (string, error) {
 	var parts []string
 
-	// 1. 加载 L3 记忆索引。
+	// ── 步骤 1.1: L3 记忆索引 ──
 	index := r.memory.LoadIndex()
 	if index != "" {
 		parts = append(parts, "## 记忆索引\n"+index)
 	}
 
-	// 2. 加载 L3 高重要性记忆内容。
+	// ── 步骤 1.2: L3 高重要性记忆内容 ──
 	memories, err := r.memory.FormatForPrompt(maxMemoryEntries, minImportance)
 	if err == nil && memories != "" {
 		parts = append(parts, "## 重要记忆\n"+memories)
 	}
 
-	// 3. 加载 L2 最近摘要。
+	// ── 步骤 1.3: L2 最近摘要 ──
 	summaryText, err := r.summary.FormatRecent(defaultSummaryCount)
 	if err == nil && summaryText != "" {
 		parts = append(parts, "## 最近对话摘要\n"+summaryText)
 	} else {
-		// 降级：优先从事件日志生成摘要，再降级到原始日志。
+		// ── 步骤 1.4: 降级方案 ──
+		// 优先从事件日志生成摘要（更完整），再降级到原始日志。
 		if r.events != nil {
 			eventDigest := r.events.Digest(defaultSummaryCount)
 			if eventDigest != "" && eventDigest != "(无历史记录)" {
@@ -79,7 +112,14 @@ func (r *Retriever) BuildContext(query string) (string, error) {
 }
 
 // CheckAndCompress 检查是否需要压缩，超过阈值时自动压缩 L2 摘要。
+//
+// 调用时机：QueryEngine 步骤 2（构建上下文后、构建 prompt 前）。
+//
+// 判断逻辑：
+//   currentUsage / tokenLimit > 80% → 触发压缩
+//
 // tokenLimit 是模型的上下文窗口大小，currentUsage 是当前已用 token。
+// 返回 true 表示已触发压缩，上层应重新构建上下文。
 func (r *Retriever) CheckAndCompress(ctx context.Context, client *llm.OpenAIClient, tokenLimit, currentUsage int) (bool, error) {
 	if tokenLimit <= 0 {
 		return false, nil
@@ -94,6 +134,16 @@ func (r *Retriever) CheckAndCompress(ctx context.Context, client *llm.OpenAIClie
 }
 
 // CompressSummaries 使用 LLM 合并旧摘要，保留最近几条不动。
+//
+// 流程：
+//   1. 加载所有 L2 摘要
+//   2. 如果 <= 3 条，无需压缩
+//   3. 保留最近 3 条不动，压缩其余的（toCompress）
+//   4. 构建压缩 prompt：将 toCompress 格式化为列表
+//   5. 调用 LLM 合并为一段综合摘要
+//   6. 用压缩后的摘要替换旧的（1 条综合摘要 + 3 条最近摘要）
+//
+// 压缩后的摘要前缀 "[压缩摘要]" 标记。
 func (r *Retriever) CompressSummaries(ctx context.Context, client *llm.OpenAIClient) error {
 	all, err := r.summary.LoadAll()
 	if err != nil {
@@ -108,7 +158,7 @@ func (r *Retriever) CompressSummaries(ctx context.Context, client *llm.OpenAICli
 	toCompress := all[:len(all)-keepRecent]
 	recent := all[len(all)-keepRecent:]
 
-	// 构建压缩 prompt。
+	// 构建压缩 prompt（旧摘要列表）。
 	var oldSummaries strings.Builder
 	for _, s := range toCompress {
 		fmt.Fprintf(&oldSummaries, "- [轮次 %d] %s\n", s.Round, s.Summary)
@@ -142,7 +192,8 @@ func (r *Retriever) CompressSummaries(ctx context.Context, client *llm.OpenAICli
 }
 
 // EstimateTokens 粗略估算文本的 token 数。
-// ASCII 文本约 4 字符/token，中文约 2 字符/token。
+// 启发式算法：ASCII 文本约 4 字符/token，CJK 字符约 2 字符/token。
+// 这不是精确计算（精确计算需要 tokenizer），但对压缩判断足够。
 func EstimateTokens(text string) int {
 	asciiCount := 0
 	cjkCount := 0

@@ -1,82 +1,139 @@
+// Package text 提供 headless 模式的 UI 实现。
+//
+// TextUI 适用于无 TTY 环境（如子 agent、管道、后台任务），不依赖终端渲染。
+// 所有事件通过 OnEvent 回调函数转发给上层处理，不做任何终端输出。
+//
+// 与 BubbleUI 的关键区别：
+//   - 不写 os.Stdout（Welcome 为空操作，OnDelta 不打印）
+//   - ReadInput 返回错误（不支持交互输入）
+//   - ConfirmPermission 默认放行（无人值守场景）
+//   - 通过 OnEvent 回调将所有事件暴露给上层
+//
+// 使用场景：
+//   - 子 agent 模式：上层 agent 通过 OnEvent 回调接收事件并自行处理
+//   - 测试环境：验证事件序列而无需实际终端
+//   - API 模式：将事件转换为 HTTP SSE 或 WebSocket 消息
 package text
 
 import "fmt"
 
-// TextUI 用于子 agent 模式，无 TTY 依赖。
-// 所有事件通过 OnEvent 回调转发给上层。
+// TextUI 是 UI 接口的 headless 实现。
+//
+// 所有事件通过 OnEvent 回调转发给上层，格式为 OnEvent(eventType, data)。
+// eventType 是事件类型字符串（"think"、"delta"、"final" 等），
+// data 的类型取决于事件类型。
+//
+// 使用示例：
+//
+//	ui := text.NewTextUI()
+//	ui.OnEvent = func(event string, data any) {
+//	    switch event {
+//	    case "delta":
+//	        fmt.Print(data.(string))
+//	    case "final":
+//	        fmt.Println("Answer:", data.(string))
+//	    }
+//	}
 type TextUI struct {
 	// OnEvent 回调函数，上层 agent 可注入处理逻辑。
-	// 参数: event 事件类型, data 事件数据（类型取决于 event）。
+	// 参数：
+	//   - event: 事件类型字符串，对应 UI 接口的方法名：
+	//     "think"、"delta"、"tool_call"、"tool_result"、"continue"、
+	//     "final"、"error"、"message"、"permission"
+	//   - data: 事件数据，类型因事件而异：
+	//     - think/continue: int（迭代次数）
+	//     - delta/final/message: string（文本内容）
+	//     - tool_call: map[string]string{"name": ..., "args": ...}
+	//     - tool_result: map[string]any{"name": ..., "result": ..., "is_error": ...}
+	//     - error: error
+	//     - permission: map[string]string{"tool": ..., "args": ...}
 	OnEvent func(event string, data any)
 }
 
-// NewTextUI 创建 TextUI 实例。
+// NewTextUI 创建 TextUI 实例。OnEvent 初始为 nil，上层需自行设置。
 func NewTextUI() *TextUI {
 	return &TextUI{}
 }
 
+// ReadInput 不支持。TextUI 不提供交互式输入，始终返回错误。
 func (t *TextUI) ReadInput() (string, error) {
 	return "", fmt.Errorf("TextUI: ReadInput not implemented")
 }
 
+// ReadInputChan 返回一个立即关闭的空 channel。
+// TextUI 不提供交互式输入，上层不应依赖此 channel。
 func (t *TextUI) ReadInputChan() <-chan string {
 	ch := make(chan string)
 	close(ch)
 	return ch
 }
 
+// OnThink 转发思考事件。data 为 iteration（int）。
 func (t *TextUI) OnThink(iteration int) {
 	if t.OnEvent != nil {
 		t.OnEvent("think", iteration)
 	}
 }
 
+// OnDelta 转发流式增量文本事件。data 为 content（string）。
 func (t *TextUI) OnDelta(content string) {
 	if t.OnEvent != nil {
 		t.OnEvent("delta", content)
 	}
 }
 
+// OnToolCall 转发工具调用事件。
+// data 为 map[string]string{"name": ..., "args": ...}。
 func (t *TextUI) OnToolCall(name, args string) {
 	if t.OnEvent != nil {
 		t.OnEvent("tool_call", map[string]string{"name": name, "args": args})
 	}
 }
 
+// OnToolResult 转发工具执行结果事件。
+// data 为 map[string]any{"name": ..., "result": ..., "is_error": ...}。
 func (t *TextUI) OnToolResult(name, result string, isError bool) {
 	if t.OnEvent != nil {
 		t.OnEvent("tool_result", map[string]any{"name": name, "result": result, "is_error": isError})
 	}
 }
 
+// OnContinue 转发继续推理事件。data 为 iteration（int）。
 func (t *TextUI) OnContinue(iteration int) {
 	if t.OnEvent != nil {
 		t.OnEvent("continue", iteration)
 	}
 }
 
+// OnFinal 转发最终回答事件。data 为 answer（string）。
 func (t *TextUI) OnFinal(answer string) {
 	if t.OnEvent != nil {
 		t.OnEvent("final", answer)
 	}
 }
 
+// OnError 转发错误事件。data 为 err（error）。
 func (t *TextUI) OnError(err error) {
 	if t.OnEvent != nil {
 		t.OnEvent("error", err)
 	}
 }
 
+// OnMessage 转发一般性消息事件。data 为 msg（string）。
 func (t *TextUI) OnMessage(msg string) {
 	if t.OnEvent != nil {
 		t.OnEvent("message", msg)
 	}
 }
 
+// Welcome 在 headless 模式下为空操作（不输出欢迎信息）。
 func (t *TextUI) Welcome(model string) {
 	// 子 agent 模式不输出欢迎信息。
 }
 
+// ConfirmPermission 默认放行所有权限请求（无人值守场景）。
+// 转发 permission 事件（data 为 map[string]string）后直接返回 true。
+// 如需权限控制，上层应通过 OnEvent 回调拦截并自行处理。
 func (t *TextUI) ConfirmPermission(tool, args string, inputForward <-chan string) (bool, error) {
 	if t.OnEvent != nil {
 		t.OnEvent("permission", map[string]string{"tool": tool, "args": args})
@@ -84,6 +141,7 @@ func (t *TextUI) ConfirmPermission(tool, args string, inputForward <-chan string
 	return true, nil // 默认放行
 }
 
+// Close 无资源需释放，返回 nil。
 func (t *TextUI) Close() error { return nil }
 
 // SetSessionName 是 headless 模式下的空操作。

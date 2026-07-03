@@ -21,9 +21,29 @@ const maxIterations = 10
 
 // Runner 负责驱动 Agent 的交互循环执行。
 //
-// 架构：
+// 架构（两层查询）：
 //   - QueryEngine 层（queryEngine 方法）：负责上层协调
 //   - queryLoop 层（queryLoop 函数）：负责核心循环
+//
+// 每条用户输入的处理调用链：
+//
+//	Runner.Run()                          ← REPL 主循环，select 监听输入/结果
+//	  └─ runQueryAsync()                  ← 启动后台 goroutine
+//	       └─ queryEngine()                ← 上层协调（QueryEngine 层）
+//	            ├─ Retriever.BuildContext() ← 步骤 1: 构建三层记忆上下文
+//	            ├─ CheckAndCompress()       ← 步骤 2: 自动压缩检查
+//	            ├─ BuildReActPrompt()       ← 步骤 3: 构建 System/User Prompt
+//	            ├─ queryLoop()              ← 步骤 4: 启动核心循环，返回 event channel
+//	            │    └─ runLoop()           ←   步骤 4a-4f 的 while 循环
+//	            │         ├─ callLLMStream() ←   步骤 4a: 调用 LLM 流式接口
+//	            │         ├─ executeToolCalls() ← 步骤 4b: 执行工具调用
+//	            │         ├─ checkAndCompressContext() ← 步骤 4c: 检查并压缩上下文
+//	            │         ├─ detectDuplicateAndWarn() ← 步骤 4d: 检测重复调用
+//	            │         └─ generateFinalSummary()   ← 步骤 4e: 超限时生成总结
+//	            └─ 消费 event channel       ← 步骤 5: 转发事件到 UI + EventStore
+//	  └─ 返回 result channel               ← 步骤 6: Runner 收到最终结果
+//	  └─ extractMemory()                   ← 步骤 7: 后台提取 L2 摘要 + L3 记忆
+//	  └─ ensurePersisted()                 ← 步骤 8: 临时会话首次对话后落盘
 //
 // 职责：
 //   - 读取用户输入
@@ -31,25 +51,25 @@ const maxIterations = 10
 //   - 调用 QueryEngine 执行任务
 //   - 保存记忆（三层：L1 原始日志 + L2 摘要 + L3 结构化记忆）
 type Runner struct {
-	llm       *llm.OpenAIClient      // LLM 客户端
-	history   *memory.HistoryStore    // L1 原始对话日志
-	summary   *memory.SummaryStore    // L2 摘要
-	memStore  *memory.MemoryStore     // L3 结构化记忆
-	events    *memory.EventStore      // 事件日志
-	extractor *memory.Extractor       // 记忆提取器
-	retriever *memory.Retriever       // 记忆检索器
-	tools     *tool.Registry          // 工具注册表
-	sessions  *session.SessionManager // 会话管理器
-	ui        ui.UI                   // UI 接口
+	llm       *llm.OpenAIClient        // LLM 客户端
+	history   *memory.HistoryStore      // L1 原始对话日志
+	summary   *memory.SummaryStore      // L2 摘要
+	memStore  *memory.MemoryStore       // L3 结构化记忆
+	events    *memory.EventStore        // 事件日志
+	extractor *memory.Extractor         // 记忆提取器
+	retriever *memory.Retriever         // 记忆检索器
+	tools     *tool.Registry            // 工具注册表
+	sessions  *session.SessionManager   // 会话管理器
+	ui        ui.UI                     // UI 接口
 
-	isTemporary        bool   // 临时会话：启动时创建，有对话后才落盘
-	tempID             string // 临时会话 ID
-	pendingSessionName string // /new 指定的会话名，ensurePersisted 时使用
+	isTemporary        bool     // 临时会话：启动时创建，有对话后才落盘
+	tempID             string   // 临时会话 ID
+	pendingSessionName string   // /new 指定的会话名，ensurePersisted 时使用
 }
 
 // NewRunner 构造 Agent 执行器。
 //
-// 参数：
+// 参数（按初始化顺序）：
 //   - client: LLM 客户端
 //   - history: L1 原始对话日志
 //   - summary: L2 摘要
@@ -88,17 +108,29 @@ func NewRunner(
 
 // Run 进入交互循环：读用户输入 -> QueryEngine -> 保存记忆。
 //
-// 流程：
-//  1. 打印启动横幅和会话提示
-//  2. 初始化临时会话
-//  3. 进入主循环（channel select 模式）：
-//     - 从 inputCh 读取用户输入
-//     - 从 queryResultCh 读取查询结果
-//     - 查询运行中输入 /stop 可取消
+// 主循环流程（channel select 模式）：
+//
+//	循环开始
+//	  ├─ case input, ok := <-inputCh         ← 收到用户输入
+//	  │    ├─ "exit"  → return（退出）
+//	  │    ├─ "/stop" → queryCancel()（中断正在运行的查询）
+//	  │    ├─ "/xxx"  → handleSessionCommand()（会话管理命令）
+//	  │    └─ 其他     → runQueryAsync()（启动异步查询）
+//	  │                   ├─ 记录 EventUser
+//	  │                   ├─ 重置 token 计数
+//	  │                   ├─ 创建 queryCtx + cancel
+//	  │                   └─ 启动 goroutine 调用 queryEngine()
+//	  │
+//	  └─ case result, ok := <-queryResultCh  ← 收到查询结果
+//	       ├─ 记录 EventAssistant
+//	       ├─ go history.Append()             ← 后台保存 L1
+//	       ├─ go extractMemory()              ← 后台提取 L2 + L3
+//	       └─ go ensurePersisted()            ← 首次对话后落盘临时会话
 //
 // 启动时创建临时会话，只有真正对话后才落盘到 manifest。
 func (r *Runner) Run(ctx context.Context) error {
-	// 启动临时会话
+	// ── 启动临时会话 ──
+	// 临时会话不在 manifest 中，首次对话后通过 ensurePersisted 落盘。
 	r.isTemporary = true
 	tempID, err := session.GenerateID()
 	if err != nil {
@@ -112,29 +144,33 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.events.SetPath(tempDir)
 	r.cleanOrphanTempDirs()
 
-	// 设置 UI 初始状态
+	// 设置 UI 初始状态。
 	r.ui.SetSessionName("new")
 	r.ui.SetModel(r.llm.Model())
 
-	// 显示欢迎信息
+	// 显示欢迎信息。
 	r.ui.Welcome(r.llm.Model())
 
-	// 启动异步输入读取
+	// ── 启动异步输入读取 ──
+	// inputCh 是后台 goroutine 持续读取用户输入的 channel。
 	inputCh := r.ui.ReadInputChan()
 
-	// 查询状态
-	var queryResultCh <-chan queryResult
-	var queryCancel context.CancelFunc
-	var queryRunning bool
-	var round int
-	var currentInput string    // 当前查询的用户输入，用于保存记忆
-	var inputForward chan string // 查询期间转发输入到此 channel（权限确认等）
+	// ── 查询状态变量 ──
+	var queryResultCh <-chan queryResult    // 查询结果 channel（nil 表示无运行中的查询）
+	var queryCancel context.CancelFunc     // 取消函数（用于 /stop）
+	var queryRunning bool                  // 是否有查询正在运行
+	var round int                          // 当前轮次号
+	var currentInput string                // 当前查询的用户输入，用于保存记忆
+	var inputForward chan string           // 查询期间转发输入到此 channel（权限确认等）
 
-	// 显示初始提示符
+	// 显示初始提示符。
 	fmt.Print("> ")
 
 	for {
 		select {
+		// ──────────────────────────────────────────
+		// 分支 A: 收到用户输入
+		// ──────────────────────────────────────────
 		case input, ok := <-inputCh:
 			if !ok {
 				// EOF，退出。
@@ -151,6 +187,7 @@ func (r *Runner) Run(ctx context.Context) error {
 				continue
 			}
 
+			// "exit" 退出程序。
 			if strings.EqualFold(input, "exit") {
 				if queryRunning {
 					queryCancel()
@@ -158,7 +195,8 @@ func (r *Runner) Run(ctx context.Context) error {
 				return nil
 			}
 
-			// 查询运行中：转发输入到 query 侧（/stop 优先）
+			// ── 子分支 A1: 查询运行中 ──
+			// 输入转发给查询侧（/stop 优先）。
 			if queryRunning {
 				if input == "/stop" {
 					queryCancel()
@@ -168,14 +206,15 @@ func (r *Runner) Run(ctx context.Context) error {
 					round++
 					fmt.Print("> ")
 				} else if inputForward != nil {
-					// 转发给 query 侧（权限确认等场景）
+					// 转发给 query 侧（权限确认等场景）。
 					inputForward <- input
 				}
 				continue
 			}
 
-			// 空闲状态：处理输入
+			// ── 子分支 A2: 空闲状态，处理输入 ──
 			if strings.HasPrefix(input, "/") {
+				// 处理会话管理命令。
 				newRound, handled := r.handleSessionCommand(input)
 				if handled {
 					if newRound > 0 {
@@ -189,30 +228,38 @@ func (r *Runner) Run(ctx context.Context) error {
 				continue
 			}
 
-			// 普通输入：启动异步查询
+			// ── 子分支 A3: 普通输入，启动异步查询 ──
 			round++
 			r.ui.ResetTokens()
 
+			// 记录用户输入事件。
 			r.events.Append(memory.Event{
 				Type:    memory.EventUser,
 				Round:   round,
 				Content: input,
 			})
 
+			// 创建可取消的 context（用于 /stop）。
 			queryCtx, cancel := context.WithCancel(ctx)
 			queryCancel = cancel
 			queryRunning = true
 			currentInput = input
 			inputForward = make(chan string, 1)
 
+			// 启动后台 goroutine 执行查询。
+			// queryResultCh 收到结果后触发下面的分支 B。
 			queryResultCh = r.runQueryAsync(queryCtx, round, input, inputForward)
 
+		// ──────────────────────────────────────────
+		// 分支 B: 收到查询结果
+		// ──────────────────────────────────────────
 		case result, ok := <-queryResultCh:
 			if !ok {
 				queryResultCh = nil
 				continue
 			}
 
+			// 清理查询状态。
 			queryRunning = false
 			queryResultCh = nil
 			inputForward = nil
@@ -220,6 +267,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			if result.err != nil {
 				r.ui.OnError(result.err)
 			} else {
+				// 记录助手回答事件。
 				r.events.Append(memory.Event{
 					Type:    memory.EventAssistant,
 					Round:   round,
@@ -227,7 +275,11 @@ func (r *Runner) Run(ctx context.Context) error {
 					Model:   r.llm.Model(),
 				})
 
-				// 保存记忆（后台执行）
+				// ── 后台保存记忆 ──
+				// 不阻塞主循环，在独立 goroutine 中执行：
+				//   1. 保存 L1 原始对话记录
+				//   2. 提取 L2 摘要 + L3 记忆
+				//   3. 首次对话后临时会话落盘
 				go func(round int, input, answer string) {
 					if err := r.history.Append(round, input, answer); err != nil {
 						r.ui.OnError(fmt.Errorf("save history failed at round %d: %w", round, err))
@@ -248,6 +300,12 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 // runQueryAsync 在后台 goroutine 中执行查询，返回结果 channel。
+//
+// 这是 Runner.Run() → queryEngine() 的桥梁：
+//   - 创建带缓冲的 channel（容量 1）
+//   - 启动 goroutine 调用 queryEngine()
+//   - 立即返回 channel（非阻塞）
+//   - goroutine 完成后写入结果并关闭 channel
 func (r *Runner) runQueryAsync(ctx context.Context, round int, input string, inputForward <-chan string) <-chan queryResult {
 	ch := make(chan queryResult, 1)
 	go func() {
@@ -297,11 +355,7 @@ func trimArgs(args string) string {
 //
 // 签名格式：工具名1:参数1|工具名2:参数2|...
 //
-// 参数：
-//   - calls: 工具调用列表
-//
-// 返回：
-//   - string: 签名字符串，空列表返回空字符串
+// 返回空字符串表示空列表。
 func toolCallSignature(calls []llm.ToolCall) string {
 	if len(calls) == 0 {
 		return ""
