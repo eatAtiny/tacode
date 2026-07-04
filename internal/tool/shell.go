@@ -60,10 +60,19 @@ func (t *ShellTool) Execute(args string) (string, error) {
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return result, fmt.Errorf("command timed out after %s", t.timeout)
+			return "", fmt.Errorf("命令超时 (%s)", t.timeout)
 		}
-		return result, fmt.Errorf("command failed: %w\n%s", err, result)
+		// 提取退出码，让 LLM 能看到具体的失败原因。
+		exitCode := -1
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		}
+		if result != "" {
+			return "", fmt.Errorf("命令失败 (退出码 %d):\n%s", exitCode, result)
+		}
+		return "", fmt.Errorf("命令失败 (退出码 %d)，无输出", exitCode)
 	}
+
 	return result, nil
 }
 
@@ -140,7 +149,10 @@ func isDangerousShellCommand(args string) bool {
 // PromptGuide 返回 shell 工具的使用引导。
 func (t *ShellTool) PromptGuide() string {
 	return "优先使用 grep、list 等专用工具代替 shell 命令进行搜索和目录浏览。" +
-		"shell 的默认超时为 30 秒，长时间任务会超时失败。"
+		"shell 的默认超时为 30 秒，长时间任务会超时失败。" +
+		"执行创建/删除/修改等操作时，务必使用 && echo 输出确认信息，" +
+		"例如: rm -rf dir && echo '已删除' 或 mkdir -p a/b && echo '目录已创建'。" +
+		"否则命令成功时无输出，你将无法判断任务是否完成。"
 }
 
 // ── Tool 接口：结果上限 ──

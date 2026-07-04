@@ -28,6 +28,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
+	"golang.org/x/term"
 )
 
 // BubbleUI 是 UI 接口的终端美化实现。
@@ -76,6 +78,11 @@ type BubbleUI struct {
 	inputChan chan string
 	// inputOnce 保证后台输入 goroutine 只启动一次
 	inputOnce sync.Once
+
+		// oldTermState 生模式前的终端状态，Close() 时恢复以防止终端残留生模式。
+		oldTermState *term.State
+		// termFd 终端文件描述符。
+		termFd int
 }
 
 // NewBubbleUI 创建 BubbleUI 实例。
@@ -102,8 +109,13 @@ func NewBubbleUI(_ ...tea.ProgramOption) *BubbleUI {
 	}
 }
 
-// Close 关闭 UI，释放资源。目前无持久资源需要释放，返回 nil。
+// Close 恢复终端状态并释放资源。
+// 必须调用以将终端从生模式恢复到熟模式，否则退出后终端不回显输入。
 func (b *BubbleUI) Close() error {
+	if b.oldTermState != nil {
+		term.Restore(b.termFd, b.oldTermState)
+		b.oldTermState = nil
+	}
 	return nil
 }
 
@@ -138,6 +150,7 @@ var (
 // 内部复用 ReadInputChan 的 channel。
 func (b *BubbleUI) ReadInput() (string, error) {
 	fmt.Print(styleUserPrefix.Render("> "))
+	os.Stdout.Sync()
 	ch := b.ReadInputChan()
 	input, ok := <-ch
 	if !ok {
@@ -147,22 +160,100 @@ func (b *BubbleUI) ReadInput() (string, error) {
 }
 
 // ReadInputChan 返回异步输入 channel。
-// 首次调用时启动后台 goroutine，使用 bufio.Scanner 持续读取 os.Stdin。
+// 首次调用时启动后台 goroutine，将终端设为生模式（raw mode），
+// 逐 rune 读取输入以正确处理多字节字符（中文等）的退格删除。
 // 后续调用返回同一个 channel（通过 sync.Once 保证）。
 // channel 在输入流结束（EOF）时关闭。
 func (b *BubbleUI) ReadInputChan() <-chan string {
 	b.inputOnce.Do(func() {
 		b.inputChan = make(chan string, 1)
-		go func() {
-			defer close(b.inputChan)
-			scanner := bufio.NewScanner(os.Stdin)
-			for scanner.Scan() {
-				input := strings.TrimSpace(scanner.Text())
-				b.inputChan <- input
-			}
-		}()
+
+		// 在进入生模式前保存终端状态，Close() 用它恢复终端。
+		fd := int(os.Stdin.Fd())
+		b.termFd = fd
+		b.oldTermState, _ = term.GetState(fd)
+
+		go b.rawInputLoop(fd)
 	})
 	return b.inputChan
+}
+
+// rawInputLoop 在生模式下运行，逐 rune 读取输入。
+//
+// 与熟模式 bufio.Scanner 的关键区别：
+//   - 按 rune（而非字节）处理退格：中文"好"(3字节) → 一次退格删掉整个字符
+//   - 手动回显：每个可打印字符即时回显到终端
+//   - 退格清除：根据 rune 显示宽度擦除正确的列数（中文 2 列，ASCII 1 列）
+//
+// 生模式下 Bubble Tea 的 session picker（/list）不受影响，
+// 因为它通过 /dev/tty 读取输入（独立的 fd）。
+func (b *BubbleUI) rawInputLoop(fd int) {
+	defer close(b.inputChan)
+
+	if _, err := term.MakeRaw(fd); err != nil {
+		return // 无法设置生模式，放弃
+	}
+	// 后备恢复：如果 Close() 未能运行（如崩溃），defer 尽力恢复终端。
+	// 正常退出时 Close() 已恢复 → 此处 Restore 已是熟模式 → 安全无操作。
+	defer func() {
+		if b.oldTermState != nil {
+			term.Restore(fd, b.oldTermState)
+			b.oldTermState = nil
+		}
+	}()
+
+	reader := bufio.NewReader(os.Stdin)
+	var line []rune
+
+	for {
+		r, _, err := reader.ReadRune()
+		if err != nil {
+			return // EOF 或读取错误，退出
+		}
+
+		switch r {
+		case '\r': // Enter（生模式下回车发送 \r）
+			os.Stdout.WriteString("\r\n")
+			os.Stdout.Sync()
+			b.inputChan <- string(line)
+			line = line[:0]
+
+		case 0x03: // Ctrl+C — 清空当前行
+			os.Stdout.WriteString("^C\r\n")
+			os.Stdout.Sync()
+			line = line[:0]
+
+		case 0x04: // Ctrl+D — 空行时退出
+			if len(line) == 0 {
+				os.Stdout.WriteString("\r\n")
+				os.Stdout.Sync()
+				return
+			}
+			// 非空行时忽略 Ctrl+D
+
+		case 0x7F: // Backspace — 删除最后一个 rune
+			if len(line) > 0 {
+				last := line[len(line)-1]
+				line = line[:len(line)-1]
+
+				// 按显示宽度擦除：中文占 2 列，ASCII 占 1 列
+				w := runewidth.RuneWidth(last)
+				for i := 0; i < w; i++ {
+					os.Stdout.WriteString("\b \b")
+				}
+				os.Stdout.Sync()
+			}
+
+		default:
+			// 可打印字符 + Tab
+			if r >= 0x20 || r == '\t' {
+				line = append(line, r)
+				os.Stdout.WriteString(string(r))
+				os.Stdout.Sync()
+			}
+			// 方向键等转义序列（0x1B[... ）静默忽略
+		}
+	}
 }
 
 // OnThink 通知新一轮思考开始。
@@ -326,6 +417,7 @@ func (b *BubbleUI) ConfirmPermission(tool, args string, inputForward <-chan stri
 	fmt.Printf("\n%s %s\n", styleThink.Render("⚠️  权限确认:"), tool)
 	fmt.Printf("  参数: %s\n", styleMuted.Render(args))
 	fmt.Print(styleUserPrefix.Render("  允许执行? [y/N] "))
+	os.Stdout.Sync()
 
 	var input string
 	var ok bool

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"agentic/internal/llm"
@@ -51,20 +52,20 @@ const maxIterations = 10
 //   - 调用 QueryEngine 执行任务
 //   - 保存记忆（三层：L1 原始日志 + L2 摘要 + L3 结构化记忆）
 type Runner struct {
-	llm       *llm.OpenAIClient        // LLM 客户端
-	history   *memory.HistoryStore      // L1 原始对话日志
-	summary   *memory.SummaryStore      // L2 摘要
-	memStore  *memory.MemoryStore       // L3 结构化记忆
-	events    *memory.EventStore        // 事件日志
-	extractor *memory.Extractor         // 记忆提取器
-	retriever *memory.Retriever         // 记忆检索器
-	tools     *tool.Registry            // 工具注册表
-	sessions  *session.SessionManager   // 会话管理器
-	ui        ui.UI                     // UI 接口
+	llm       *llm.OpenAIClient       // LLM 客户端
+	history   *memory.HistoryStore    // L1 原始对话日志
+	summary   *memory.SummaryStore    // L2 摘要
+	memStore  *memory.MemoryStore     // L3 结构化记忆
+	events    *memory.EventStore      // 事件日志
+	extractor *memory.Extractor       // 记忆提取器
+	retriever *memory.Retriever       // 记忆检索器
+	tools     *tool.Registry          // 工具注册表
+	sessions  *session.SessionManager // 会话管理器
+	ui        ui.UI                   // UI 接口
 
-	isTemporary        bool     // 临时会话：启动时创建，有对话后才落盘
-	tempID             string   // 临时会话 ID
-	pendingSessionName string   // /new 指定的会话名，ensurePersisted 时使用
+	isTemporary        bool   // 临时会话：启动时创建，有对话后才落盘
+	tempID             string // 临时会话 ID
+	pendingSessionName string // /new 指定的会话名，ensurePersisted 时使用
 }
 
 // NewRunner 构造 Agent 执行器。
@@ -156,15 +157,16 @@ func (r *Runner) Run(ctx context.Context) error {
 	inputCh := r.ui.ReadInputChan()
 
 	// ── 查询状态变量 ──
-	var queryResultCh <-chan queryResult    // 查询结果 channel（nil 表示无运行中的查询）
-	var queryCancel context.CancelFunc     // 取消函数（用于 /stop）
-	var queryRunning bool                  // 是否有查询正在运行
-	var round int                          // 当前轮次号
-	var currentInput string                // 当前查询的用户输入，用于保存记忆
-	var inputForward chan string           // 查询期间转发输入到此 channel（权限确认等）
+	var queryResultCh <-chan queryResult // 查询结果 channel（nil 表示无运行中的查询）
+	var queryCancel context.CancelFunc   // 取消函数（用于 /stop）
+	var queryRunning bool                // 是否有查询正在运行
+	var round int                        // 当前轮次号
+	var currentInput string              // 当前查询的用户输入，用于保存记忆
+	var inputForward chan string         // 查询期间转发输入到此 channel（权限确认等）
 
-	// 显示初始提示符。
+	// 显示初始提示符（立即 flush 确保在用户输入前显示）。
 	fmt.Print("> ")
+	os.Stdout.Sync()
 
 	for {
 		select {
@@ -183,6 +185,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			if input == "" {
 				if !queryRunning {
 					fmt.Print("> ")
+					os.Stdout.Sync()
 				}
 				continue
 			}
@@ -205,6 +208,7 @@ func (r *Runner) Run(ctx context.Context) error {
 					r.ui.OnMessage("⏹️  已停止")
 					round++
 					fmt.Print("> ")
+					os.Stdout.Sync()
 				} else if inputForward != nil {
 					// 转发给 query 侧（权限确认等场景）。
 					inputForward <- input
@@ -225,6 +229,7 @@ func (r *Runner) Run(ctx context.Context) error {
 				}
 				round++
 				fmt.Print("> ")
+				os.Stdout.Sync()
 				continue
 			}
 
@@ -295,6 +300,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 
 			fmt.Print("> ")
+			os.Stdout.Sync()
 		}
 	}
 }
