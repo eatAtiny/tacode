@@ -81,9 +81,20 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 	// ═══════════════════════════════════════════════════════
 	// 步骤 3: 构建 System/User Prompt
 	// ═══════════════════════════════════════════════════════
-	// System Prompt: ReAct 工作方式 + 可用工具列表 + 注意事项
+	// System Prompt: ReAct 工作方式 + 可用工具列表 + 工具使用指南 + 注意事项
 	// User Prompt: 轮次号 + 记忆上下文 + 用户任务
-	systemPrompt := prompt.BuildReActSystemPrompt(r.tools.Descriptions())
+
+	// 收集各工具的使用引导（Tool.PromptGuide()）。
+	var guides []prompt.ToolGuide
+	for _, name := range r.tools.Names() {
+		t := r.tools.Get(name)
+		guides = append(guides, prompt.ToolGuide{
+			Name:  t.Name(),
+			Guide: t.PromptGuide(),
+		})
+	}
+
+	systemPrompt := prompt.BuildReActSystemPrompt(r.tools.Descriptions(), guides)
 	userPrompt := prompt.BuildReActUserPrompt(round, contextDigest, userInput)
 
 	// 初始化消息数组（作为 queryLoop 的初始输入）。

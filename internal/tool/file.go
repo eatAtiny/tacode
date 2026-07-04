@@ -7,17 +7,18 @@ import (
 	"strings"
 )
 
-const maxReadSize = 8192 // 读取文件最大字节数
-
 // FileTool 提供文件读写能力。
 type FileTool struct{}
 
+// NewFileTool 创建文件工具。
 func NewFileTool() *FileTool { return &FileTool{} }
+
+// ── Tool 接口：基础方法 ──
 
 func (t *FileTool) Name() string { return "file" }
 
 func (t *FileTool) Description() string {
-	return "读取或写入文件。action=read 读取文件内容，action=write 写入文件。"
+	return "读取或写入文件。action=read 读取文件内容（带行号），action=write 写入文件（自动创建目录）。"
 }
 
 func (t *FileTool) Parameters() map[string]any {
@@ -67,18 +68,22 @@ func (t *FileTool) Execute(args string) (string, error) {
 	}
 }
 
+// readFile 读取文件内容，添加行号前缀。
+// 框架层通过 ResultLimit 统一处理截断，此处不做硬截断。
 func (t *FileTool) readFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read file: %w", err)
 	}
-	content := string(data)
-	if len(content) > maxReadSize {
-		content = content[:maxReadSize] + "\n...(truncated)"
+	lines := strings.Split(string(data), "\n")
+	var sb strings.Builder
+	for i, line := range lines {
+		fmt.Fprintf(&sb, "%4d | %s\n", i+1, line)
 	}
-	return content, nil
+	return strings.TrimRight(sb.String(), "\n"), nil
 }
 
+// writeFile 写入文件内容，自动创建父目录。
 func (t *FileTool) writeFile(path, content string) (string, error) {
 	dir := filepath.Dir(path)
 	if dir != "." && dir != "" {
@@ -91,3 +96,33 @@ func (t *FileTool) writeFile(path, content string) (string, error) {
 	}
 	return fmt.Sprintf("文件已写入: %s (%d bytes)", path, len(content)), nil
 }
+
+// ── Tool 接口：权限内聚 ──
+
+// CheckPermission 文件读操作直接允许，写操作需要确认。
+func (t *FileTool) CheckPermission(args string) PermissionResult {
+	var params struct {
+		Action string `json:"action"`
+	}
+	if err := parseArgs(args, &params); err != nil {
+		return PermissionResult{Allow: false, Reason: "无法解析参数"}
+	}
+	if params.Action == "read" {
+		return PermissionResult{Allow: true}
+	}
+	return PermissionResult{Allow: false, Reason: "写入文件需要确认"}
+}
+
+// ── Tool 接口：Prompt 自引导 ──
+
+// PromptGuide 返回 file 工具的使用引导。
+func (t *FileTool) PromptGuide() string {
+	return "read 操作返回带行号的文本，行号格式为 \"    1 | content\"。" +
+		"write 操作会自动创建不存在的父目录。" +
+		"修改已有文件时，优先使用 edit 工具（而非 write 全量覆盖）。"
+}
+
+// ── Tool 接口：结果上限 ──
+
+// ResultLimit 文件读取上限 8192 字符。
+func (t *FileTool) ResultLimit() int { return 8192 }

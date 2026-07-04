@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -17,6 +18,8 @@ type ShellTool struct {
 func NewShellTool() *ShellTool {
 	return &ShellTool{timeout: 30 * time.Second}
 }
+
+// ── Tool 接口：基础方法 ──
 
 func (t *ShellTool) Name() string { return "shell" }
 
@@ -63,3 +66,84 @@ func (t *ShellTool) Execute(args string) (string, error) {
 	}
 	return result, nil
 }
+
+// ── Tool 接口：权限内聚 ──
+
+// CheckPermission 检查 shell 命令是否需要用户确认。
+//
+// 策略：
+//   - 包含危险命令模式（rm -rf、sudo、chmod 777 等）→ 需确认
+//   - 其他命令 → 直接允许
+//
+// 危险模式列表来自原有的 isDangerousShellCommand，现内移到工具自身。
+func (t *ShellTool) CheckPermission(args string) PermissionResult {
+	if isDangerousShellCommand(args) {
+		return PermissionResult{
+			Allow:  false,
+			Reason: "该命令可能有风险，需要确认执行",
+		}
+	}
+	return PermissionResult{Allow: true}
+}
+
+// isDangerousShellCommand 检查是否是危险的 shell 命令。
+//
+// 从 internal/agent/permission.go 移入。
+// 检测方式：解析 JSON 参数，提取 command 字段，
+// 与危险命令模式列表进行子串匹配（大小写不敏感）。
+func isDangerousShellCommand(args string) bool {
+	var params map[string]interface{}
+	if err := json.Unmarshal([]byte(args), &params); err != nil {
+		return false
+	}
+
+	command, ok := params["command"].(string)
+	if !ok {
+		return false
+	}
+
+	// 危险命令列表（子串匹配，大小写不敏感）。
+	dangerousCommands := []string{
+		"rm -rf",
+		"rm -r",
+		"mkfs",
+		"dd if=",
+		"chmod 777",
+		"chown",
+		"sudo",
+		"su ",
+		"passwd",
+		"useradd",
+		"userdel",
+		"groupadd",
+		"groupdel",
+		"kill -9",
+		"pkill",
+		"shutdown",
+		"reboot",
+		"halt",
+		"poweroff",
+	}
+
+	commandLower := strings.ToLower(command)
+	for _, dangerous := range dangerousCommands {
+		if strings.Contains(commandLower, dangerous) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// ── Tool 接口：Prompt 自引导 ──
+
+// PromptGuide 返回 shell 工具的使用引导。
+func (t *ShellTool) PromptGuide() string {
+	return "优先使用 grep、list 等专用工具代替 shell 命令进行搜索和目录浏览。" +
+		"shell 的默认超时为 30 秒，长时间任务会超时失败。"
+}
+
+// ── Tool 接口：结果上限 ──
+
+// ResultLimit shell 输出上限 16000 字符。
+func (t *ShellTool) ResultLimit() int { return 16000 }
