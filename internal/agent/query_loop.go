@@ -2,8 +2,12 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"agentic/internal/llm"
 	"agentic/internal/memory"
@@ -19,25 +23,30 @@ import (
 // compressThreshold 压缩阈值：token 使用率超过 80% 触发压缩。
 const compressThreshold = 0.8
 
+// defaultResultLimit 默认结果截断上限（字符数）。
+const defaultResultLimit = 8000
+
 // ──────────────────────────────────────────────────────────
 // queryLoop 核心循环（异步生成器模式）
 // ──────────────────────────────────────────────────────────
 
 // queryLoopContext 循环上下文，用于在循环中共享状态。
 type queryLoopContext struct {
-	ctx             context.Context
-	llmClient       *llm.OpenAIClient
-	messages        []llm.ChatMessage     // 完整消息历史（system + user + assistant + tool）
-	tools           []openai.Tool         // 工具定义列表（OpenAI function calling 格式）
-	toolRegistry    *tool.Registry        // 工具注册表，用于查找和执行工具
-	maxIter         int                   // 最大迭代次数
-	contextLimit    int                   // 模型上下文窗口大小（token 数）
-	events          chan<- QueryEvent     // 事件输出 channel（yield 事件到此）
-	seenToolCalls   map[string]bool       // 已见过的工具调用签名（用于重复检测）
-	totalInputTokens  int                 // 累计输入 token 数
-	totalOutputTokens int                 // 累计输出 token 数
-	lastInputTokens   int                 // 暂存每次调用的输入 token 数
-	lastOutputTokens  int                 // 暂存每次调用的输出 token 数
+	ctx               context.Context
+	llmClient         *llm.OpenAIClient
+	messages          []llm.ChatMessage      // 完整消息历史（system + user + assistant + tool）
+	tools             []openai.Tool          // 工具定义列表（OpenAI function calling 格式）
+	toolRegistry      *tool.Registry         // 工具注册表，用于查找和执行工具
+	maxIter           int                    // 最大迭代次数
+	contextLimit      int                    // 模型上下文窗口大小（token 数）
+	events            chan<- QueryEvent      // 事件输出 channel（yield 事件到此）
+	seenToolCalls     map[string]bool        // 已见过的工具调用签名（用于重复检测）
+	totalInputTokens  int                    // 累计输入 token 数
+	totalOutputTokens int                    // 累计输出 token 数
+	lastInputTokens   int                    // 暂存每次调用的输入 token 数
+	lastOutputTokens  int                    // 暂存每次调用的输出 token 数
+	currentIter       int                    // 当前迭代次数（用于 mtime 追踪）
+	fileReads         map[string]time.Time   // 已读文件的 mtime（key=绝对路径，用于 read-before-edit 检测）
 }
 
 // queryLoop 是纯粹的 Agent Loop 核心循环，使用异步生成器模式。
@@ -55,8 +64,9 @@ type queryLoopContext struct {
 //	│    │                                                     │
 //	│    ├─ 步骤 4c: executeToolCalls()                        │
 //	│    │    对每个 toolCall:                                 │
-//	│    │      ├─ checkToolPermission() ← 权限检查            │
+//	│    │      ├─ checkToolPermission() ← 工具自检权限        │
 //	│    │      ├─ toolRegistry.Get().Execute() ← 执行工具     │
+//	│    │      ├─ TruncateResult() ← 统一截断                │
 //	│    │      └─ yield ToolCall / ToolResult / Permission    │
 //	│    │                                                     │
 //	│    ├─ 步骤 4d: detectDuplicateAndWarn()                  │
@@ -113,6 +123,7 @@ func queryLoop(
 			contextLimit:  contextLimit,
 			events:        events,
 			seenToolCalls: make(map[string]bool),
+			fileReads:     make(map[string]time.Time),
 		}
 
 		// 执行核心循环。
@@ -137,6 +148,8 @@ func queryLoop(
 //	9. yield Continue → 回到步骤 1
 func (lc *queryLoopContext) runLoop() {
 	for iter := 0; iter < lc.maxIter; iter++ {
+		lc.currentIter = iter
+
 		// ── 步骤 4-前置: 检查上下文是否被取消 ──
 		// 支持 /stop 命令：Runner 调用 cancel() → ctx.Err() != nil
 		if lc.ctx.Err() != nil {
@@ -172,7 +185,7 @@ func (lc *queryLoopContext) runLoop() {
 		}
 
 		// ── 步骤 4c: 执行工具调用 ──
-		// 遍历所有工具调用：权限检查 → 查找工具 → 执行 → yield 结果。
+		// 遍历所有工具调用：权限检查 → 查找工具 → 执行 → 截断 → yield 结果。
 		// 权限被拒绝时跳过该工具但继续执行其他工具。
 		if !lc.executeToolCalls(toolCalls, iter) {
 			return
@@ -309,9 +322,9 @@ func (lc *queryLoopContext) appendAssistantMessage(content string, toolCalls []l
 // 流程：
 //   1. yield ToolCall 事件（通知上层显示工具调用信息）
 //   2. 遍历 toolCalls，对每个执行 executeSingleTool()
-//      - 权限检查：deny → 跳过；confirm → yield Permission + 阻塞等待
-//      - 查找工具：不存在 → yield 错误工具结果
-//      - 执行工具：调用 tool.Execute()
+//      - 权限检查（工具自检：Tool.CheckPermission）
+//      - 全局禁止列表检查
+//      - 查找工具 → 执行 → 截断 → 记录 mtime
 //      - yield ToolResult 事件
 //      - 推入 tool 消息到历史
 //
@@ -340,20 +353,26 @@ func (lc *queryLoopContext) executeToolCalls(toolCalls []llm.ToolCall, iter int)
 
 // executeSingleTool 执行单个工具调用。
 //
-// 子流程（按顺序）：
-//   1. checkToolPermission() → deny 跳过 / confirm 阻塞等待 / allow 继续
-//   2. toolRegistry.Get() → 查找工具实现
-//   3. tool.Execute() → 执行工具（shell 命令 / 文件读写）
-//   4. yield ToolResult 事件
-//   5. 推入 tool 消息到历史（LLM 下一轮可以看到工具结果）
+// 子流程（按顺序，重构后）：
+//   1. 全局禁止列表检查（isToolForbidden → 直接拒绝）
+//   2. 工具自检权限（Tool.CheckPermission → Allow/Confirm）
+//   3. toolRegistry.Get() → 查找工具实现
+//   4. read-before-edit 检测（edit 工具：验证文件已读 + mtime 未变）
+//   5. tool.Execute() → 执行工具
+//   6. 统一结果截断（Tool.ResultLimit + TruncateResult）
+//   7. yield ToolResult 事件
+//   8. 记录文件 mtime（用于 read-before-edit）
+//   9. 推入 tool 消息到历史
 //
 // 返回：
 //   - true: 继续执行（即使工具执行出错也继续，让 LLM 自行处理错误）
 //   - false: 发生致命错误，需要退出
 func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
-	// ── 子步骤 1: 权限检查 ──
-	if !lc.checkToolPermission(tc, iter) {
-		return true // 权限拒绝，但继续执行下一个工具
+	// ── 子步骤 1: 全局禁止列表 ──
+	if isToolForbidden(tc.Name) {
+		errMsg := fmt.Sprintf("工具已被禁止使用: %s", tc.Name)
+		lc.yieldToolError(tc, errMsg, iter)
+		return true
 	}
 
 	// ── 子步骤 2: 查找工具 ──
@@ -364,7 +383,23 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 		return true
 	}
 
-	// ── 子步骤 3: 执行工具 ──
+	// ── 子步骤 3: 权限检查（工具自检） ──
+	if !lc.checkToolPermission(tc, t, iter) {
+		return true // 权限拒绝，但继续执行下一个工具
+	}
+
+	// ── 子步骤 4: read-before-edit 检测 ──
+	// 编辑类工具执行前验证目标文件已被读取且未被外部修改。
+	if tc.Name == "edit" || tc.Name == "file" {
+		if warnMsg := lc.checkReadBeforeEdit(tc.Arguments); warnMsg != "" {
+			lc.messages = append(lc.messages, llm.ChatMessage{
+				Role:    "user",
+				Content: warnMsg,
+			})
+		}
+	}
+
+	// ── 子步骤 5: 执行工具 ──
 	result, execErr := t.Execute(tc.Arguments)
 	if execErr != nil {
 		// 工具执行出错时，将错误信息作为结果返回给 LLM。
@@ -372,7 +407,23 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 		result = fmt.Sprintf("工具执行出错: %v\n请尝试其他方案，不要重复相同的命令。", execErr)
 	}
 
-	// ── 子步骤 4: yield 工具执行结果 ──
+	// 空结果保护：命令成功但无输出时（如 mkdir、空 grep），
+	// 用 "(无输出)" 占位，避免空 content 导致 API 报错。
+	if strings.TrimSpace(result) == "" {
+		result = "(无输出)"
+	}
+
+	// ── 子步骤 6: 统一结果截断 ──
+	// 框架层统一处理截断（head+tail 保留策略），工具无需自行截断。
+	limit := t.ResultLimit()
+	if limit <= 0 {
+		limit = defaultResultLimit
+	}
+	if len(result) > limit {
+		result = tool.TruncateResult(result, limit)
+	}
+
+	// ── 子步骤 7: yield 工具执行结果 ──
 	lc.events <- QueryEvent{
 		Type:       QueryEventToolResult,
 		ToolName:   tc.Name,
@@ -381,7 +432,10 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 		Iteration:  iter + 1,
 	}
 
-	// ── 子步骤 5: 推入消息历史 ──
+	// ── 子步骤 8: 记录文件 mtime（用于 read-before-edit 检测） ──
+	lc.recordFileRead(tc.Name, tc.Arguments)
+
+	// ── 子步骤 9: 推入消息历史 ──
 	// tool 角色消息包含 ToolCallID，LLM 可以关联到对应的 tool_call。
 	lc.messages = append(lc.messages, llm.ChatMessage{
 		Role:       "tool",
@@ -392,49 +446,54 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 	return true
 }
 
-// checkToolPermission 检查工具权限（queryLoop 内部调用）。
+// checkToolPermission 使用工具自身的 CheckPermission 方法检查权限。
 //
-// 三种结果：
-//   - allow: 直接允许，继续执行
-//   - deny: 拒绝执行，yield 错误工具结果（继续执行其他工具）
-//   - confirm: yield Permission 事件，阻塞等待 channel 返回用户决策
+// 重构后逻辑：
+//   - 先检查全局权限注入点（globalPermissionChecker，非 nil 时覆盖）
+//   - 否则调用 Tool.CheckPermission(args)
+//     → Allow=true → 直接允许
+//     → Allow=false → yield Permission 事件 → 阻塞等待用户确认
 //
 // 阻塞机制：
 //   queryLoop 创建 PermissionCh channel → yield Permission 事件
 //   → QueryEngine 收到事件 → 调用 UI.ConfirmPermission()
 //   → 用户在终端输入 y/N → 写入 PermissionCh
 //   → queryLoop 从 PermissionCh 读取结果 → 继续或拒绝
-func (lc *queryLoopContext) checkToolPermission(tc llm.ToolCall, iter int) bool {
-	permResult := checkToolPermission(tc.Name, tc.Arguments)
-
-	if permResult.Action == "deny" {
-		// 禁止的工具：直接拒绝，yield 错误工具结果。
-		errMsg := fmt.Sprintf("权限拒绝: %s", permResult.Message)
-		lc.yieldToolError(tc, errMsg, iter)
-		return false
-	}
-
-	if permResult.Action == "confirm" {
-		// 需要确认：创建 channel，yield Permission 事件，阻塞等待结果。
-		ch := make(chan bool, 1)
-		lc.events <- QueryEvent{
-			Type:               QueryEventPermission,
-			PermissionRequired: true,
-			PermissionTool:     tc.Name,
-			PermissionArgs:     tc.Arguments,
-			PermissionReason:   permResult.Message,
-			PermissionCh:       ch,
-			Iteration:          iter + 1,
-		}
-
-		// 阻塞等待用户确认（QueryEngine 收到事件后调用 UI.ConfirmPermission
-		// 并将结果写入此 channel）。
-		approved := <-ch
-		if !approved {
-			errMsg := "用户拒绝执行"
+func (lc *queryLoopContext) checkToolPermission(tc llm.ToolCall, t tool.Tool, iter int) bool {
+	// ── 全局权限注入点（极端定制场景） ──
+	if globalPermissionChecker != nil {
+		if !globalPermissionChecker.CheckPermission(tc.Name, tc.Arguments) {
+			errMsg := "全局权限策略拒绝执行"
 			lc.yieldToolError(tc, errMsg, iter)
 			return false
 		}
+		return true
+	}
+
+	// ── 工具自检权限 ──
+	perm := t.CheckPermission(tc.Arguments)
+	if perm.Allow {
+		return true
+	}
+
+	// ── 需要确认 ──
+	ch := make(chan bool, 1)
+	lc.events <- QueryEvent{
+		Type:               QueryEventPermission,
+		PermissionRequired: true,
+		PermissionTool:     tc.Name,
+		PermissionArgs:     tc.Arguments,
+		PermissionReason:   perm.Reason,
+		PermissionCh:       ch,
+		Iteration:          iter + 1,
+	}
+
+	// 阻塞等待用户确认。
+	approved := <-ch
+	if !approved {
+		errMsg := "用户拒绝执行"
+		lc.yieldToolError(tc, errMsg, iter)
+		return false
 	}
 
 	return true
@@ -552,6 +611,83 @@ func (lc *queryLoopContext) yieldContinue(iter int) {
 		OutputTokens: lc.totalOutputTokens,
 		TotalTokens:  lc.totalInputTokens + lc.totalOutputTokens,
 	}
+}
+
+// ──────────────────────────────────────────────────────────
+// Read-Before-Edit + mtime 追踪
+// ──────────────────────────────────────────────────────────
+
+// recordFileRead 从工具参数中提取文件路径，记录其 mtime。
+//
+// 用于 read-before-edit 检测：编辑类工具（edit、file write）执行前，
+// 通过 checkReadBeforeEdit 验证目标文件已被读取且未被外部修改。
+//
+// 只处理包含 "path" 参数的工具：file(read)、edit、grep（文件模式时）。
+func (lc *queryLoopContext) recordFileRead(toolName string, args string) {
+	var params struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(args), &params); err != nil || params.Path == "" {
+		return
+	}
+
+	absPath, err := filepath.Abs(params.Path)
+	if err != nil {
+		return
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return
+	}
+
+	lc.fileReads[absPath] = info.ModTime()
+}
+
+// checkReadBeforeEdit 检查编辑操作的目标文件是否已被读取，以及 mtime 是否匹配。
+//
+// 返回空字符串表示检查通过（可以安全编辑）。
+// 返回警告消息表示需要注入到 LLM 上下文中（文件未读或已被外部修改）。
+//
+// 设计原则：
+//   - 这是警告，不是阻止 — LLM 可以自行判断是否继续编辑
+//   - mtime 变化说明用户在 IDE 中修改了文件，覆盖会丢失用户编辑
+func (lc *queryLoopContext) checkReadBeforeEdit(args string) string {
+	var params struct {
+		Path   string `json:"path"`
+		Action string `json:"action"` // file 工具的 action 字段
+	}
+	if err := json.Unmarshal([]byte(args), &params); err != nil || params.Path == "" {
+		return ""
+	}
+
+	// file 工具的 read 操作不需要检测（不是编辑操作）
+	if params.Action == "read" {
+		return ""
+	}
+
+	absPath, err := filepath.Abs(params.Path)
+	if err != nil {
+		return ""
+	}
+
+	// 如果文件不存在（创建新文件），不需要检测
+	if _, err := os.Stat(absPath); os.IsNotExist(err) {
+		return ""
+	}
+
+	record, wasRead := lc.fileReads[absPath]
+	if !wasRead {
+		return fmt.Sprintf("警告：你正在编辑文件 %s，但本轮中尚未读取该文件。请先使用 file read 或 grep 读取文件内容后再次编辑。", absPath)
+	}
+
+	// 检查 mtime 是否变化（外部修改检测）
+	info, err := os.Stat(absPath)
+	if err == nil && !info.ModTime().Equal(record) {
+		return fmt.Sprintf("警告：文件 %s 的修改时间已变化（上次读取后可能被外部修改）。建议重新读取文件确认内容。", absPath)
+	}
+
+	return ""
 }
 
 // ──────────────────────────────────────────────────────────
