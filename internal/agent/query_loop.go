@@ -404,7 +404,7 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 	if execErr != nil {
 		// 工具执行出错时，将错误信息作为结果返回给 LLM。
 		// LLM 会看到错误并尝试其他方案（而非直接失败）。
-		result = fmt.Sprintf("工具执行出错: %v\n请尝试其他方案，不要重复相同的命令。", execErr)
+		result = fmt.Sprintf("工具执行出错: %v\n请分析错误原因并尝试其他方案。", execErr)
 	}
 
 	// 空结果保护：命令成功但无输出时（如 mkdir、空 grep），
@@ -501,23 +501,32 @@ func (lc *queryLoopContext) checkToolPermission(tc llm.ToolCall, t tool.Tool, it
 
 // detectDuplicateAndWarn 检测重复调用并警告。
 //
-// 检测方式：将当前工具调用列表序列化为签名（工具名:参数），
+// 检测方式：逐个检查工具调用，对每个 toolCall 生成签名（工具名:参数），
 // 与 seenToolCalls 比较。如果签名已存在，注入 user 消息警告 LLM。
+//
+// 与之前按整批检测的区别：
+//   - 整批检测：[list A, list B] 和 [list A] 签名不同 → 漏检
+//   - 逐条检测：只要其中一条重复过就能发现
 //
 // 这避免了 LLM 陷入"重复调用相同工具"的死循环。
 func (lc *queryLoopContext) detectDuplicateAndWarn(toolCalls []llm.ToolCall) {
-	currentToolCall := toolCallSignature(toolCalls)
-	isDuplicate := currentToolCall != "" && lc.seenToolCalls[currentToolCall]
-
-	if currentToolCall != "" {
-		lc.seenToolCalls[currentToolCall] = true
+	var duplicates []string
+	for _, tc := range toolCalls {
+		sig := singleCallSignature(tc)
+		if sig == "" {
+			continue
+		}
+		if lc.seenToolCalls[sig] {
+			duplicates = append(duplicates, tc.Name)
+		}
+		lc.seenToolCalls[sig] = true
 	}
 
-	if isDuplicate {
-		// 注入警告：告诉 LLM 不要重复调用。
+	if len(duplicates) > 0 {
+		// 注入警告：告诉 LLM 哪些工具被重复调用了。
 		lc.messages = append(lc.messages, llm.ChatMessage{
 			Role:    "user",
-			Content: "你已经调用过相同的工具并获得了相同的结果。请根据已有信息直接给出最终回答，不要再调用任何工具。",
+			Content: fmt.Sprintf("你已经调用过 %s 工具并获得了相同的结果。请根据已有信息直接给出最终回答，不要再调用任何工具。", strings.Join(duplicates, "、")),
 		})
 	}
 }

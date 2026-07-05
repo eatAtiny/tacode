@@ -357,18 +357,15 @@ func trimArgs(args string) string {
 	return args
 }
 
-// toolCallSignature 生成工具调用的签名，用于检测重复调用。
+// singleCallSignature 生成单个工具调用的签名，用于检测重复调用。
 //
-// 签名格式：工具名1:参数1|工具名2:参数2|...
+// 签名格式：工具名:参数JSON
+// 与之前的 batch 签名不同，逐条检测能发现单个 toolCall 级别的重复。
 //
-// 返回空字符串表示空列表。
-func toolCallSignature(calls []llm.ToolCall) string {
-	if len(calls) == 0 {
+// 返回空字符串表示空的 tool call。
+func singleCallSignature(tc llm.ToolCall) string {
+	if tc.Name == "" {
 		return ""
 	}
-	var parts []string
-	for _, tc := range calls {
-		parts = append(parts, fmt.Sprintf("%s:%s", tc.Name, tc.Arguments))
-	}
-	return strings.Join(parts, "|")
+	return fmt.Sprintf("%s:%s", tc.Name, tc.Arguments)
 }
