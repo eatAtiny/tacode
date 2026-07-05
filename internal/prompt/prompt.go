@@ -92,7 +92,7 @@ func BuildReActSystemPrompt(toolDescriptions string, guides []ToolGuide) string 
 ## 注意事项
 - 如果用户的问题不需要工具（如简单闲聊），直接回答即可
 - 优先使用专用工具（grep、list、edit）而非执行 shell 命令
-- 每次只调用一个工具
+- 可以同时调用多个工具，只要它们之间没有依赖关系（如 list 两个不同目录、grep + file read）
 - 收到工具结果后，判断信息是否足够回答用户：
   - 足够 → 立即给出最终回答，不要再调用任何工具
   - 不足 → 调用一个不同的工具（不要重复调用同一个工具）
