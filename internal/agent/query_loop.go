@@ -430,6 +430,20 @@ func (lc *queryLoopContext) executeConcurrentTools(toolCalls []llm.ToolCall, ite
 				return
 			}
 
+			// 注入读取状态（read-before-edit 内聚）。
+			if aware, ok := t.(tool.ReadStateAware); ok {
+				aware.SetReadState(lc.fileReads)
+			}
+
+			// Pre-tool hooks。
+			if hookErr := lc.toolRegistry.BeforeHooks(tc.Name, tc.Arguments); hookErr != nil {
+				results[idx] = toolExecResult{
+					result:  fmt.Sprintf("工具执行被阻止: %v", hookErr),
+					isError: true,
+				}
+				return
+			}
+
 			result, execErr := t.Execute(tc.Arguments)
 			if execErr != nil {
 				result = fmt.Sprintf("工具执行出错: %v\n请分析错误原因并尝试其他方案。", execErr)
@@ -451,6 +465,9 @@ func (lc *queryLoopContext) executeConcurrentTools(toolCalls []llm.ToolCall, ite
 					result += fmt.Sprintf("\n\n💾 完整结果已保存到: %s（可使用 file read 读取）", savedPath)
 				}
 			}
+
+			// Post-tool hooks。
+			lc.toolRegistry.AfterHooks(tc.Name, tc.Arguments, result, execErr)
 
 			// 记录文件 mtime（并行安全：mu 保护）。
 			if absPath, ok := extractFilePath(tc.Name, tc.Arguments); ok {
@@ -527,15 +544,16 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 		return true // 权限拒绝，但继续执行下一个工具
 	}
 
-	// ── 子步骤 4: read-before-edit 检测 ──
-	// 编辑类工具执行前验证目标文件已被读取且未被外部修改。
-	if tc.Name == "edit" || tc.Name == "file" {
-		if warnMsg := lc.checkReadBeforeEdit(tc.Arguments); warnMsg != "" {
-			lc.messages = append(lc.messages, llm.ChatMessage{
-				Role:    "user",
-				Content: warnMsg,
-			})
-		}
+	// ── 子步骤 4: 注入读取状态（read-before-edit 内聚） ──
+	if aware, ok := t.(tool.ReadStateAware); ok {
+		aware.SetReadState(lc.fileReads)
+	}
+
+	// ── 子步骤 4b: Pre-tool hooks ──
+	if hookErr := lc.toolRegistry.BeforeHooks(tc.Name, tc.Arguments); hookErr != nil {
+		errMsg := fmt.Sprintf("工具执行被钩子阻止: %v", hookErr)
+		lc.yieldToolError(tc, errMsg, iter)
+		return true
 	}
 
 	// ── 子步骤 5: 执行工具 ──
@@ -567,6 +585,9 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 			result += fmt.Sprintf("\n\n💾 完整结果已保存到: %s（可使用 file read 读取）", savedPath)
 		}
 	}
+
+	// ── Post-tool hooks ──
+	lc.toolRegistry.AfterHooks(tc.Name, tc.Arguments, result, execErr)
 
 	// ── 子步骤 7: yield 工具执行结果 ──
 	lc.events <- QueryEvent{
@@ -807,52 +828,6 @@ func (lc *queryLoopContext) recordFileRead(toolName string, args string) {
 	}
 
 	lc.fileReads[absPath] = info.ModTime()
-}
-
-// checkReadBeforeEdit 检查编辑操作的目标文件是否已被读取，以及 mtime 是否匹配。
-//
-// 返回空字符串表示检查通过（可以安全编辑）。
-// 返回警告消息表示需要注入到 LLM 上下文中（文件未读或已被外部修改）。
-//
-// 设计原则：
-//   - 这是警告，不是阻止 — LLM 可以自行判断是否继续编辑
-//   - mtime 变化说明用户在 IDE 中修改了文件，覆盖会丢失用户编辑
-func (lc *queryLoopContext) checkReadBeforeEdit(args string) string {
-	var params struct {
-		Path   string `json:"path"`
-		Action string `json:"action"` // file 工具的 action 字段
-	}
-	if err := json.Unmarshal([]byte(args), &params); err != nil || params.Path == "" {
-		return ""
-	}
-
-	// file 工具的 read 操作不需要检测（不是编辑操作）
-	if params.Action == "read" {
-		return ""
-	}
-
-	absPath, err := filepath.Abs(params.Path)
-	if err != nil {
-		return ""
-	}
-
-	// 如果文件不存在（创建新文件），不需要检测
-	if _, err := os.Stat(absPath); os.IsNotExist(err) {
-		return ""
-	}
-
-	record, wasRead := lc.fileReads[absPath]
-	if !wasRead {
-		return fmt.Sprintf("警告：你正在编辑文件 %s，但本轮中尚未读取该文件。请先使用 file read 或 grep 读取文件内容后再次编辑。", absPath)
-	}
-
-	// 检查 mtime 是否变化（外部修改检测）
-	info, err := os.Stat(absPath)
-	if err == nil && !info.ModTime().Equal(record) {
-		return fmt.Sprintf("警告：文件 %s 的修改时间已变化（上次读取后可能被外部修改）。建议重新读取文件确认内容。", absPath)
-	}
-
-	return ""
 }
 
 // ──────────────────────────────────────────────────────────

@@ -23,7 +23,8 @@ func NewGrepTool() *GrepTool { return &GrepTool{} }
 
 // ── Tool 接口：基础方法 ──
 
-func (t *GrepTool) Name() string { return "grep" }
+func (t *GrepTool) Name() string    { return "grep" }
+func (t *GrepTool) Aliases() []string { return nil }
 
 func (t *GrepTool) Description() string {
 	return "在文件中搜索文本模式。自动跳过 .git/ 和二进制文件，结果有数量上限。"

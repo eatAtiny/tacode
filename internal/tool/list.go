@@ -19,7 +19,8 @@ func NewListTool() *ListTool { return &ListTool{} }
 
 // ── Tool 接口：基础方法 ──
 
-func (t *ListTool) Name() string { return "list" }
+func (t *ListTool) Name() string    { return "list" }
+func (t *ListTool) Aliases() []string { return nil }
 
 func (t *ListTool) Description() string {
 	return "列出目录内容。支持递归深度控制、条目数量上限。返回格式: [TYPE] SIZE NAME。"

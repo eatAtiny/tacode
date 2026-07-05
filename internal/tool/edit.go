@@ -3,7 +3,9 @@ package tool
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 // EditTool 提供 search-and-replace 文件编辑能力。
@@ -12,10 +14,12 @@ import (
 //   - 唯一性校验：search 文本在文件中必须唯一匹配
 //   - 引号容错：自动标准化弯引号为直引号
 //   - Diff 输出：编辑后显示变更内容
+//   - read-before-edit：编辑前验证文件已被读取且未被外部修改
 //
 // 这是对 file write（全量覆盖）的安全替代。
 type EditTool struct {
-	maxFileSize int64 // 最大文件大小（避免 LLM 尝试编辑大文件）
+	maxFileSize int64              // 最大文件大小（避免 LLM 尝试编辑大文件）
+	readState   ReadState          // 已读文件状态（框架注入），nil 表示跳过检查
 }
 
 // NewEditTool 创建编辑工具。
@@ -23,9 +27,16 @@ func NewEditTool() *EditTool {
 	return &EditTool{maxFileSize: 5 * 1024 * 1024} // 5MB
 }
 
+// SetReadState 实现 ReadStateAware 接口。
+// 框架在 Execute 前调用，注入本轮已读取的文件 mtime。
+func (t *EditTool) SetReadState(state ReadState) {
+	t.readState = state
+}
+
 // ── Tool 接口：基础方法 ──
 
-func (t *EditTool) Name() string { return "edit" }
+func (t *EditTool) Name() string    { return "edit" }
+func (t *EditTool) Aliases() []string { return nil }
 
 func (t *EditTool) Description() string {
 	return "在文件中搜索并替换文本。默认 search 必须唯一匹配一次，设置 replace_all=true 可替换所有匹配项。"
@@ -89,6 +100,15 @@ func (t *EditTool) Execute(args string) (string, error) {
 	}
 	if info.Size() > t.maxFileSize {
 		return "", fmt.Errorf("file too large (%d bytes, max %d)", info.Size(), t.maxFileSize)
+	}
+
+	// ── 步骤 2a: read-before-edit 检查 ──
+	// 验证文件在本轮已被读取，且读取后未被外部修改。
+	// readState 为 nil 时跳过检查（测试或独立使用场景）。
+	if t.readState != nil {
+		if err := t.checkReadBeforeEdit(params.Path, info.ModTime()); err != nil {
+			return "", err
+		}
 	}
 
 	data, err := os.ReadFile(params.Path)
@@ -259,4 +279,41 @@ func truncateForDisplay(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// ──────────────────────────────────────────────────────────
+// Read-Before-Edit 检查
+// ──────────────────────────────────────────────────────────
+
+// checkReadBeforeEdit 验证目标文件已被读取且未被外部修改。
+//
+// 从 queryLoop.checkReadBeforeEdit 迁移至此，让工具自包含安全逻辑。
+//
+// 规则：
+//  1. 文件未在 readState 中 → 错误："请先读取文件"
+//  2. 文件 mtime 与记录不一致 → 错误："文件已被外部修改，请重新读取"
+//
+// 设计原则：这是硬约束，不是软警告。未满足条件时拒绝执行。
+func (t *EditTool) checkReadBeforeEdit(path string, currentMtime time.Time) error {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil // 无法解析路径时跳过检查
+	}
+
+	recordedMtime, wasRead := t.readState[absPath]
+	if !wasRead {
+		return fmt.Errorf(
+			"read-before-edit 检查失败：你尚未读取文件 %s。请先使用 file read 或 grep 读取文件内容后再编辑。",
+			absPath,
+		)
+	}
+
+	if !currentMtime.Equal(recordedMtime) {
+		return fmt.Errorf(
+			"read-before-edit 检查失败：文件 %s 的修改时间已变化（上次读取后可能被外部修改）。请重新读取文件确认内容后再编辑。",
+			absPath,
+		)
+	}
+
+	return nil
 }

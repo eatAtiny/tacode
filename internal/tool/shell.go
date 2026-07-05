@@ -21,7 +21,8 @@ func NewShellTool() *ShellTool {
 
 // ── Tool 接口：基础方法 ──
 
-func (t *ShellTool) Name() string { return "shell" }
+func (t *ShellTool) Name() string    { return "shell" }
+func (t *ShellTool) Aliases() []string { return nil }
 
 func (t *ShellTool) Description() string {
 	return "执行 shell 命令并返回输出。可用于查看文件、运行程序、系统操作等。"

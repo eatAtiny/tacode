@@ -15,7 +15,8 @@ func NewFileTool() *FileTool { return &FileTool{} }
 
 // ── Tool 接口：基础方法 ──
 
-func (t *FileTool) Name() string { return "file" }
+func (t *FileTool) Name() string    { return "file" }
+func (t *FileTool) Aliases() []string { return nil }
 
 func (t *FileTool) Description() string {
 	return "读取或写入文件。action=read 读取文件内容（带行号），action=write 写入文件（自动创建目录）。"
@@ -76,14 +77,11 @@ func (t *FileTool) readFile(path string) (string, error) {
 		return "", fmt.Errorf("read file: %w", err)
 	}
 	lines := strings.Split(string(data), "\n")
-	var sb strings.Builder
-	for i, line := range lines {
-		fmt.Fprintf(&sb, "%4d | %s\n", i+1, line)
-	}
-	return strings.TrimRight(sb.String(), "\n"), nil
+	return formatWithLineNumbers(lines, 0), nil
 }
 
 // writeFile 写入文件内容，自动创建父目录。
+// 写入成功后回显前 30 行带行号的预览，帮助 LLM 验证写入内容。
 func (t *FileTool) writeFile(path, content string) (string, error) {
 	dir := filepath.Dir(path)
 	if dir != "." && dir != "" {
@@ -94,7 +92,41 @@ func (t *FileTool) writeFile(path, content string) (string, error) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
 	}
-	return fmt.Sprintf("文件已写入: %s (%d bytes)", path, len(content)), nil
+
+	lines := strings.Split(content, "\n")
+	lineCount := len(lines)
+	preview := formatWithLineNumbers(lines, 30)
+
+	truncNote := ""
+	if lineCount > 30 {
+		truncNote = fmt.Sprintf("\n  ... (%d lines total)", lineCount)
+	}
+
+	return fmt.Sprintf("✅ 文件已写入: %s (%d lines, %d bytes)\n\n%s%s",
+		path, lineCount, len(content), preview, truncNote), nil
+}
+
+// ──────────────────────────────────────────────────────────
+// 行号格式化辅助
+// ──────────────────────────────────────────────────────────
+
+// formatWithLineNumbers 为文本行添加行号前缀。
+//
+// 格式: "    1 | content"（4 位右对齐行号 + 竖线分隔符）。
+// 与 readFile 和 writeFile 预览共用，保持格式一致。
+//
+// maxLines=0 表示不限制，maxLines>0 时只显示前 maxLines 行。
+func formatWithLineNumbers(lines []string, maxLines int) string {
+	n := len(lines)
+	if maxLines > 0 && n > maxLines {
+		n = maxLines
+	}
+
+	var sb strings.Builder
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&sb, "%4d | %s\n", i+1, lines[i])
+	}
+	return strings.TrimRight(sb.String(), "\n")
 }
 
 // ── Tool 接口：权限内聚 ──

@@ -2,6 +2,7 @@ package tool
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -356,6 +357,223 @@ func TestTruncateResult_ShortContent(t *testing.T) {
 		t.Errorf("short content should not be truncated: %s", result)
 	}
 }
+
+// ──────────────────────────────────────────────────────────
+// P2-1: write_file 内容预览
+// ──────────────────────────────────────────────────────────
+
+func TestWriteFilePreview(t *testing.T) {
+	f := NewFileTool()
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "preview_test.txt")
+
+	// 短内容（≤30行）：完整预览。
+	shortContent := "line one\nline two\nline three"
+	args := toJSON(map[string]any{
+		"action":  "write",
+		"path":    tmpFile,
+		"content": shortContent,
+	})
+	result, err := f.Execute(args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result, "3 lines") {
+		t.Errorf("should report line count, got: %s", result)
+	}
+	if !strings.Contains(result, "   1 | line one") {
+		t.Errorf("should show line-numbered preview, got: %s", result)
+	}
+
+	// 长内容（>30行）：截断预览 + 总行数提示。
+	longLines := make([]string, 50)
+	for i := 0; i < 50; i++ {
+		longLines[i] = fmt.Sprintf("line %d", i+1)
+	}
+	longContent := strings.Join(longLines, "\n")
+	args2 := toJSON(map[string]any{
+		"action":  "write",
+		"path":    tmpFile,
+		"content": longContent,
+	})
+	result2, err := f.Execute(args2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result2, "50 lines total") {
+		t.Errorf("should show total line count for long content, got: %s", result2)
+	}
+	if !strings.Contains(result2, "   1 | line 1") {
+		t.Error("preview should start with line 1")
+	}
+}
+
+// ──────────────────────────────────────────────────────────
+// P2-3: 别名
+// ──────────────────────────────────────────────────────────
+
+func TestRegistryAliasLookup(t *testing.T) {
+	r := NewRegistry()
+
+	// 注册带别名的工具。
+	aliased := &aliasTestTool{name: "new_name", aliases: []string{"old_name", "legacy"}}
+	r.Register(aliased)
+
+	// 通过正式名称查找。
+	if r.Get("new_name") == nil {
+		t.Error("should find tool by canonical name")
+	}
+
+	// 通过别名查找。
+	if r.Get("old_name") == nil {
+		t.Error("should find tool by alias")
+	}
+	if r.Get("legacy") == nil {
+		t.Error("should find tool by second alias")
+	}
+
+	// 不存在的名称。
+	if r.Get("nonexistent") != nil {
+		t.Error("should return nil for unknown name")
+	}
+}
+
+func TestRegistryAliasConflict_Panics(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&aliasTestTool{name: "tool_a", aliases: []string{"shared"}})
+
+	// 别名与已有工具名冲突应 panic。
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("should panic on alias conflict with existing tool name")
+		}
+	}()
+	r.Register(&aliasTestTool{name: "shared"}) // "shared" 已被 tool_a 注册为别名
+}
+
+func TestAllToolsHaveAliases(t *testing.T) {
+	tools := []Tool{
+		NewShellTool(),
+		NewFileTool(),
+		NewEditTool(),
+		NewGrepTool(),
+		NewListTool(),
+	}
+	for _, tool := range tools {
+		aliases := tool.Aliases()
+		if aliases == nil {
+			continue // nil is valid
+		}
+		if len(aliases) != 0 {
+			t.Errorf("%s: expected nil or empty aliases, got %v", tool.Name(), aliases)
+		}
+	}
+}
+
+// ──────────────────────────────────────────────────────────
+// P3-1: ToolHook
+// ──────────────────────────────────────────────────────────
+
+type testHook struct {
+	beforeCalls []string
+	afterCalls  []string
+	beforeErr   error
+}
+
+func (h *testHook) BeforeExecute(toolName, args string) error {
+	h.beforeCalls = append(h.beforeCalls, toolName)
+	return h.beforeErr
+}
+
+func (h *testHook) AfterExecute(toolName, args, result string, execErr error) {
+	h.afterCalls = append(h.afterCalls, toolName)
+}
+
+func TestRegistryBeforeHooks(t *testing.T) {
+	r := NewRegistry()
+	hook := &testHook{}
+	r.AddHook(hook)
+
+	err := r.BeforeHooks("shell", `{"command":"ls"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(hook.beforeCalls) != 1 || hook.beforeCalls[0] != "shell" {
+		t.Errorf("expected before call for shell, got %v", hook.beforeCalls)
+	}
+}
+
+func TestRegistryBeforeHooksBlocks(t *testing.T) {
+	r := NewRegistry()
+	r.AddHook(&testHook{beforeErr: fmt.Errorf("blocked")})
+
+	err := r.BeforeHooks("rm", `{}`)
+	if err == nil {
+		t.Error("should return error when hook blocks")
+	}
+}
+
+func TestRegistryAfterHooks(t *testing.T) {
+	r := NewRegistry()
+	hook := &testHook{}
+	r.AddHook(hook)
+
+	r.AfterHooks("grep", `{"pattern":"x"}`, "result", nil)
+	if len(hook.afterCalls) != 1 || hook.afterCalls[0] != "grep" {
+		t.Errorf("expected after call for grep, got %v", hook.afterCalls)
+	}
+}
+
+func TestRegistryAfterHooks_ExecError(t *testing.T) {
+	r := NewRegistry()
+	hook := &testHook{}
+	r.AddHook(hook)
+
+	execErr := fmt.Errorf("command failed")
+	r.AfterHooks("shell", `{"command":"bad"}`, "error output", execErr)
+	if len(hook.afterCalls) != 1 {
+		t.Error("AfterExecute should be called even on error")
+	}
+}
+
+func TestRegistryMultipleHooks(t *testing.T) {
+	r := NewRegistry()
+	h1 := &testHook{}
+	h2 := &testHook{}
+	r.AddHook(h1)
+	r.AddHook(h2)
+
+	r.BeforeHooks("test", `{}`)
+	r.AfterHooks("test", `{}`, "done", nil)
+
+	if len(h1.beforeCalls) != 1 || len(h2.beforeCalls) != 1 {
+		t.Error("both hooks should receive BeforeExecute")
+	}
+	if len(h1.afterCalls) != 1 || len(h2.afterCalls) != 1 {
+		t.Error("both hooks should receive AfterExecute")
+	}
+}
+
+// ──────────────────────────────────────────────────────────
+// 测试辅助
+// ──────────────────────────────────────────────────────────
+
+// aliasTestTool 是用于测试别名的简单工具。
+type aliasTestTool struct {
+	name    string
+	aliases []string
+}
+
+func (t *aliasTestTool) Name() string                               { return t.name }
+func (t *aliasTestTool) Aliases() []string                          { return t.aliases }
+func (t *aliasTestTool) Description() string                        { return "test" }
+func (t *aliasTestTool) Parameters() map[string]any                 { return map[string]any{} }
+func (t *aliasTestTool) Execute(args string) (string, error)        { return "ok", nil }
+func (t *aliasTestTool) CheckPermission(args string) PermissionResult { return PermissionResult{Allow: true} }
+func (t *aliasTestTool) PromptGuide() string                        { return "" }
+func (t *aliasTestTool) IsConcurrencySafe(args string) bool         { return true }
+func (t *aliasTestTool) IsReadOnly(args string) bool                { return true }
+func (t *aliasTestTool) ResultLimit() int                           { return 1000 }
 
 // ──────────────────────────────────────────────────────────
 // Shell 危险命令检测

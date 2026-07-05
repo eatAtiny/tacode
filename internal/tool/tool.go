@@ -71,6 +71,17 @@ type Tool interface {
 	// 名称在 Registry 中必须唯一。
 	Name() string
 
+	// Aliases 返回工具的历史名称或备用名称列表。
+	//
+	// 工具重命名时旧名称可作为 alias 保留以保持向后兼容。
+	// 返回 nil 或空切片表示无别名。
+	//
+	// Registry.Get() 在名称不匹配时会回退到别名查找。
+	// Registry.Register() 会检测别名冲突。
+	//
+	// Claude Code 对应：aliases?: string[]。
+	Aliases() []string
+
 	// Description 返回工具描述，告诉 LLM 这个工具能做什么。
 	// 描述越清晰，LLM 越能正确选择工具。
 	// 如 "执行一个 bash 命令并返回输出结果。"
@@ -120,44 +131,64 @@ type Tool interface {
 	// ── 并发安全（来自 Claude Code isConcurrencySafe / isReadOnly） ──
 
 	// IsConcurrencySafe 检查此工具+参数组合是否可以与其他工具并发执行。
-	//
-	// 这是 Claude Code isConcurrencySafe(input) 的 Go 化。
-	// 接收 args 参数而非简单返回 bool：
-	//   - shell ls   → true（纯读取，无副作用，可并发）
-	//   - shell rm   → false（写入操作，需要独占执行）
-	//   - grep/list  → true（纯读取）
-	//   - file read  → true（纯读取）
-	//   - file write → false（写入操作）
-	//   - edit       → false（写入操作）
-	//
-	// 框架在 executeToolCalls 中使用此方法：
-	//   true  → 可以和其他安全工具并行执行
-	//   false → 必须串行执行（独占）
-	//
+	// 接收 args 参数：grep/list → true, shell rm → false。
 	// 设计原则（fail-closed）：如果不确定，返回 false。
 	IsConcurrencySafe(args string) bool
 
 	// IsReadOnly 检查此工具+参数组合是否只读（无副作用）。
-	//
-	// 这是 Claude Code isReadOnly(input) 的 Go 化。
-	// 只读工具的数据不会改变系统状态，即使并发执行也是安全的。
-	//
-	// 主要用于：
-	//   - 权限策略（只读工具可自动放行）
-	//   - 并发控制（只读+并发安全 → 可并行执行）
-	//
 	// 设计原则（fail-closed）：如果不确定，返回 false。
 	IsReadOnly(args string) bool
 
 	// ── 结果上限（来自 Claude Code maxResultSizeChars） ──
 
 	// ResultLimit 返回期望的结果字符数上限。
-	//
-	// 框架在 Execute 返回后统一截断（保留头尾的 head+tail 策略）。
-	// 工具自身无需在 Execute 中实现截断逻辑。
-	//
-	// 返回 0 表示不截断（慎用，可能导致上下文爆炸）。
+	// 框架统一截断（head+tail），返回 0 表示不截断。
 	ResultLimit() int
+}
+
+// ──────────────────────────────────────────────────────────
+// ReadState — 文件读取状态追踪（Read-Before-Edit 支撑）
+// ──────────────────────────────────────────────────────────
+
+// ReadState 记录已读文件的修改时间。
+//
+// key = 文件绝对路径，value = 读取时的 mtime。
+// 框架在每次工具执行后记录文件 mtime，编辑类工具在 Execute 中自查。
+//
+// Claude Code 对应：readFileTimestamps 机制。
+type ReadState map[string]time.Time
+
+// ReadStateAware 表示工具需要感知已读文件状态。
+//
+// 编辑类工具（EditTool、FileTool write）实现此接口。
+// 框架在 Execute 前通过 SetReadState 注入当前已读文件状态，
+// 工具在 Execute 内部自行检查 read-before-edit 约束。
+//
+// 这是可选接口 — 只读工具无需实现。
+type ReadStateAware interface {
+	Tool
+	SetReadState(state ReadState)
+}
+
+// ──────────────────────────────────────────────────────────
+// ToolHook — 工具执行前后钩子
+// ──────────────────────────────────────────────────────────
+
+// ToolHook 定义工具执行前后的回调。
+//
+// 用于日志、监控、审计、自定义策略等横切关注点。
+// BeforeExecute 返回 error 阻止工具执行（错误信息作为工具结果返回给 LLM）。
+// AfterExecute 始终被调用（即使工具执行出错或 BeforeExecute 阻止了执行）。
+//
+// Claude Code 对应：Pre-Tool Hook / Post-Tool Hook。
+type ToolHook interface {
+	// BeforeExecute 在工具执行前调用（权限检查之后）。
+	// 返回 error 将阻止工具执行。
+	BeforeExecute(toolName string, args string) error
+
+	// AfterExecute 在工具执行后调用（成功或失败都会调用）。
+	// execErr 是 Execute 返回的错误，nil 表示成功。
+	AfterExecute(toolName string, args string, result string, execErr error)
 }
 
 // ──────────────────────────────────────────────────────────
@@ -238,22 +269,95 @@ func TruncateResult(s string, limit int) string {
 //   - 生成可读的工具描述文本（用于 system prompt）
 //   - 按名称查找工具（用于执行）
 type Registry struct {
-	tools map[string]Tool
+	tools   map[string]Tool
+	aliases map[string]string // alias → canonical tool name
+	hooks   []ToolHook
 }
 
 // NewRegistry 创建一个空的工具注册表。
 func NewRegistry() *Registry {
-	return &Registry{tools: make(map[string]Tool)}
+	return &Registry{
+		tools:   make(map[string]Tool),
+		aliases: make(map[string]string),
+	}
 }
 
 // Register 注册一个工具。如果同名工具已存在，后者覆盖前者。
+// 同时注册所有别名，检测别名冲突（与已有工具名或其他别名冲突时 panic）。
 func (r *Registry) Register(t Tool) {
-	r.tools[t.Name()] = t
+	name := t.Name()
+
+	// 检查新工具名是否与其他工具的别名冲突。
+	if existing, ok := r.aliases[name]; ok && existing != name {
+		panic(fmt.Sprintf(
+			"tool name %q conflicts with alias of %s", name, existing,
+		))
+	}
+
+	r.tools[name] = t
+
+	// 注册别名（冲突检测）。
+	for _, alias := range t.Aliases() {
+		if alias == "" {
+			continue
+		}
+		if existing, ok := r.tools[alias]; ok && alias != name {
+			panic(fmt.Sprintf(
+				"tool alias %q (from %s) conflicts with existing tool %s",
+				alias, name, existing.Name(),
+			))
+		}
+		if existing, ok := r.aliases[alias]; ok && existing != name {
+			panic(fmt.Sprintf(
+				"tool alias %q (from %s) conflicts with alias of %s",
+				alias, name, existing,
+			))
+		}
+		r.aliases[alias] = name
+	}
 }
 
-// Get 按名称获取工具，不存在返回 nil。
+// Get 按名称获取工具，不存在时回退到别名查找，都不存在返回 nil。
 func (r *Registry) Get(name string) Tool {
-	return r.tools[name]
+	if t, ok := r.tools[name]; ok {
+		return t
+	}
+	// 回退到别名查找。
+	if canonical, ok := r.aliases[name]; ok {
+		return r.tools[canonical]
+	}
+	return nil
+}
+
+// ── Hook 管理 ──
+
+// AddHook 注册一个工具钩子。钩子按注册顺序依次执行。
+func (r *Registry) AddHook(h ToolHook) {
+	r.hooks = append(r.hooks, h)
+}
+
+// BeforeHooks 按顺序执行所有 BeforeExecute 钩子。
+// 返回第一个非 nil 错误，后续钩子不再执行。
+func (r *Registry) BeforeHooks(toolName string, args string) error {
+	for _, h := range r.hooks {
+		if err := h.BeforeExecute(toolName, args); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// AfterHooks 按顺序执行所有 AfterExecute 钩子。
+// 每个钩子都在独立的 recover 中执行，单个钩子 panic 不影响其他钩子。
+func (r *Registry) AfterHooks(toolName string, args string, result string, execErr error) {
+	for _, h := range r.hooks {
+		func() {
+			defer func() {
+				recover() // 钩子 panic 不影响主流程
+			}()
+			h.AfterExecute(toolName, args, result, execErr)
+		}()
+	}
 }
 
 // FunctionDefinitions 生成 OpenAI function calling 所需的工具定义列表。

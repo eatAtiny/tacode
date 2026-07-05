@@ -376,6 +376,7 @@ type sleepTool struct {
 }
 
 func (t *sleepTool) Name() string                                   { return t.name }
+func (t *sleepTool) Aliases() []string                              { return nil }
 func (t *sleepTool) Description() string                            { return "sleep tool for testing" }
 func (t *sleepTool) Parameters() map[string]any                     { return map[string]any{"type": "object", "properties": map[string]any{}} }
 func (t *sleepTool) PromptGuide() string                            { return "" }
