@@ -28,7 +28,7 @@ func NewEditTool() *EditTool {
 func (t *EditTool) Name() string { return "edit" }
 
 func (t *EditTool) Description() string {
-	return "在文件中搜索并替换文本。search 必须在文件中唯一匹配一次，替换后会显示变更 diff。"
+	return "在文件中搜索并替换文本。默认 search 必须唯一匹配一次，设置 replace_all=true 可替换所有匹配项。"
 }
 
 func (t *EditTool) Parameters() map[string]any {
@@ -41,11 +41,15 @@ func (t *EditTool) Parameters() map[string]any {
 			},
 			"search": map[string]any{
 				"type":        "string",
-				"description": "要搜索并替换的文本（必须在文件中唯一匹配一次）",
+				"description": "要搜索并替换的文本（必须在文件中唯一匹配一次，除非设置 replace_all=true）",
 			},
 			"replace": map[string]any{
 				"type":        "string",
 				"description": "替换后的新文本（可以为空字符串，表示删除）",
+			},
+			"replace_all": map[string]any{
+				"type":        "boolean",
+				"description": "是否替换所有匹配项，默认 false（要求唯一匹配）。设为 true 时替换所有出现。",
 			},
 		},
 		"required": []string{"path", "search", "replace"},
@@ -56,14 +60,15 @@ func (t *EditTool) Parameters() map[string]any {
 //
 // 流程：
 //  1. 引号标准化（弯引号→直引号）
-//  2. 唯一性校验（0次→报错, >1次→列出位置, 1次→执行）
+//  2. 唯一性校验（replace_all=false 时：0次→报错, >1次→报错, 1次→执行）
 //  3. 执行替换 + 回写文件
 //  4. 生成 diff 输出
 func (t *EditTool) Execute(args string) (string, error) {
 	var params struct {
-		Path    string `json:"path"`
-		Search  string `json:"search"`
-		Replace string `json:"replace"`
+		Path       string `json:"path"`
+		Search     string `json:"search"`
+		Replace    string `json:"replace"`
+		ReplaceAll bool   `json:"replace_all"`
 	}
 	if err := parseArgs(args, &params); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
@@ -97,16 +102,22 @@ func (t *EditTool) Execute(args string) (string, error) {
 	if count == 0 {
 		return "", fmt.Errorf("search 文本在文件中未找到:\n%s", truncateForDisplay(search, 200))
 	}
-	if count > 1 {
+	if !params.ReplaceAll && count > 1 {
 		locations := findOccurrences(content, search, 10)
 		return "", fmt.Errorf(
-			"search 文本在文件中出现了 %d 次（非唯一匹配）。请提供更多上下文使匹配唯一。\n前 %d 处位置: %s",
+			"search 文本在文件中出现了 %d 次（非唯一匹配）。请提供更多上下文使匹配唯一，或设置 replace_all=true 替换全部。\n前 %d 处位置: %s",
 			count, len(locations), strings.Join(locations, ", "),
 		)
 	}
 
 	// ── 步骤 4: 执行替换 ──
-	newContent := strings.Replace(content, search, replace, 1)
+	var newContent string
+	if params.ReplaceAll {
+		newContent = strings.ReplaceAll(content, search, replace)
+	} else {
+		newContent = strings.Replace(content, search, replace, 1)
+	}
+
 	if err := os.WriteFile(params.Path, []byte(newContent), info.Mode()); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
 	}
@@ -117,6 +128,15 @@ func (t *EditTool) Execute(args string) (string, error) {
 	note := ""
 	if search != params.Search {
 		note = " (引号已自动标准化)"
+	}
+
+	replaceCount := count
+	if !params.ReplaceAll {
+		replaceCount = 1
+	}
+
+	if params.ReplaceAll {
+		return fmt.Sprintf("✅ 文件已编辑: %s%s（替换了 %d 处）\n\n%s", params.Path, note, replaceCount, diff), nil
 	}
 	return fmt.Sprintf("✅ 文件已编辑: %s%s\n\n%s", params.Path, note, diff), nil
 }
@@ -135,11 +155,19 @@ func (t *EditTool) CheckPermission(args string) PermissionResult {
 
 // PromptGuide 返回 edit 工具的使用引导。
 func (t *EditTool) PromptGuide() string {
-	return "search 文本必须在文件中唯一匹配一次。" +
-		"如果需要替换多处，分别调用 edit。" +
+	return "search 文本默认必须在文件中唯一匹配一次。" +
+		"如需替换所有匹配项（如批量重命名），设置 replace_all=true。" +
 		"替换后会显示 diff，请仔细检查变更是否正确。" +
 		"修改已有文件时优先使用 edit，而非 file write 全量覆盖。"
 }
+
+// ── Tool 接口：并发安全 ──
+
+// IsConcurrencySafe 编辑文件有写入副作用，不可并发执行。
+func (t *EditTool) IsConcurrencySafe(args string) bool { return false }
+
+// IsReadOnly 编辑文件是写入操作。
+func (t *EditTool) IsReadOnly(args string) bool { return false }
 
 // ── Tool 接口：结果上限 ──
 

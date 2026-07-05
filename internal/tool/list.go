@@ -139,6 +139,14 @@ func (t *ListTool) PromptGuide() string {
 	return ""
 }
 
+// ── Tool 接口：并发安全 ──
+
+// IsConcurrencySafe list 是纯只读操作，可以并发执行。
+func (t *ListTool) IsConcurrencySafe(args string) bool { return true }
+
+// IsReadOnly list 不修改任何文件。
+func (t *ListTool) IsReadOnly(args string) bool { return true }
+
 // ── Tool 接口：结果上限 ──
 
 // ResultLimit list 结果上限 3000 字符。

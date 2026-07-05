@@ -156,6 +156,14 @@ func (t *GrepTool) PromptGuide() string {
 		"结果默认限制 30 条，可以缩小搜索范围或增加 max_results 获取更多。"
 }
 
+// ── Tool 接口：并发安全 ──
+
+// IsConcurrencySafe grep 是纯只读操作，可以并发执行。
+func (t *GrepTool) IsConcurrencySafe(args string) bool { return true }
+
+// IsReadOnly grep 不修改任何文件。
+func (t *GrepTool) IsReadOnly(args string) bool { return true }
+
 // ── Tool 接口：结果上限 ──
 
 // ResultLimit grep 结果上限 3000 字符。

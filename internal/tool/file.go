@@ -122,6 +122,30 @@ func (t *FileTool) PromptGuide() string {
 		"修改已有文件时，优先使用 edit 工具（而非 write 全量覆盖）。"
 }
 
+// ── Tool 接口：并发安全 ──
+
+// IsConcurrencySafe file read 可并发，file write 不可并发。
+func (t *FileTool) IsConcurrencySafe(args string) bool {
+	var params struct {
+		Action string `json:"action"`
+	}
+	if err := parseArgs(args, &params); err != nil {
+		return false
+	}
+	return params.Action == "read"
+}
+
+// IsReadOnly file read 是只读，file write 不是。
+func (t *FileTool) IsReadOnly(args string) bool {
+	var params struct {
+		Action string `json:"action"`
+	}
+	if err := parseArgs(args, &params); err != nil {
+		return false
+	}
+	return params.Action == "read"
+}
+
 // ── Tool 接口：结果上限 ──
 
 // ResultLimit 文件读取上限 8192 字符。

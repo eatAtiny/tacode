@@ -14,8 +14,12 @@
 package tool
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"time"
 
 	openai "github.com/sashabaranov/go-openai"
 )
@@ -113,6 +117,38 @@ type Tool interface {
 	// 返回空字符串表示无额外引导。
 	PromptGuide() string
 
+	// ── 并发安全（来自 Claude Code isConcurrencySafe / isReadOnly） ──
+
+	// IsConcurrencySafe 检查此工具+参数组合是否可以与其他工具并发执行。
+	//
+	// 这是 Claude Code isConcurrencySafe(input) 的 Go 化。
+	// 接收 args 参数而非简单返回 bool：
+	//   - shell ls   → true（纯读取，无副作用，可并发）
+	//   - shell rm   → false（写入操作，需要独占执行）
+	//   - grep/list  → true（纯读取）
+	//   - file read  → true（纯读取）
+	//   - file write → false（写入操作）
+	//   - edit       → false（写入操作）
+	//
+	// 框架在 executeToolCalls 中使用此方法：
+	//   true  → 可以和其他安全工具并行执行
+	//   false → 必须串行执行（独占）
+	//
+	// 设计原则（fail-closed）：如果不确定，返回 false。
+	IsConcurrencySafe(args string) bool
+
+	// IsReadOnly 检查此工具+参数组合是否只读（无副作用）。
+	//
+	// 这是 Claude Code isReadOnly(input) 的 Go 化。
+	// 只读工具的数据不会改变系统状态，即使并发执行也是安全的。
+	//
+	// 主要用于：
+	//   - 权限策略（只读工具可自动放行）
+	//   - 并发控制（只读+并发安全 → 可并行执行）
+	//
+	// 设计原则（fail-closed）：如果不确定，返回 false。
+	IsReadOnly(args string) bool
+
 	// ── 结果上限（来自 Claude Code maxResultSizeChars） ──
 
 	// ResultLimit 返回期望的结果字符数上限。
@@ -127,6 +163,36 @@ type Tool interface {
 // ──────────────────────────────────────────────────────────
 // TruncateResult — 统一结果截断
 // ──────────────────────────────────────────────────────────
+
+// DefaultToolResultsDir 工具大结果持久化目录（相对于工作目录）。
+const DefaultToolResultsDir = "data/tool-results"
+
+// SaveLargeResult 将完整工具结果持久化到磁盘。
+//
+// 当工具结果超过 ResultLimit 时，框架调用此函数保存完整内容。
+// 返回持久化文件路径（可在后续通过 file read 读取）。
+//
+// 文件命名：<toolName>_<timestamp>_<hash>.txt
+// 自动创建目标目录。
+//
+// 设计参考 Claude Code 的 maxResultSizeChars + 磁盘持久化机制。
+func SaveLargeResult(dir, toolName, content string) (string, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create tool-results dir: %w", err)
+	}
+
+	// 生成唯一文件名：工具名 + 时间戳 + 内容哈希（防冲突）。
+	ts := time.Now().UnixMilli()
+	hash := sha256.Sum256([]byte(content))
+	filename := fmt.Sprintf("%s_%d_%x.txt", toolName, ts, hash[:4])
+	filePath := filepath.Join(dir, filename)
+
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("write result file: %w", err)
+	}
+
+	return filePath, nil
+}
 
 // TruncateResult 截断过长结果，保留头部和尾部。
 //
