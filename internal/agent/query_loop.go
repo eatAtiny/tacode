@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"agentic/internal/llm"
@@ -319,14 +320,13 @@ func (lc *queryLoopContext) appendAssistantMessage(content string, toolCalls []l
 
 // executeToolCalls 执行工具调用列表。
 //
-// 流程：
-//   1. yield ToolCall 事件（通知上层显示工具调用信息）
-//   2. 遍历 toolCalls，对每个执行 executeSingleTool()
-//      - 权限检查（工具自检：Tool.CheckPermission）
-//      - 全局禁止列表检查
-//      - 查找工具 → 执行 → 截断 → 记录 mtime
-//      - yield ToolResult 事件
-//      - 推入 tool 消息到历史
+// 重构后支持并行执行：
+//  1. 分类：并发安全工具（IsConcurrencySafe + IsReadOnly + Allow permission）
+//     → 用 goroutine 并行执行
+//  2. 其余工具 → 串行执行
+//
+// 并行执行时收集完整结果，然后按原始顺序 yield 事件和推入消息。
+// 设计参考 Claude Code 的 StreamingToolExecutor。
 //
 // 返回：
 //   - true: 继续执行
@@ -342,13 +342,152 @@ func (lc *queryLoopContext) executeToolCalls(toolCalls []llm.ToolCall, iter int)
 		TotalTokens:  lc.totalInputTokens + lc.totalOutputTokens,
 	}
 
+	// ── 分类：并发安全 vs 串行 ──
+	//
+	// 并发安全条件（三者同时满足）：
+	//   1. 工具存在
+	//   2. IsConcurrencySafe(args) == true
+	//   3. IsReadOnly(args) == true
+	//   4. CheckPermission(args).Allow == true（避免并发弹窗）
+	type execItem struct {
+		tc         llm.ToolCall
+		t          tool.Tool
+		concurrent bool
+	}
+
+	var concurrentItems []execItem
+	var serialItems []execItem
+
 	for _, tc := range toolCalls {
-		if !lc.executeSingleTool(tc, iter) {
+		t := lc.toolRegistry.Get(tc.Name)
+		item := execItem{tc: tc, t: t}
+
+		if t != nil && t.IsConcurrencySafe(tc.Arguments) && t.IsReadOnly(tc.Arguments) {
+			if perm := t.CheckPermission(tc.Arguments); perm.Allow {
+				item.concurrent = true
+				concurrentItems = append(concurrentItems, item)
+				continue
+			}
+		}
+		serialItems = append(serialItems, item)
+	}
+
+	// ── 阶段 1: 并行执行并发安全工具 ──
+	if len(concurrentItems) > 0 {
+		concurrentTCs := make([]llm.ToolCall, len(concurrentItems))
+		for i, item := range concurrentItems {
+			concurrentTCs[i] = item.tc
+		}
+		lc.executeConcurrentTools(concurrentTCs, iter)
+	}
+
+	// ── 阶段 2: 串行执行其余工具 ──
+	for _, item := range serialItems {
+		if !lc.executeSingleTool(item.tc, iter) {
 			return false
 		}
 	}
 
 	return true
+}
+
+// toolExecResult 工具执行结果（用于并行执行收集）。
+type toolExecResult struct {
+	result  string
+	isError bool
+}
+
+// executeConcurrentTools 并行执行一组并发安全工具。
+//
+// 所有工具并发执行（goroutine + WaitGroup），
+// 但结果按原始顺序 yield 和推入消息（保证 LLM 上下文一致性）。
+//
+// 前置条件：传入的 toolCalls 均已通过并发安全检查
+// （IsConcurrencySafe + IsReadOnly + CheckPermission.Allow）。
+//
+// 线程安全：
+//   - 各工具读取独立文件，无竞争
+//   - fileReads map 在并行写时由 mu 保护
+//   - event channel 只在主 goroutine 写入
+func (lc *queryLoopContext) executeConcurrentTools(toolCalls []llm.ToolCall, iter int) {
+	// 结果切片（预分配，按索引存储，保持原始顺序）。
+	results := make([]toolExecResult, len(toolCalls))
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex // 保护 fileReads map
+
+	for i, tc := range toolCalls {
+		wg.Add(1)
+		go func(idx int, tc llm.ToolCall) {
+			defer wg.Done()
+
+			t := lc.toolRegistry.Get(tc.Name)
+			if t == nil {
+				results[idx] = toolExecResult{
+					result:  fmt.Sprintf("未知工具: %s", tc.Name),
+					isError: true,
+				}
+				return
+			}
+
+			result, execErr := t.Execute(tc.Arguments)
+			if execErr != nil {
+				result = fmt.Sprintf("工具执行出错: %v\n请分析错误原因并尝试其他方案。", execErr)
+			}
+
+			if strings.TrimSpace(result) == "" {
+				result = "(无输出)"
+			}
+
+			// 统一截断 + 大结果持久化。
+			limit := t.ResultLimit()
+			if limit <= 0 {
+				limit = defaultResultLimit
+			}
+			if len(result) > limit {
+				fullResult := result
+				result = tool.TruncateResult(result, limit)
+				if savedPath, err := tool.SaveLargeResult(tool.DefaultToolResultsDir, tc.Name, fullResult); err == nil {
+					result += fmt.Sprintf("\n\n💾 完整结果已保存到: %s（可使用 file read 读取）", savedPath)
+				}
+			}
+
+			// 记录文件 mtime（并行安全：mu 保护）。
+			if absPath, ok := extractFilePath(tc.Name, tc.Arguments); ok {
+				if info, err := os.Stat(absPath); err == nil {
+					mu.Lock()
+					lc.fileReads[absPath] = info.ModTime()
+					mu.Unlock()
+				}
+			}
+
+			results[idx] = toolExecResult{
+				result:  result,
+				isError: execErr != nil,
+			}
+		}(i, tc)
+	}
+
+	wg.Wait()
+
+	// 按原始顺序 yield 事件 + 推入消息。
+	for i, tc := range toolCalls {
+		r := results[i]
+
+		lc.events <- QueryEvent{
+			Type:       QueryEventToolResult,
+			ToolName:   tc.Name,
+			ToolResult: r.result,
+			IsError:    r.isError,
+			Iteration:  iter + 1,
+		}
+
+		lc.messages = append(lc.messages, llm.ChatMessage{
+			Role:       "tool",
+			Content:    r.result,
+			ToolCallID: tc.ID,
+		})
+	}
 }
 
 // executeSingleTool 执行单个工具调用。
@@ -413,14 +552,20 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 		result = "(无输出)"
 	}
 
-	// ── 子步骤 6: 统一结果截断 ──
+	// ── 子步骤 6: 统一结果截断 + 大结果持久化 ──
 	// 框架层统一处理截断（head+tail 保留策略），工具无需自行截断。
+	// 超过上限时：完整结果写入磁盘 → 模型可后续通过 file read 获取。
 	limit := t.ResultLimit()
 	if limit <= 0 {
 		limit = defaultResultLimit
 	}
 	if len(result) > limit {
+		fullResult := result
 		result = tool.TruncateResult(result, limit)
+		// 持久化完整结果到磁盘。
+		if savedPath, err := tool.SaveLargeResult(tool.DefaultToolResultsDir, tc.Name, fullResult); err == nil {
+			result += fmt.Sprintf("\n\n💾 完整结果已保存到: %s（可使用 file read 读取）", savedPath)
+		}
 	}
 
 	// ── 子步骤 7: yield 工具执行结果 ──
@@ -626,6 +771,24 @@ func (lc *queryLoopContext) yieldContinue(iter int) {
 // Read-Before-Edit + mtime 追踪
 // ──────────────────────────────────────────────────────────
 
+// extractFilePath 从工具参数中提取文件绝对路径。
+//
+// 返回绝对路径和是否成功提取。
+// 用于 mtime 追踪的集中提取逻辑，避免在多个函数中重复解析。
+func extractFilePath(toolName string, args string) (string, bool) {
+	var params struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(args), &params); err != nil || params.Path == "" {
+		return "", false
+	}
+	absPath, err := filepath.Abs(params.Path)
+	if err != nil {
+		return "", false
+	}
+	return absPath, true
+}
+
 // recordFileRead 从工具参数中提取文件路径，记录其 mtime。
 //
 // 用于 read-before-edit 检测：编辑类工具（edit、file write）执行前，
@@ -633,15 +796,8 @@ func (lc *queryLoopContext) yieldContinue(iter int) {
 //
 // 只处理包含 "path" 参数的工具：file(read)、edit、grep（文件模式时）。
 func (lc *queryLoopContext) recordFileRead(toolName string, args string) {
-	var params struct {
-		Path string `json:"path"`
-	}
-	if err := json.Unmarshal([]byte(args), &params); err != nil || params.Path == "" {
-		return
-	}
-
-	absPath, err := filepath.Abs(params.Path)
-	if err != nil {
+	absPath, ok := extractFilePath(toolName, args)
+	if !ok {
 		return
 	}
 
