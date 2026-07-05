@@ -84,8 +84,15 @@ func (t *ListTool) Execute(args string) (string, error) {
 	}
 
 	// 收集条目。
+	// prefix 设为用户指定的 path 参数，确保输出的相对路径是从 CWD 出发的，
+	// 而非从 path 参数出发。LLM 可以直接复用输出中的路径。
+	// 例外：path 为 "." 时不加前缀（避免出现 "./..." 的冗余写法）。
+	basePrefix := params.Path
+	if basePrefix == "." {
+		basePrefix = ""
+	}
 	var entries []dirEntry
-	collectEntries(params.Path, "", 1, params.Depth, params.MaxEntries, &entries)
+	collectEntries(params.Path, basePrefix, 1, params.Depth, params.MaxEntries, &entries)
 
 	// 排序：目录优先 → 字母序。
 	sort.Slice(entries, func(i, j int) bool {
@@ -142,6 +149,9 @@ func (t *ListTool) ResultLimit() int { return 3000 }
 // ──────────────────────────────────────────────────────────
 
 // collectEntries 递归收集目录条目。
+//
+// displayPath 是从最初 base 出发的相对路径（用 "/" 连接），
+// 而非之前的空格缩进。LLM 可以直接用这个路径作为后续 list/grep/file 的参数。
 func collectEntries(basePath, prefix string, currentDepth, maxDepth, maxEntries int, entries *[]dirEntry) {
 	if currentDepth > maxDepth || len(*entries) >= maxEntries*2 {
 		return
@@ -163,7 +173,13 @@ func collectEntries(basePath, prefix string, currentDepth, maxDepth, maxEntries 
 		}
 
 		name := de.Name()
-		displayPath := prefix + name
+		// 相对路径：父路径 + "/" + 当前名（第一层直接用 name，无前缀）。
+		var displayPath string
+		if prefix == "" {
+			displayPath = name
+		} else {
+			displayPath = prefix + "/" + name
+		}
 
 		if de.IsDir() {
 			*entries = append(*entries, dirEntry{
@@ -171,10 +187,9 @@ func collectEntries(basePath, prefix string, currentDepth, maxDepth, maxEntries 
 				name:  displayPath + "/",
 				path:  filepath.Join(basePath, name),
 			})
-			// 递归进入子目录。
-			subPrefix := prefix + "  "
+			// 递归进入子目录，prefix 传递相对路径而非空格缩进。
 			subPath := filepath.Join(basePath, name)
-			collectEntries(subPath, subPrefix, currentDepth+1, maxDepth, maxEntries, entries)
+			collectEntries(subPath, displayPath, currentDepth+1, maxDepth, maxEntries, entries)
 		} else {
 			*entries = append(*entries, dirEntry{
 				isDir: false,
