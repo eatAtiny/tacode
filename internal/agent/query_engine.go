@@ -79,10 +79,18 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 	}
 
 	// ═══════════════════════════════════════════════════════
-	// 步骤 3: 构建 System/User Prompt
+	// 步骤 3: 构建消息数组（3 段结构，前缀缓存优化）
 	// ═══════════════════════════════════════════════════════
-	// System Prompt: ReAct 工作方式 + 可用工具列表 + 工具使用指南 + 注意事项
-	// User Prompt: 轮次号 + 记忆上下文 + 用户任务
+	//
+	// 消息结构（v2 动静分离）：
+	//   messages[0] system  = 静态段(可缓存) + 边界 + 动态段(会话稳定)
+	//   messages[1] user    = <system-reminder> 记忆上下文
+	//   messages[2] user    = 轮次 + 用户任务
+	//
+	// 缓存收益：
+	//   - messages[0] 的静态段对所有用户相同 → 始终命中前缀缓存
+	//   - messages[1] 会话级稳定 → 同会话内多轮对话命中
+	//   - messages[2] 每轮变化但很短 → 缓存断点代价极小
 
 	// 收集各工具的使用引导（Tool.PromptGuide()）。
 	var guides []prompt.ToolGuide
@@ -94,14 +102,22 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 		})
 	}
 
-	systemPrompt := prompt.BuildReActSystemPrompt(r.tools.Descriptions(), guides)
-	userPrompt := prompt.BuildReActUserPrompt(round, contextDigest, userInput)
+	fullSystemPrompt := prompt.BuildReActSystemPrompt(r.tools.Descriptions(), guides)
 
 	// 初始化消息数组（作为 queryLoop 的初始输入）。
 	messages := []llm.ChatMessage{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: userPrompt},
+		{Role: "system", Content: fullSystemPrompt},
 	}
+	if contextDigest != "" {
+		messages = append(messages, llm.ChatMessage{
+			Role:    "user",
+			Content: prompt.BuildSystemReminder(contextDigest),
+		})
+	}
+	messages = append(messages, llm.ChatMessage{
+		Role:    "user",
+		Content: prompt.BuildUserTask(round, userInput),
+	})
 
 	// 获取 OpenAI function calling 格式的工具定义。
 	tools := r.tools.FunctionDefinitions()

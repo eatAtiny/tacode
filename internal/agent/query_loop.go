@@ -48,6 +48,12 @@ type queryLoopContext struct {
 	lastOutputTokens  int                    // 暂存每次调用的输出 token 数
 	currentIter       int                    // 当前迭代次数（用于 mtime 追踪）
 	fileReads         map[string]time.Time   // 已读文件的 mtime（key=绝对路径，用于 read-before-edit 检测）
+
+	// ── 锚点令牌估算（Phase 2） ──
+	// 利用 API 返回的 usage.prompt_tokens 作为精确锚点，
+	// 只对新增消息做启发式估算，误差从 ~30% 降到 <5%。
+	anchorTotalTokens  int // 上次 API 返回的精确 prompt_tokens（0 = 无锚点，走纯启发式）
+	anchorMessageCount int // 锚点时的消息条数
 }
 
 // queryLoop 是纯粹的 Agent Loop 核心循环，使用异步生成器模式。
@@ -221,7 +227,7 @@ func (lc *queryLoopContext) checkAndCompressContext(iter int) bool {
 		return true
 	}
 
-	totalTokens := estimateMessagesTokens(lc.messages)
+	totalTokens := lc.estimateTokensAnchored()
 	usageRatio := float64(totalTokens) / float64(lc.contextLimit)
 
 	if usageRatio <= compressThreshold {
@@ -236,6 +242,7 @@ func (lc *queryLoopContext) checkAndCompressContext(iter int) bool {
 	}
 
 	lc.messages = compressMessages(lc.messages, iter)
+	lc.anchorTotalTokens = 0 // 消息被修改，锚点失效，下次走纯启发式
 	return true
 }
 
@@ -288,6 +295,10 @@ func (lc *queryLoopContext) callLLMStream(iter int) (string, []llm.ToolCall, boo
 			if streamEvent.Content != "" {
 				fullContent = streamEvent.Content
 			}
+			// 存储锚点（在 appendAssistantMessage 之前，此时消息数未变）。
+			// InputTokens 是服务端精确值，后续新增消息只做增量估算。
+			lc.anchorTotalTokens = streamEvent.InputTokens
+			lc.anchorMessageCount = len(lc.messages)
 
 		case llm.StreamEventError:
 			// 流式错误：yield Error 事件并返回失败。
@@ -849,6 +860,35 @@ func estimateMessagesTokens(messages []llm.ChatMessage) int {
 	return memory.EstimateTokens(totalContent)
 }
 
+// estimateTokensAnchored 使用锚点法估算当前消息数组的 token 数。
+//
+// 与纯启发式 estimateMessagesTokens 的区别：
+//   - 纯启发式：对所有消息逐字符估算 → ~30% 误差
+//   - 锚点法：上次 API 返回的 prompt_tokens (精确) + 只估算新增消息 → <5% 误差
+//
+// 锚点失效条件（返回 0 时退化为纯启发式）：
+//   - 首次调用（anchorTotalTokens == 0）
+//   - 消息被压缩后（compressMessages 重置锚点）
+func (lc *queryLoopContext) estimateTokensAnchored() int {
+	if lc.anchorTotalTokens == 0 {
+		return estimateMessagesTokens(lc.messages)
+	}
+	delta := len(lc.messages) - lc.anchorMessageCount
+	if delta <= 0 {
+		return lc.anchorTotalTokens
+	}
+	// 只估算上次 API 调用后新增的消息。
+	newTokens := estimateMessagesTokens(lc.messages[lc.anchorMessageCount:])
+	return lc.anchorTotalTokens + newTokens
+}
+
+// isSystemReminder 判断一条消息是否是 system-reminder 注入。
+//
+// system-reminder 消息在压缩时应该原样保留，不应被压缩。
+func isSystemReminder(msg llm.ChatMessage) bool {
+	return strings.HasPrefix(strings.TrimSpace(msg.Content), "<system-reminder>")
+}
+
 // compressMessages 压缩旧的工具调用消息，减少 token 用量。
 //
 // 策略：
@@ -879,6 +919,11 @@ func compressMessages(messages []llm.ChatMessage, _ int) []llm.ChatMessage {
 	// 压缩早期的工具调用消息。
 	for i := 1; i < compressEnd; i++ {
 		msg := messages[i]
+		// system-reminder 消息原样保留，不压缩。
+		if isSystemReminder(msg) {
+			compressed = append(compressed, msg)
+			continue
+		}
 		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
 			// 压缩 assistant 的工具调用消息。
 			toolNames := make([]string, len(msg.ToolCalls))

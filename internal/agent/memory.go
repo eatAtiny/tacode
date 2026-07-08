@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"agentic/internal/memory"
+	"agentic/internal/prompt"
 )
 
 // ──────────────────────────────────────────────────────────
@@ -76,12 +77,102 @@ func (r *Runner) extractMemory(ctx context.Context, round int, userInput, assist
 	}
 }
 
+// handleContextCommand 展示当前提示词各部分的大小组成（v2 动静分离结构）。
+//
+// 输出 3 段消息结构：
+//   messages[0] system  = 静态段(全局可缓存) + 动态段(会话稳定)
+//   messages[1] user    = <system-reminder> 记忆上下文
+//   messages[2] user    = 轮次 + 用户任务
+func (r *Runner) handleContextCommand() {
+	// ── messages[0] system: 静态段 ──
+	staticPrompt := prompt.BuildReActStaticPrompt("")
+	staticTokens := memory.EstimateTokens(staticPrompt)
+
+	// 工具列表（嵌入在静态段中）。
+	toolDescs := r.tools.Descriptions()
+	toolDescsTokens := memory.EstimateTokens(toolDescs)
+
+	// ── messages[0] system: 动态段（工具使用指南） ──
+	var guides []prompt.ToolGuide
+	for _, name := range r.tools.Names() {
+		t := r.tools.Get(name)
+		if t == nil {
+			continue
+		}
+		guides = append(guides, prompt.ToolGuide{
+			Name:  t.Name(),
+			Guide: t.PromptGuide(),
+		})
+	}
+	dynamicPrompt := prompt.BuildReActDynamicPrompt(guides)
+	dynamicTokens := memory.EstimateTokens(dynamicPrompt)
+
+	fullSystem := prompt.BuildReActSystemPrompt(toolDescs, guides)
+	systemTokens := memory.EstimateTokens(fullSystem)
+
+	// ── messages[1] user: system-reminder (记忆上下文) ──
+	contextDigest, _ := r.retriever.BuildContext("")
+	contextTokens := memory.EstimateTokens(contextDigest)
+
+	index := r.memStore.LoadIndex()
+	indexTokens := memory.EstimateTokens(index)
+
+	memories, _ := r.memStore.FormatForPrompt(10, 2)
+	memoriesTokens := memory.EstimateTokens(memories)
+
+	summaries, _ := r.summary.FormatRecent(10)
+	summariesTokens := memory.EstimateTokens(summaries)
+
+	// system-reminder 包装开销（XML 标签）。
+	wrapperTokens := memory.EstimateTokens(prompt.BuildSystemReminder("")) + 1
+
+	// ── messages[2] user: 用户任务 ──
+	taskTokens := memory.EstimateTokens(prompt.BuildUserTask(0, "")) + 10
+
+	// ── 合计 ──
+	contextLimit := r.llm.ContextLimit()
+	totalTokens := systemTokens + contextTokens + taskTokens
+	pct := float64(totalTokens) / float64(contextLimit) * 100
+
+	r.ui.OnMessage(fmt.Sprintf(
+		"═══════════════════════════════════════\n"+
+			"  提示词组成（3 段消息结构）\n"+
+			"═══════════════════════════════════════\n\n"+
+			"▸ messages[0] system  %d tokens\n"+
+			"  · 静态段 (全局可缓存): 框架 + 工具列表 + 注意事项  ~%d tokens\n"+
+			"    其中工具 Schema                    ~%d tokens\n"+
+			"  · 动态段 (会话稳定): 工具使用指南                ~%d tokens\n\n"+
+			"▸ messages[1] user (system-reminder)  %d tokens\n"+
+			"  · L3 记忆索引 (MEMORY.md)           ~%d tokens\n"+
+			"  · L3 重要记忆                       ~%d tokens\n"+
+			"  · L2 最近摘要                       ~%d tokens\n"+
+			"  · XML 标签开销                       ~%d tokens\n\n"+
+			"▸ messages[2] user (task)             ~%d tokens\n"+
+			"  · 轮次 + 用户任务（输入时确定）       ~%d tokens\n\n"+
+			"───────────────────────────────────────\n"+
+			"  合计预估   ~%d / %d tokens (%.1f%%)\n"+
+			"═══════════════════════════════════════",
+		systemTokens,
+		staticTokens+toolDescsTokens,
+		toolDescsTokens,
+		dynamicTokens,
+		contextTokens+wrapperTokens,
+		indexTokens,
+		memoriesTokens,
+		summariesTokens,
+		wrapperTokens,
+		taskTokens,
+		taskTokens,
+		totalTokens, contextLimit, pct,
+	))
+}
+
 // handleCompress 手动触发摘要压缩（/compress 命令）。
 //
 // 流程：
-//   1. 调用 Retriever.CompressSummaries()
-//   2. LLM 合并旧摘要 → 保留最近 3 条 + 1 条综合摘要
-//   3. 显示压缩后的摘要数量
+//  1. 调用 Retriever.CompressSummaries()
+//  2. LLM 合并旧摘要 → 保留最近 3 条 + 1 条综合摘要
+//  3. 显示压缩后的摘要数量
 func (r *Runner) handleCompress() {
 	r.ui.OnMessage("🗜️ 正在压缩摘要...")
 
