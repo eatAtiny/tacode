@@ -9,6 +9,7 @@ import (
 
 	"agentic/internal/llm"
 	"agentic/internal/memory"
+	"agentic/internal/prompt"
 	"agentic/internal/session"
 	"agentic/internal/tool"
 	"agentic/internal/ui"
@@ -69,6 +70,8 @@ type Runner struct {
 	pendingSessionName string // /new 指定的会话名，ensurePersisted 时使用
 
 	sessionStartTime time.Time // 会话开始时间（环境元数据注入，会话内不变）
+
+	promptBuilder *prompt.Builder // 提示词构建器（预构建 system prompt，封装消息组装）
 }
 
 // NewRunner 构造 Agent 执行器。
@@ -150,6 +153,17 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	// 记录会话开始时间（用于环境元数据注入，会话内不变）。
 	r.sessionStartTime = time.Now()
+
+	// 预构建提示词 Builder（system prompt 构造一次，整个会话复用）。
+	var guides []prompt.ToolGuide
+	for _, name := range r.tools.Names() {
+		t := r.tools.Get(name)
+		guides = append(guides, prompt.ToolGuide{
+			Name:  t.Name(),
+			Guide: t.PromptGuide(),
+		})
+	}
+	r.promptBuilder = prompt.NewBuilder(r.tools.Descriptions(), guides)
 
 	// 设置 UI 初始状态。
 	r.ui.SetSessionName("new")

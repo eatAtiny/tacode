@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"time"
 
-	"agentic/internal/llm"
 	"agentic/internal/memory"
 	"agentic/internal/prompt"
 )
@@ -81,55 +79,17 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 	}
 
 	// ═══════════════════════════════════════════════════════
-	// 步骤 3: 构建消息数组（3 段结构，前缀缓存优化）
+	// 步骤 3: 构建消息数组（委托 prompt.Builder）
 	// ═══════════════════════════════════════════════════════
-	//
-	// 消息结构（v2 动静分离）：
-	//   messages[0] system  = 静态段(可缓存) + 边界 + 动态段(会话稳定)
-	//   messages[1] user    = <system-reminder> 记忆上下文
-	//   messages[2] user    = 轮次 + 用户任务
-	//
-	// 缓存收益：
-	//   - messages[0] 的静态段对所有用户相同 → 始终命中前缀缓存
-	//   - messages[1] 会话级稳定 → 同会话内多轮对话命中
-	//   - messages[2] 每轮变化但很短 → 缓存断点代价极小
-
-	// 收集各工具的使用引导（Tool.PromptGuide()）。
-	var guides []prompt.ToolGuide
-	for _, name := range r.tools.Names() {
-		t := r.tools.Get(name)
-		guides = append(guides, prompt.ToolGuide{
-			Name:  t.Name(),
-			Guide: t.PromptGuide(),
-		})
-	}
-
-	fullSystemPrompt := prompt.BuildReActSystemPrompt(r.tools.Descriptions(), guides)
-
-	// 获取当前工作目录（会话内不变）。
+	// Builder 封装了 3 段消息结构和前缀缓存优化，
+	// agent 循环不需要知道消息内部结构。
 	workDir, _ := os.Getwd()
-
-	// 初始化消息数组（作为 queryLoop 的初始输入）。
-	messages := []llm.ChatMessage{
-		{Role: "system", Content: fullSystemPrompt},
-	}
-	if contextDigest != "" {
-		// system-reminder 注入：会话环境（会话内不变 → 缓存友好）+ 记忆上下文。
-		reminder := fmt.Sprintf(
-			"会话环境:\n- 工作目录: %s\n- 会话开始时间: %s\n\n上下文生成时间: %s\n\n%s",
-			workDir,
-			r.sessionStartTime.Format("2006-01-02 15:04:05"),
-			time.Now().Format("2006-01-02 15:04:05"),
-			contextDigest,
-		)
-		messages = append(messages, llm.ChatMessage{
-			Role:    "user",
-			Content: prompt.BuildSystemReminder(reminder),
-		})
-	}
-	messages = append(messages, llm.ChatMessage{
-		Role:    "user",
-		Content: prompt.BuildUserTask(round, userInput),
+	messages := r.promptBuilder.BuildMessages(prompt.BuildOptions{
+		Round:         round,
+		UserInput:     userInput,
+		ContextDigest: contextDigest,
+		WorkDir:       workDir,
+		SessionStart:  r.sessionStartTime,
 	})
 
 	// 获取 OpenAI function calling 格式的工具定义。
