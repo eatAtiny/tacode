@@ -32,7 +32,6 @@ package prompt
 import (
 	"fmt"
 	"strings"
-	"time"
 )
 
 // ──────────────────────────────────────────────────────────
@@ -199,22 +198,11 @@ func BuildSystemReminder(contextDigest string) string {
 
 // BuildUserTask 构建用户任务消息。
 //
-// 用于 messages[2]（user 角色），包含环境元数据和用户输入。
-// 与旧版 BuildReActUserPrompt 的区别：不包含记忆上下文（已移到 system-reminder）。
-//
-// workDir 为当前工作目录，空字符串表示不包含环境信息（向后兼容）。
-func BuildUserTask(round int, userInput, workDir string) string {
-	now := time.Now().Format("2006-01-02 15:04:05")
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("轮次: %d\n", round))
-
-	if workDir != "" {
-		sb.WriteString(fmt.Sprintf("\n环境:\n- 工作目录: %s\n- 当前时间: %s\n", workDir, now))
-	}
-
-	sb.WriteString(fmt.Sprintf("\n用户任务:\n%s", userInput))
-	return sb.String()
+// 用于 messages[2]（user 角色），只包含轮次号和用户输入。
+// 环境元数据（工作目录、会话时间）已移到 system-reminder（messages[1]），
+// 此处保持极简以最小化每轮变化的缓存断点。
+func BuildUserTask(round int, userInput string) string {
+	return fmt.Sprintf("轮次: %d\n\n用户任务:\n%s", round, userInput)
 }
 
 // ──────────────────────────────────────────────────────────
@@ -232,7 +220,7 @@ func BuildReActUserPrompt(round int, contextDigest, userInput string) string {
 	if contextDigest != "" {
 		parts = append(parts, BuildSystemReminder(contextDigest))
 	}
-	parts = append(parts, BuildUserTask(round, userInput, ""))
+	parts = append(parts, BuildUserTask(round, userInput))
 
 	return strings.Join(parts, "\n\n")
 }

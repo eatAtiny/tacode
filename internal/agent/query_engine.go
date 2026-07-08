@@ -106,7 +106,7 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 
 	fullSystemPrompt := prompt.BuildReActSystemPrompt(r.tools.Descriptions(), guides)
 
-	// 获取当前工作目录用于环境注入。
+	// 获取当前工作目录（会话内不变）。
 	workDir, _ := os.Getwd()
 
 	// 初始化消息数组（作为 queryLoop 的初始输入）。
@@ -114,10 +114,14 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 		{Role: "system", Content: fullSystemPrompt},
 	}
 	if contextDigest != "" {
-		// system-reminder 注入：记忆上下文 + 生成时间戳。
-		reminder := fmt.Sprintf("上下文生成时间: %s\n\n%s",
+		// system-reminder 注入：会话环境（会话内不变 → 缓存友好）+ 记忆上下文。
+		reminder := fmt.Sprintf(
+			"会话环境:\n- 工作目录: %s\n- 会话开始时间: %s\n\n上下文生成时间: %s\n\n%s",
+			workDir,
+			r.sessionStartTime.Format("2006-01-02 15:04:05"),
 			time.Now().Format("2006-01-02 15:04:05"),
-			contextDigest)
+			contextDigest,
+		)
 		messages = append(messages, llm.ChatMessage{
 			Role:    "user",
 			Content: prompt.BuildSystemReminder(reminder),
@@ -125,7 +129,7 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 	}
 	messages = append(messages, llm.ChatMessage{
 		Role:    "user",
-		Content: prompt.BuildUserTask(round, userInput, workDir),
+		Content: prompt.BuildUserTask(round, userInput),
 	})
 
 	// 获取 OpenAI function calling 格式的工具定义。

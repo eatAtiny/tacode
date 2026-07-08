@@ -127,7 +127,7 @@ func (r *Runner) handleContextCommand() {
 	wrapperTokens := memory.EstimateTokens(prompt.BuildSystemReminder("")) + 1
 
 	// ── messages[2] user: 用户任务 ──
-	taskTokens := memory.EstimateTokens(prompt.BuildUserTask(0, "", "")) + 10
+	taskTokens := memory.EstimateTokens(prompt.BuildUserTask(0, "")) + 10
 
 	// ── 合计 ──
 	contextLimit := r.llm.ContextLimit()

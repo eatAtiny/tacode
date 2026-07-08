@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"agentic/internal/llm"
 	"agentic/internal/memory"
@@ -66,6 +67,8 @@ type Runner struct {
 	isTemporary        bool   // 临时会话：启动时创建，有对话后才落盘
 	tempID             string // 临时会话 ID
 	pendingSessionName string // /new 指定的会话名，ensurePersisted 时使用
+
+	sessionStartTime time.Time // 会话开始时间（环境元数据注入，会话内不变）
 }
 
 // NewRunner 构造 Agent 执行器。
@@ -144,6 +147,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.memStore.SetPath(tempDir)
 	r.events.SetPath(tempDir)
 	r.cleanOrphanTempDirs()
+
+	// 记录会话开始时间（用于环境元数据注入，会话内不变）。
+	r.sessionStartTime = time.Now()
 
 	// 设置 UI 初始状态。
 	r.ui.SetSessionName("new")
