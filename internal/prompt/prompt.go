@@ -23,7 +23,7 @@
 //     <system-reminder> 记忆上下文 </system-reminder>
 //
 //   messages[2] user (task):
-//     轮次: N + 用户任务
+//     环境元数据（工作目录/时间）+ 轮次: N + 用户任务
 //
 // 前缀缓存命中：messages[0] 对所有用户相同→始终命中；
 // messages[1] 会话级稳定→同会话内命中。
@@ -32,6 +32,7 @@ package prompt
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ──────────────────────────────────────────────────────────
@@ -113,7 +114,15 @@ func BuildReActStaticPrompt(toolDescriptions string) string {
 
 工具结果和用户消息可能包含 <system-reminder> 标签。
 其中的内容是系统自动注入的上下文信息，与你当前的具体任务可能无关，
-仅供参考。`, toolDescriptions)
+仅供参考。
+
+## 工具结果说明
+- 工具结果可能因内容过长而被截断。截断时保留头部和尾部，并标明原始总长度。
+- 工具结果末尾出现"💾 完整结果已保存到: <路径>"时，说明完整内容已持久化到磁盘，
+  你可以使用 file read 读取该路径获取完整内容。
+- 如果截断后的信息不足以回答问题，先尝试用更精细的工具获取补充信息
+  （如 grep 搜索特定内容、file read 读取保存的完整结果），
+  而不是重复调用同一个已截断的工具。`, toolDescriptions)
 }
 
 // ──────────────────────────────────────────────────────────
@@ -190,10 +199,22 @@ func BuildSystemReminder(contextDigest string) string {
 
 // BuildUserTask 构建用户任务消息。
 //
-// 用于 messages[2]（user 角色），只包含轮次号和用户输入。
+// 用于 messages[2]（user 角色），包含环境元数据和用户输入。
 // 与旧版 BuildReActUserPrompt 的区别：不包含记忆上下文（已移到 system-reminder）。
-func BuildUserTask(round int, userInput string) string {
-	return fmt.Sprintf("轮次: %d\n\n用户任务:\n%s", round, userInput)
+//
+// workDir 为当前工作目录，空字符串表示不包含环境信息（向后兼容）。
+func BuildUserTask(round int, userInput, workDir string) string {
+	now := time.Now().Format("2006-01-02 15:04:05")
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("轮次: %d\n", round))
+
+	if workDir != "" {
+		sb.WriteString(fmt.Sprintf("\n环境:\n- 工作目录: %s\n- 当前时间: %s\n", workDir, now))
+	}
+
+	sb.WriteString(fmt.Sprintf("\n用户任务:\n%s", userInput))
+	return sb.String()
 }
 
 // ──────────────────────────────────────────────────────────
@@ -211,7 +232,7 @@ func BuildReActUserPrompt(round int, contextDigest, userInput string) string {
 	if contextDigest != "" {
 		parts = append(parts, BuildSystemReminder(contextDigest))
 	}
-	parts = append(parts, BuildUserTask(round, userInput))
+	parts = append(parts, BuildUserTask(round, userInput, ""))
 
 	return strings.Join(parts, "\n\n")
 }

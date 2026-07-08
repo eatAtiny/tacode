@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
+	"time"
 
 	"agentic/internal/llm"
 	"agentic/internal/memory"
@@ -104,19 +106,26 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 
 	fullSystemPrompt := prompt.BuildReActSystemPrompt(r.tools.Descriptions(), guides)
 
+	// 获取当前工作目录用于环境注入。
+	workDir, _ := os.Getwd()
+
 	// 初始化消息数组（作为 queryLoop 的初始输入）。
 	messages := []llm.ChatMessage{
 		{Role: "system", Content: fullSystemPrompt},
 	}
 	if contextDigest != "" {
+		// system-reminder 注入：记忆上下文 + 生成时间戳。
+		reminder := fmt.Sprintf("上下文生成时间: %s\n\n%s",
+			time.Now().Format("2006-01-02 15:04:05"),
+			contextDigest)
 		messages = append(messages, llm.ChatMessage{
 			Role:    "user",
-			Content: prompt.BuildSystemReminder(contextDigest),
+			Content: prompt.BuildSystemReminder(reminder),
 		})
 	}
 	messages = append(messages, llm.ChatMessage{
 		Role:    "user",
-		Content: prompt.BuildUserTask(round, userInput),
+		Content: prompt.BuildUserTask(round, userInput, workDir),
 	})
 
 	// 获取 OpenAI function calling 格式的工具定义。

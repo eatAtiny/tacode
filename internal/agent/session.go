@@ -232,6 +232,12 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 		}
 		return 0, true
 
+	// ── /context ──
+	// 展示当前提示词各部分的大小组成。
+	case "/context":
+		r.handleContextCommand()
+		return 0, true
+
 	// ── /compress ──
 	// 手动触发 L2 摘要压缩（LLM 合并旧摘要）。
 	case "/compress":

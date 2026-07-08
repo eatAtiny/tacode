@@ -37,7 +37,8 @@
       "Bash(~/.agents/skills/subagent-driven-development/scripts/review-package 7b5fa95 *)",
       "Bash(~/.agents/skills/subagent-driven-development/scripts/review-package *)",
       "Bash(go list *)",
-      "Bash(go test *)"
+      "Bash(go test *)",
+      "Bash(python3 -c ' *)"
     ]
   }
 }
