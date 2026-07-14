@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"agentic/internal/llm"
 	"agentic/internal/memory"
 	"agentic/internal/prompt"
 )
@@ -79,29 +80,44 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 	}
 
 	// ═══════════════════════════════════════════════════════
-	// 步骤 3: 构建消息数组（委托 prompt.Builder）
+	// 步骤 3: 构建消息数组（上下文复用 + prompt.Builder 委托）
 	// ═══════════════════════════════════════════════════════
-	// Builder 封装了 3 段消息结构和前缀缓存优化，
-	// agent 循环不需要知道消息内部结构。
+	// 加载上次查询保存的会话上下文（context.json）。
+	// 首次查询 → BuildMessages 创建全新消息数组。
+	// 后续查询 → ExtendContext 复用 system prompt + 历史对话。
 	workDir, _ := os.Getwd()
-	messages := r.promptBuilder.BuildMessages(prompt.BuildOptions{
+	buildOpts := prompt.BuildOptions{
 		Round:         round,
 		UserInput:     userInput,
 		ContextDigest: contextDigest,
 		WorkDir:       workDir,
 		SessionStart:  r.sessionStartTime,
-	})
+	}
+
+	sessCtx, loadErr := r.contextStore.Load()
+	var messages []llm.ChatMessage
+
+	if loadErr != nil {
+		r.ui.OnMessage(fmt.Sprintf("⚠️ 加载上下文失败: %v", loadErr))
+	}
+	if sessCtx != nil && len(sessCtx.Messages) > 0 {
+		// 后续查询：在已有上下文基础上追加新轮次。
+		messages = r.promptBuilder.ExtendContext(sessCtx.Messages, buildOpts)
+		round = sessCtx.Round + 1 // 继承轮次号
+	} else {
+		// 首次查询：创建全新消息数组。
+		messages = r.promptBuilder.BuildMessages(buildOpts)
+		sessCtx = &memory.SessionContext{Round: round}
+	}
 
 	// 获取 OpenAI function calling 格式的工具定义。
 	tools := r.tools.FunctionDefinitions()
 
 	// ═══════════════════════════════════════════════════════
-	// 步骤 4: 启动 queryLoop（异步生成器模式）
+	// 步骤 4: 启动 queryLoop（传入会话上下文用于压缩持久化）
 	// ═══════════════════════════════════════════════════════
-	// queryLoop 返回一个只读 channel，内部 goroutine 持续 yield 事件。
-	// 上层通过 range channel 实时消费事件，无需轮询。
 	contextLimit := r.llm.ContextLimit()
-	eventChan := queryLoop(ctx, r.llm, messages, tools, r.tools, maxIterations, contextLimit)
+	eventChan := queryLoop(ctx, r.llm, messages, tools, r.tools, maxIterations, contextLimit, sessCtx)
 
 	// ═══════════════════════════════════════════════════════
 	// 步骤 5: 消费事件（实时转发到 UI + EventStore）
@@ -181,8 +197,17 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 	}
 
 	// ═══════════════════════════════════════════════════════
-	// 步骤 6: 返回最终结果
+	// 步骤 6: 保存上下文快照 + 返回结果
 	// ═══════════════════════════════════════════════════════
+	// 查询完成后保存当前消息缓冲区到 context.json，
+	// 以便下次查询复用压缩后的上下文和对话历史。
 	_ = finalIteration
+
+	sessCtx.Round = round
+	// Messages 已由 queryLoop 在循环结束后写入 sessCtx.Messages。
+	if saveErr := r.contextStore.Save(sessCtx); saveErr != nil {
+		r.ui.OnMessage(fmt.Sprintf("⚠️ 保存上下文失败: %v", saveErr))
+	}
+
 	return finalAnswer, nil
 }

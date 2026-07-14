@@ -54,6 +54,11 @@ type queryLoopContext struct {
 	// 只对新增消息做启发式估算，误差从 ~30% 降到 <5%。
 	anchorTotalTokens  int // 上次 API 返回的精确 prompt_tokens（0 = 无锚点，走纯启发式）
 	anchorMessageCount int // 锚点时的消息条数
+
+	// ── 会话上下文持久化 ──
+	// queryLoop 循环结束后将最终消息写回 SessionContext.Messages，
+	// 由 queryEngine 统一保存到 context.json。
+	sessCtx *memory.SessionContext
 }
 
 // queryLoop 是纯粹的 Agent Loop 核心循环，使用异步生成器模式。
@@ -102,6 +107,7 @@ type queryLoopContext struct {
 //   - toolRegistry: 工具注册表，用于查找和执行工具
 //   - maxIter: 最大迭代次数，防止无限循环
 //   - contextLimit: 模型的上下文窗口大小（token 数），用于压缩检查
+//   - sessCtx: 会话上下文，循环结束后写回 Messages 供持久化
 //
 // 返回：
 //   - <-chan QueryEvent: 只读 channel，上层通过 range 实时读取中间事件
@@ -113,6 +119,7 @@ func queryLoop(
 	toolRegistry *tool.Registry,
 	maxIter int,
 	contextLimit int,
+	sessCtx *memory.SessionContext,
 ) <-chan QueryEvent {
 	events := make(chan QueryEvent)
 
@@ -131,10 +138,16 @@ func queryLoop(
 			events:        events,
 			seenToolCalls: make(map[string]bool),
 			fileReads:     make(map[string]time.Time),
+			sessCtx:       sessCtx,
 		}
 
 		// 执行核心循环。
 		lc.runLoop()
+
+		// 循环结束后写回最终消息状态，供 queryEngine 保存到 context.json。
+		if sessCtx != nil {
+			sessCtx.Messages = lc.messages
+		}
 	}()
 
 	return events

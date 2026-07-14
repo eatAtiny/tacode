@@ -82,3 +82,24 @@ func (b *Builder) BuildMessages(opts BuildOptions) []llm.ChatMessage {
 
 	return messages
 }
+
+// ExtendContext 在已有会话上下文基础上追加新轮次的消息。
+//
+// 与 BuildMessages 的区别：
+//   - BuildMessages 创建全新的 [system, reminder, task] 消息数组
+//   - ExtendContext 保留 system prompt + 历史对话，只替换 per-turn 消息
+//
+// existing: 之前保存的 SessionContext.Messages（context.json 中的快照）
+// 结构假设：[0]=system, [1]=old_reminder, [2]=old_task, [3+]=conversation history
+//
+// 首次查询应使用 BuildMessages；后续查询应使用 ExtendContext 以上下文延续。
+func (b *Builder) ExtendContext(existing []llm.ChatMessage, opts BuildOptions) []llm.ChatMessage {
+	fresh := b.BuildMessages(opts) // [system, reminder, task]
+
+	// 保留上次的对话历史（asst/tool 消息，从索引 3 开始）。
+	if len(existing) > 3 {
+		fresh = append(fresh, existing[3:]...)
+	}
+
+	return fresh
+}

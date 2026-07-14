@@ -71,7 +71,8 @@ type Runner struct {
 
 	sessionStartTime time.Time // 会话开始时间（环境元数据注入，会话内不变）
 
-	promptBuilder *prompt.Builder // 提示词构建器（预构建 system prompt，封装消息组装）
+	promptBuilder *prompt.Builder      // 提示词构建器（预构建 system prompt，封装消息组装）
+	contextStore  *memory.ContextStore  // 会话上下文快照（context.json，跨查询复用压缩后的消息）
 }
 
 // NewRunner 构造 Agent 执行器。
@@ -82,6 +83,7 @@ type Runner struct {
 //   - summary: L2 摘要
 //   - memStore: L3 结构化记忆
 //   - events: 事件日志
+//   - contextStore: 会话上下文快照（context.json）
 //   - extractor: 记忆提取器
 //   - retriever: 记忆检索器
 //   - tools: 工具注册表
@@ -93,6 +95,7 @@ func NewRunner(
 	summary *memory.SummaryStore,
 	memStore *memory.MemoryStore,
 	events *memory.EventStore,
+	contextStore *memory.ContextStore,
 	extractor *memory.Extractor,
 	retriever *memory.Retriever,
 	tools *tool.Registry,
@@ -100,16 +103,17 @@ func NewRunner(
 	uiInstance ui.UI,
 ) *Runner {
 	return &Runner{
-		llm:       client,
-		history:   history,
-		summary:   summary,
-		memStore:  memStore,
-		events:    events,
-		extractor: extractor,
-		retriever: retriever,
-		tools:     tools,
-		sessions:  sessions,
-		ui:        uiInstance,
+		llm:          client,
+		history:      history,
+		summary:      summary,
+		memStore:     memStore,
+		events:       events,
+		contextStore: contextStore,
+		extractor:    extractor,
+		retriever:    retriever,
+		tools:        tools,
+		sessions:     sessions,
+		ui:           uiInstance,
 	}
 }
 
@@ -149,6 +153,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.summary.SetPath(tempDir)
 	r.memStore.SetPath(tempDir)
 	r.events.SetPath(tempDir)
+	r.contextStore.SetPath(tempDir)
 	r.cleanOrphanTempDirs()
 
 	// 记录会话开始时间（用于环境元数据注入，会话内不变）。

@@ -135,6 +135,9 @@ func main() {
 	// EventStore（events.jsonl）是追加写入的完整事件流，永不截断，作为真相源。
 	events := memory.NewEventStore(activeDir)
 
+	// ContextStore（context.json）存储会话级压缩后的消息快照，跨查询复用。
+	contextStore := memory.NewContextStore(activeDir)
+
 	// ── 步骤 8: 初始化记忆提取器 ──
 	// Extractor 使用 LLM 从每轮对话中提取 L2 摘要和 L3 记忆操作。
 	extractor := memory.NewExtractor(client)
@@ -165,7 +168,7 @@ func main() {
 	// ── 步骤 12: 创建 Runner 并启动 REPL 循环 ──
 	// Runner 是顶层编排器，组合所有组件，驱动 REPL 交互循环。
 	// Run() 阻塞直到用户输入 exit 或发生致命错误。
-	runner := agent.NewRunner(client, history, summary, memStore, events, extractor, retriever, tools, sessions, uiInstance)
+	runner := agent.NewRunner(client, history, summary, memStore, events, contextStore, extractor, retriever, tools, sessions, uiInstance)
 	if err := runner.Run(context.Background()); err != nil {
 		fmt.Fprintf(os.Stderr, "agent run failed: %v\n", err)
 		// 不用 os.Exit(1)，让 defer Close() 执行以恢复终端状态

@@ -79,10 +79,11 @@ func (r *Runner) extractMemory(ctx context.Context, round int, userInput, assist
 
 // handleContextCommand 展示当前提示词各部分的大小组成（v2 动静分离结构）。
 //
-// 输出 3 段消息结构：
+// 输出 3 段消息结构 + 会话上下文快照：
 //   messages[0] system  = 静态段(全局可缓存) + 动态段(会话稳定)
 //   messages[1] user    = <system-reminder> 记忆上下文
 //   messages[2] user    = 轮次 + 用户任务
+//   context.json        = 会话上下文快照（跨查询复用）
 func (r *Runner) handleContextCommand() {
 	// ── messages[0] system: 静态段 ──
 	staticPrompt := prompt.BuildReActStaticPrompt("")
@@ -129,9 +130,19 @@ func (r *Runner) handleContextCommand() {
 	// ── messages[2] user: 用户任务 ──
 	taskTokens := memory.EstimateTokens(prompt.BuildUserTask(0, "")) + 10
 
+	// ── 会话上下文快照 (context.json) ──
+	sessCtx, _ := r.contextStore.Load()
+	var ctxMsgCount, ctxTokens int
+	var ctxUpdated string
+	if sessCtx != nil {
+		ctxMsgCount = len(sessCtx.Messages)
+		ctxTokens = memory.EstimateTokens(fmt.Sprintf("%v", sessCtx.Messages))
+		ctxUpdated = sessCtx.UpdatedAt.Format("15:04:05")
+	}
+
 	// ── 合计 ──
 	contextLimit := r.llm.ContextLimit()
-	totalTokens := systemTokens + contextTokens + taskTokens
+	totalTokens := systemTokens + contextTokens + taskTokens + ctxTokens
 	pct := float64(totalTokens) / float64(contextLimit) * 100
 
 	r.ui.OnMessage(fmt.Sprintf(
@@ -149,6 +160,8 @@ func (r *Runner) handleContextCommand() {
 			"  · XML 标签开销                       ~%d tokens\n\n"+
 			"▸ messages[2] user (task)             ~%d tokens\n"+
 			"  · 轮次 + 用户任务（输入时确定）       ~%d tokens\n\n"+
+			"▸ 会话上下文 (context.json)            ~%d tokens\n"+
+			"  · 消息数: %d, 最后更新: %s\n\n"+
 			"───────────────────────────────────────\n"+
 			"  合计预估   ~%d / %d tokens (%.1f%%)\n"+
 			"═══════════════════════════════════════",
@@ -163,6 +176,7 @@ func (r *Runner) handleContextCommand() {
 		wrapperTokens,
 		taskTokens,
 		taskTokens,
+		ctxTokens, ctxMsgCount, ctxUpdated,
 		totalTokens, contextLimit, pct,
 	))
 }

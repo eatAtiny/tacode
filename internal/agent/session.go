@@ -41,6 +41,7 @@ func (r *Runner) switchSession() {
 	r.summary.SetPath(activeDir)
 	r.memStore.SetPath(activeDir)
 	r.events.SetPath(activeDir)
+	r.contextStore.SetPath(activeDir)
 }
 
 // printSessionHistory 读取并展示指定会话的历史记录。
@@ -322,6 +323,13 @@ func (r *Runner) ensurePersisted() error {
 		os.MkdirAll(realDir, 0o755)
 		os.Rename(tempMemory, realMemory)
 	}
+	// context.json（会话上下文快照）
+	tempCtx := tempDir + "/context.json"
+	realCtx := realDir + "/context.json"
+	if _, err := os.Stat(tempCtx); err == nil {
+		os.MkdirAll(realDir, 0o755)
+		os.Rename(tempCtx, realCtx)
+	}
 
 	// ── 步骤 4: 清理临时目录 ──
 	os.RemoveAll(tempDir)
@@ -331,6 +339,7 @@ func (r *Runner) ensurePersisted() error {
 	r.summary.SetPath(realDir)
 	r.memStore.SetPath(realDir)
 	r.events.SetPath(realDir)
+	r.contextStore.SetPath(realDir)
 
 	// ── 步骤 6: 标记为非临时 ──
 	r.isTemporary = false
