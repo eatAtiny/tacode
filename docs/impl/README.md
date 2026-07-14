@@ -10,6 +10,7 @@ Go ReAct Agent 的设计与实现文档。参照 Claude Code 的设计模式，�
 | 2. 工具系统 | [02-tools.md](02-tools.md) | Tool 接口、5 个内置工具、并发分类、ReadState、大结果持久化、ToolHook |
 | 3. 记忆系统 | [03-memory.md](03-memory.md) | 三层记忆架构、上下文构建、记忆提取、自动压缩 |
 | 4. UI 系统 | [04-ui.md](04-ui.md) | 可插拔 UI、BubbleUI 终端实现、TextUI 无头实现、组件系统 |
+| 5. 提示词与上下文 | [05-prompt-context.md](05-prompt-context.md) | 动静分离、3 段消息结构、Builder 模式、锚点估算、context.json 持久化 |
 
 ## 与 Claude Code 的对应关系
 
@@ -46,7 +47,8 @@ internal/
     extractor.go                 # LLM 记忆提取
     retriever.go                 # 三层检索
   prompt/
-    prompt.go                    # ReAct prompt 构建
+    prompt.go                    # ReAct prompt 工厂（动静分离）
+    builder.go                   # Builder 门面（消息组装 + 上下文复用）
   session/
     session.go                   # 会话 CRUD
     picker.go                    # 交互式会话选择器
