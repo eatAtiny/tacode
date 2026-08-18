@@ -329,6 +329,10 @@ func (r *Runner) initTempSession() error {
 // 权限：one-shot 场景配合 TextUI 使用，ConfirmPermission 默认放行。
 // inputForward 传 nil 安全——TextUI.ConfirmPermission 不读该参数。
 //
+// 注意：每次调用会重新初始化临时会话（分配新 ID），不适合在同一个 Runner
+// 实例上连续调用多次。计划用法：CLI one-shot 为独立进程；子 agent 场景
+// 每个子 agent 使用独立的 Runner 实例。
+//
 // 返回：
 //   - string: 最终回答文本（LLM 的完整回复）
 //   - error: 查询失败或记忆保存失败
