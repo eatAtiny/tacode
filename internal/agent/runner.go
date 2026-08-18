@@ -132,18 +132,9 @@ func NewRunner(
 func (r *Runner) Run(ctx context.Context) error {
 	// ── 启动临时会话 ──
 	// 临时会话不在 manifest 中，首次对话后通过 ensurePersisted 落盘。
-	r.isTemporary = true
-	tempID, err := session.GenerateID()
-	if err != nil {
-		return fmt.Errorf("generate temp session id failed: %w", err)
+	if err := r.initTempSession(); err != nil {
+		return err
 	}
-	r.tempID = tempID
-	tempDir := r.sessions.SessionDir(tempID)
-	r.history.SetPath(tempDir)
-	r.summary.SetPath(tempDir)
-	r.memStore.SetPath(tempDir)
-	r.events.SetPath(tempDir)
-	r.cleanOrphanTempDirs()
 
 	// 设置 UI 初始状态。
 	r.ui.SetSessionName("new")
@@ -303,6 +294,78 @@ func (r *Runner) Run(ctx context.Context) error {
 			os.Stdout.Sync()
 		}
 	}
+}
+
+// initTempSession 启动临时会话：分配 ID、将各 store 指向临时目录。
+//
+// 临时会话不在 manifest 中，首次对话后通过 ensurePersisted 落盘。
+// Run() 和 RunOnce() 共用此初始化逻辑。
+func (r *Runner) initTempSession() error {
+	r.isTemporary = true
+	tempID, err := session.GenerateID()
+	if err != nil {
+		return fmt.Errorf("generate temp session id failed: %w", err)
+	}
+	r.tempID = tempID
+	tempDir := r.sessions.SessionDir(tempID)
+	r.history.SetPath(tempDir)
+	r.summary.SetPath(tempDir)
+	r.memStore.SetPath(tempDir)
+	r.events.SetPath(tempDir)
+	r.cleanOrphanTempDirs()
+	return nil
+}
+
+// RunOnce 执行一次查询并返回最终答案（one-shot / headless 模式）。
+//
+// 与 Run() 的区别：不进入 REPL 循环，同步执行单次查询后返回。
+// 行为与 REPL 模式一致：复用 queryEngine（含记忆上下文构建、工具调用、
+// 权限确认）、成功后保存 L1/L2/L3 记忆、临时会话落盘。
+//
+// 使用场景：
+//   - CLI 一次性运行（go run . -one-shot "任务"）
+//   - 脚本 / CI / 子 agent 场景（配合 TextUI）
+//
+// 权限：one-shot 场景配合 TextUI 使用，ConfirmPermission 默认放行。
+// inputForward 传 nil 安全——TextUI.ConfirmPermission 不读该参数。
+//
+// 返回：
+//   - string: 最终回答文本（LLM 的完整回复）
+//   - error: 查询失败或记忆保存失败
+func (r *Runner) RunOnce(ctx context.Context, input string) (string, error) {
+	// 空输入保护。
+	if strings.TrimSpace(input) == "" {
+		return "", fmt.Errorf("one-shot 输入为空")
+	}
+
+	// ── 启动临时会话（与 Run() 共用） ──
+	if err := r.initTempSession(); err != nil {
+		return "", err
+	}
+
+	// 设置 UI 初始状态（TextUI 中为空操作，保持调用统一）。
+	r.ui.SetSessionName("new")
+	r.ui.SetModel(r.llm.Model())
+
+	// ── 同步执行单次查询 ──
+	// round=1，inputForward=nil（TextUI 权限默认放行，不读此参数）。
+	answer, err := r.queryEngine(ctx, 1, input, nil)
+	if err != nil {
+		return "", fmt.Errorf("one-shot 查询失败: %w", err)
+	}
+
+	// ── 保存记忆（与 Run() 分支 B 一致） ──
+	if err := r.history.Append(1, input, answer); err != nil {
+		return "", fmt.Errorf("save history failed: %w", err)
+	}
+	r.extractMemory(ctx, 1, input, answer)
+	if r.isTemporary {
+		if err := r.ensurePersisted(); err != nil {
+			return "", fmt.Errorf("保存会话失败: %w", err)
+		}
+	}
+
+	return answer, nil
 }
 
 // runQueryAsync 在后台 goroutine 中执行查询，返回结果 channel。
