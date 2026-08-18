@@ -43,9 +43,14 @@ func TestFindProjectInstructions_Nearest(t *testing.T) {
 }
 
 func TestFindProjectInstructions_GitRoot(t *testing.T) {
-	root := t.TempDir()
+	outer := t.TempDir()
+	root := filepath.Join(outer, "repo")
 	mkdirGitRoot(t, root)
-	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("root instructions"), 0o644); err != nil {
+	// 仓库根（含 .git）之上的 AGENTS.md 是哨兵文件：
+	// 若 findProjectInstructions 忽略 .git 继续向上查找，就会读到它。
+	// 正确行为是在含 .git 的仓库根处停止，返回空。
+	// 注意：仓库根处不放 AGENTS.md，否则会在检查 .git 之前提前返回，测不到边界。
+	if err := os.WriteFile(filepath.Join(outer, "AGENTS.md"), []byte("outer instructions"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -53,11 +58,8 @@ func TestFindProjectInstructions_GitRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if path != filepath.Join(root, "AGENTS.md") {
-		t.Errorf("should stop at repo root, got %s", path)
-	}
-	if content != "root instructions" {
-		t.Errorf("content mismatch, got %q", content)
+	if path != "" || content != "" {
+		t.Errorf("walk should stop at repo root (.git), got path=%q content=%q", path, content)
 	}
 }
 
@@ -138,6 +140,10 @@ func TestRetriever_BuildContext_WithInstructions(t *testing.T) {
 	}
 	r := newTestRetriever(t, root)
 
+	// 切换到 root 目录：LoadProjectInstructions 内部调用 os.Getwd()，
+	// t.Chdir 让该调用对临时目录生效（非 parallel，测试结束后自动恢复）。
+	t.Chdir(root)
+
 	// 注入前无项目指令。
 	ctx, _ := r.BuildContext("test")
 	if strings.Contains(ctx, "项目指令") {
@@ -145,21 +151,9 @@ func TestRetriever_BuildContext_WithInstructions(t *testing.T) {
 	}
 
 	// 加载后注入。
-	//
-	// 注意：LoadProjectInstructions 内部调用 os.Getwd()（进程工作目录），
-	// 无法对临时目录生效。这里通过 findProjectInstructions(root) 手动填充
-	// 缓存字段，等价地验证 BuildContext 的注入行为；
-	// findProjectInstructions 本身已由 TestFindProjectInstructions_* 覆盖。
-	path, content, err := findProjectInstructions(root)
-	if err != nil {
-		t.Fatalf("findProjectInstructions failed: %v", err)
+	if err := r.LoadProjectInstructions(); err != nil {
+		t.Fatalf("LoadProjectInstructions failed: %v", err)
 	}
-	if path == "" {
-		t.Fatal("should find AGENTS.md in temp dir")
-	}
-	r.projectInstr = content
-	r.projectInstrSrc = path
-
 	ctx, _ = r.BuildContext("test")
 	if !strings.Contains(ctx, "## 项目指令") {
 		t.Error("BuildContext should contain project instructions section")
@@ -196,22 +190,17 @@ func TestLoadProjectInstructions_Refresh(t *testing.T) {
 	}
 	r := newTestRetriever(t, root)
 
-	// 首次加载。
-	//
-	// 同 TestRetriever_BuildContext_WithInstructions：绕开 LoadProjectInstructions
-	// 对 os.Getwd() 的依赖，直接用 findProjectInstructions(root) 填充缓存，
-	// 验证「缓存 → Clear → 重新加载 → 内容更新」的刷新语义。
-	load := func() {
-		_, content, err := findProjectInstructions(root)
-		if err != nil {
-			t.Fatalf("findProjectInstructions failed: %v", err)
-		}
-		r.projectInstr = content
-		r.projectInstrSrc = agentsPath
+	// 切换到 root 目录，让 LoadProjectInstructions 的 os.Getwd() 对临时目录生效。
+	t.Chdir(root)
+
+	if err := r.LoadProjectInstructions(); err != nil {
+		t.Fatalf("initial load failed: %v", err)
 	}
-	load()
 	if r.projectInstr != "version 1" {
 		t.Errorf("should load version 1, got %q", r.projectInstr)
+	}
+	if r.projectInstrSrc != agentsPath {
+		t.Errorf("source should point to AGENTS.md, got %q", r.projectInstrSrc)
 	}
 
 	// 修改文件 → Clear + Load → 内容更新。
@@ -225,7 +214,9 @@ func TestLoadProjectInstructions_Refresh(t *testing.T) {
 	if r.projectInstrSrc != "" {
 		t.Error("ClearProjectInstructions should empty the source path cache")
 	}
-	load()
+	if err := r.LoadProjectInstructions(); err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
 	if r.projectInstr != "version 2" {
 		t.Errorf("should reload version 2, got %q", r.projectInstr)
 	}
