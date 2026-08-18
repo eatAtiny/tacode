@@ -144,9 +144,14 @@ func main() {
 	extractor := memory.NewExtractor(client)
 
 	// ── 步骤 9: 初始化记忆检索器 ──
-	// Retriever 组合三层存储，在每轮查询前构建上下文（L3 记忆 + L2 摘要 + 降级 L1）。
+	// Retriever 组合三层存储，在每轮查询前构建上下文（项目指令 + L3 记忆 + L2 摘要 + 降级 L1）。
 	// 同时负责自动压缩：当上下文 token 用量超过模型窗口 80% 时触发 L2 摘要合并。
 	retriever := memory.NewRetriever(history, summary, memStore, events)
+
+	// 加载项目指令（AGENTS.md），失败只警告不退出（无指令文件时正常启动）。
+	if err := retriever.LoadProjectInstructions(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: load project instructions failed: %v\n", err)
+	}
 
 	// ── 步骤 10: 注册内置工具 ──
 	// Shell: 执行 bash 命令（30s 超时），危险命令需用户确认。

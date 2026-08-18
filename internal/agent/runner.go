@@ -216,7 +216,7 @@ func (r *Runner) Run(ctx context.Context) error {
 						round = newRound - 1
 					}
 				} else {
-					r.ui.OnError(fmt.Errorf("未知命令，可用: /new, /list, /switch, /delete, /rename, /current, /compress, /memory"))
+					r.ui.OnError(fmt.Errorf("未知命令，可用: /new, /list, /switch, /delete, /rename, /current, /compress, /memory, /reload"))
 				}
 				round++
 				fmt.Print("> ")

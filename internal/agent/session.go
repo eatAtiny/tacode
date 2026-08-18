@@ -97,6 +97,7 @@ func (r *Runner) printSessionHistory() {
 //   /rename <name> → 重命名当前会话
 //   /current       → 显示当前会话信息
 //   /compress      → 手动压缩 L2 摘要
+//   /reload        → 重新加载项目指令（AGENTS.md）
 //   /memory [...]  → L3 记忆管理（list/add/rm）
 //
 // 返回值：新的轮次号（切换会话时重置为 1），是否已处理。
@@ -236,6 +237,17 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 	// 手动触发 L2 摘要压缩（LLM 合并旧摘要）。
 	case "/compress":
 		r.handleCompress()
+		return 0, true
+
+	// ── /reload ──
+	// 重新加载项目指令（AGENTS.md），用于指令文件变更后手动刷新。
+	case "/reload":
+		r.retriever.ClearProjectInstructions()
+		if err := r.retriever.LoadProjectInstructions(); err != nil {
+			r.ui.OnError(fmt.Errorf("重新加载项目指令失败: %v", err))
+			return 0, true
+		}
+		r.ui.OnMessage("✅ 已重新加载项目指令")
 		return 0, true
 
 	// ── /memory [list|add|rm] ──
