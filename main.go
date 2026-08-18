@@ -150,12 +150,14 @@ func main() {
 	// Edit: search-and-replace 编辑，唯一性校验 + diff 输出。
 	// Grep: 结构化文本搜索，跳过 .git/ + 二进制文件。
 	// List: 结构化目录列表，深度控制 + 排序输出。
+	// Git: 结构化 git 操作（status/diff/log/show/branch 只读 + add/commit/stash/checkout 需确认）。
 	tools := tool.NewRegistry()
 	tools.Register(tool.NewShellTool())
 	tools.Register(tool.NewFileTool())
 	tools.Register(tool.NewEditTool())
 	tools.Register(tool.NewGrepTool())
 	tools.Register(tool.NewListTool())
+	tools.Register(tool.NewGitTool())
 
 	// ── 步骤 11: 创建 UI 实例 ──
 	// BubbleUI: 终端美化 UI（lipgloss 样式 + glamour Markdown 渲染 + ANSI 光标控制）。

@@ -39,7 +39,7 @@ main.go
        ├─ internal/memory     (6 files) — 3-tier storage + retrieval + extraction
        ├─ internal/prompt     (prompt.go) — ReAct prompt builder
        ├─ internal/session    (session.go, picker.go) — session CRUD + picker
-       ├─ internal/tool       (tool.go, shell.go, file.go) — Tool interface + Registry
+       ├─ internal/tool       (7 files) — Tool interface + Registry
        └─ internal/ui         (ui.go) — UI interface
             ├─ ui/bubble/     — BubbleUI (terminal, lipgloss + glamour)
             ├─ ui/text/       — TextUI (headless, callback-based)
@@ -91,7 +91,7 @@ Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncat
 
 - `tool.Tool` is one of two interfaces — implements `Name()`, `Description()`, `Parameters()`, `Execute()`.
 - `tool.Registry` manages registration and generates OpenAI function-calling definitions.
-- Built-in tools: `shell` (bash, 30s timeout) and `file` (read/write, 8KB read cap).
+- Built-in tools: `shell` (bash, 30s timeout), `file` (read/write, 8KB read cap), `edit` (search-and-replace), `grep`, `list`, and `git` (status/diff/log/show/branch read-only + add/commit/stash/checkout requiring confirmation).
 - To add a new tool: implement `tool.Tool`, register it in `main.go`.
 
 ### UI System
