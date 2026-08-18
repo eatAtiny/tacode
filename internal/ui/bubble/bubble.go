@@ -29,7 +29,6 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/mattn/go-runewidth"
-	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
@@ -197,10 +196,8 @@ func (b *BubbleUI) rawInputLoop(fd int) {
 	// term.MakeRaw 清除了 OPOST（输出后处理）标志，导致 \n 不再自动转换为 \r\n，
 	// 从而造成 fmt.Println 等输出换行后光标不回行首的格式化错位。
 	// 重新启用 OPOST 以保持输出端的正常换行行为，仅保留输入端的生模式特性。
-	if tios, err := unix.IoctlGetTermios(fd, unix.TCGETS); err == nil {
-		tios.Oflag |= unix.OPOST
-		_ = unix.IoctlSetTermios(fd, unix.TCSETS, tios)
-	}
+	// 平台差异（请求码、req 参数类型）封装在 termios 平台文件中。
+	enableOPOST(fd)
 	// 后备恢复：如果 Close() 未能运行（如崩溃），defer 尽力恢复终端。
 	// 正常退出时 Close() 已恢复 → 此处 Restore 已是熟模式 → 安全无操作。
 	defer func() {
