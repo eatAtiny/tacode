@@ -458,6 +458,7 @@ func TestAllToolsHaveAliases(t *testing.T) {
 		NewEditTool(),
 		NewGrepTool(),
 		NewListTool(),
+		NewGitTool(),
 	}
 	for _, tool := range tools {
 		aliases := tool.Aliases()
@@ -618,6 +619,7 @@ func TestAllToolsImplementInterface(t *testing.T) {
 		NewEditTool(),
 		NewGrepTool(),
 		NewListTool(),
+		NewGitTool(),
 	}
 
 	for _, tool := range tools {
