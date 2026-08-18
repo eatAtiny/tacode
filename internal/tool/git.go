@@ -140,6 +140,7 @@ func (t *GitTool) Execute(args string) (string, error) {
 // runGit 执行 git 命令，返回合并输出（stdout + stderr）。
 // 非零退出码通过 error 返回，包含 git 原始错误信息。
 func (t *GitTool) runGit(ctx context.Context, args ...string) (string, error) {
+	args = append([]string{"-c", "core.quotePath=false"}, args...)
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if t.dir != "" {
 		cmd.Dir = t.dir
@@ -183,7 +184,7 @@ func (t *GitTool) gitError(err error) error {
 // ──────────────────────────────────────────────────────────
 
 func (t *GitTool) doStatus(ctx context.Context, path string, staged bool) (string, error) {
-	args := []string{"status", "--short"}
+	args := []string{"status", "--short", "--no-color"}
 	if path != "" {
 		args = append(args, "--", path)
 	}
@@ -324,8 +325,8 @@ func (t *GitTool) doAdd(ctx context.Context, files string) (string, error) {
 	}
 
 	// 返回暂存后的状态摘要，帮助 LLM 确认结果。
-	status, _ := t.runGit(ctx, "status", "--short")
-	if status == "" {
+	status, statusErr := t.runGit(ctx, "status", "--short", "--no-color")
+	if statusErr != nil || status == "" {
 		return "✅ 已暂存变更。", nil
 	}
 	return "✅ 已暂存变更，当前暂存区:\n" + formatStatus(status, true), nil
