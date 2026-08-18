@@ -3,6 +3,8 @@ package memory
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -38,10 +40,12 @@ const (
 
 // Retriever 负责从三层存储中检索信息，构建注入 prompt 的上下文。
 type Retriever struct {
-	history *HistoryStore
-	summary *SummaryStore
-	memory  *MemoryStore
-	events  *EventStore
+	history         *HistoryStore
+	summary         *SummaryStore
+	memory          *MemoryStore
+	events          *EventStore
+	projectInstr    string // 项目指令内容（缓存），空 = 未加载
+	projectInstrSrc string // 来源文件路径（调试/显示用）
 }
 
 // NewRetriever 构造 Retriever，组合三层存储。
@@ -52,6 +56,42 @@ func NewRetriever(history *HistoryStore, summary *SummaryStore, memory *MemorySt
 		memory:  memory,
 		events:  events,
 	}
+}
+
+// projectInstrMaxSize 项目指令文件最大读取大小（64KB）。
+// 超过此大小截断，避免注入过大内容占用上下文。
+const projectInstrMaxSize = 64 * 1024
+
+// LoadProjectInstructions 从进程工作目录向上查找 AGENTS.md / AGENTS 文件并缓存。
+//
+// 查找规则：
+//   - 候选文件名：AGENTS.md、AGENTS（无扩展名）
+//   - 从 os.Getwd() 逐级向上，到包含 .git 的目录（仓库根）停止
+//   - 找到即停（不合并多级，只取最近一级）
+//
+// 失败时返回错误（如无文件），但不清空已有缓存（保留旧内容）。
+func (r *Retriever) LoadProjectInstructions() error {
+	startDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get working dir failed: %w", err)
+	}
+	path, content, err := findProjectInstructions(startDir)
+	if err != nil {
+		return err
+	}
+	if path == "" {
+		return nil // 未找到，保持空缓存
+	}
+	r.projectInstr = content
+	r.projectInstrSrc = path
+	return nil
+}
+
+// ClearProjectInstructions 清空项目指令缓存。
+// 配合 LoadProjectInstructions 实现手动刷新（/reload 命令）。
+func (r *Retriever) ClearProjectInstructions() {
+	r.projectInstr = ""
+	r.projectInstrSrc = ""
 }
 
 // BuildContext 构建注入 prompt 的上下文文本。
@@ -72,6 +112,13 @@ func NewRetriever(history *HistoryStore, summary *SummaryStore, memory *MemorySt
 //   - error: 读取错误（降级方案也会尝试，尽最大努力返回可用上下文）
 func (r *Retriever) BuildContext(query string) (string, error) {
 	var parts []string
+
+	// ── 步骤 0: 项目指令（AGENTS.md） ──
+	// 仓库级约定注入到上下文最前（优先级高于会话记忆）。
+	// 未加载时静默跳过，不影响现有行为。
+	if r.projectInstr != "" {
+		parts = append(parts, "## 项目指令\n"+r.projectInstr)
+	}
 
 	// ── 步骤 1.1: L3 记忆索引 ──
 	index := r.memory.LoadIndex()
@@ -205,4 +252,57 @@ func EstimateTokens(text string) int {
 		}
 	}
 	return asciiCount/4 + cjkCount/2
+}
+
+// findProjectInstructions 从 startDir 向上查找 AGENTS.md / AGENTS 文件。
+//
+// 候选文件名按优先级：AGENTS.md、AGENTS。
+// 从 startDir 逐级向上，到包含 .git 的目录（仓库根）停止——包括该目录本身。
+// 找到第一个存在的候选文件即返回（不合并多级）。
+// 若一直未遇到 .git，到文件系统根停止。
+//
+// 返回：文件路径（未找到为空字符串）、内容（截断后）、错误。
+func findProjectInstructions(startDir string) (string, string, error) {
+	dir := startDir
+	for {
+		for _, name := range []string{"AGENTS.md", "AGENTS"} {
+			path := filepath.Join(dir, name)
+			data, err := os.ReadFile(path)
+			if err == nil {
+				return path, truncateProjectInstr(string(data)), nil
+			}
+			if !os.IsNotExist(err) {
+				// 非"不存在"错误（权限等）——跳过该文件继续找。
+				continue
+			}
+		}
+
+		// 到达仓库根（含 .git）停止。
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return "", "", nil
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", "", nil // 到达文件系统根
+		}
+		dir = parent
+	}
+}
+
+// truncateProjectInstr 截断过大的项目指令内容。
+// 保留 head + tail（各占约一半），中间标记截断信息。
+// memory 包内自实现，避免引入 tool 依赖（破坏 leaf 独立性）。
+func truncateProjectInstr(s string) string {
+	if len(s) <= projectInstrMaxSize {
+		return s
+	}
+	headLen := projectInstrMaxSize / 2
+	tailLen := projectInstrMaxSize - headLen
+	note := fmt.Sprintf("\n\n…(项目指令过大，已截断，原 %d 字符)…\n\n", len(s))
+	// 扣除提示信息长度。
+	for headLen+tailLen+len(note) > projectInstrMaxSize && headLen > 0 {
+		headLen--
+	}
+	return s[:headLen] + note + s[len(s)-tailLen:]
 }
