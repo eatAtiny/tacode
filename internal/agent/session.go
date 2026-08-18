@@ -241,6 +241,8 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 
 	// ── /reload ──
 	// 重新加载项目指令（AGENTS.md），用于指令文件变更后手动刷新。
+	// 先清空再加载：用户显式触发刷新，加载失败时保留空缓存（而非旧内容），
+	// 失败信息已通过 OnError 展示。
 	case "/reload":
 		r.retriever.ClearProjectInstructions()
 		if err := r.retriever.LoadProjectInstructions(); err != nil {
