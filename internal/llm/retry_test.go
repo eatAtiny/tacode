@@ -29,6 +29,10 @@ func TestIsRetryableError(t *testing.T) {
 		{"403 forbidden", &openai.APIError{HTTPStatusCode: http.StatusForbidden}, false},
 		{"wrapped 429", &wrapErr{&openai.APIError{HTTPStatusCode: http.StatusTooManyRequests}}, true},
 		{"wrapped 401", &wrapErr{&openai.APIError{HTTPStatusCode: http.StatusUnauthorized}}, false},
+		{"RequestError 429", &openai.RequestError{HTTPStatusCode: http.StatusTooManyRequests}, true},
+		{"RequestError 503", &openai.RequestError{HTTPStatusCode: http.StatusServiceUnavailable}, true},
+		{"RequestError 401", &openai.RequestError{HTTPStatusCode: http.StatusUnauthorized}, false},
+		{"wrapped RequestError 429", &wrapErr{&openai.RequestError{HTTPStatusCode: http.StatusTooManyRequests}}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -68,6 +72,7 @@ func TestIsRetryableError_Network(t *testing.T) {
 // ──────────────────────────────────────────────────────────
 
 func TestWithRetry_Success(t *testing.T) {
+	withFastBackoff(t)
 	calls := 0
 	fn := func() (int, error) {
 		calls++
@@ -90,6 +95,7 @@ func TestWithRetry_Success(t *testing.T) {
 }
 
 func TestWithRetry_Exhausted(t *testing.T) {
+	withFastBackoff(t)
 	calls := 0
 	apiErr := &openai.APIError{HTTPStatusCode: http.StatusInternalServerError}
 	fn := func() (string, error) {
@@ -111,6 +117,7 @@ func TestWithRetry_Exhausted(t *testing.T) {
 }
 
 func TestWithRetry_NonRetryable(t *testing.T) {
+	withFastBackoff(t)
 	calls := 0
 	apiErr := &openai.APIError{HTTPStatusCode: http.StatusUnauthorized}
 	fn := func() (int, error) {
@@ -129,6 +136,9 @@ func TestWithRetry_NonRetryable(t *testing.T) {
 
 func TestWithRetry_CtxCancel(t *testing.T) {
 	// 退避等待期间 ctx 取消 → 立即返回 ctx.Err()。
+	// 注意：此处不用 1ms 快速退避，而是固定 50ms——确保退避窗口长于
+	// 取消触发延迟（10ms），使取消在退避等待期间确定性发生，避免竞态。
+	withBackoff(t, 50*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	calls := 0
 	fn := func() (int, error) {
@@ -156,6 +166,21 @@ func TestWithRetry_CtxCancel(t *testing.T) {
 // ──────────────────────────────────────────────────────────
 // 测试辅助
 // ──────────────────────────────────────────────────────────
+
+// withFastBackoff 临时用固定短退避替换 backoffFn，测试结束后恢复。
+// 避免真实指数退避（500ms 起）拖慢测试。
+func withFastBackoff(t *testing.T) {
+	t.Helper()
+	withBackoff(t, time.Millisecond)
+}
+
+// withBackoff 临时用固定退避 d 替换 backoffFn，测试结束后恢复。
+func withBackoff(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := backoffFn
+	backoffFn = func(int) time.Duration { return d }
+	t.Cleanup(func() { backoffFn = orig })
+}
 
 // fakeNetError 实现 net.Error 接口。
 type fakeNetError struct{}
