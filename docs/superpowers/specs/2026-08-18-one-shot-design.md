@@ -35,6 +35,26 @@ main.go
        └─ 4. 返回 (answer, error)
 ```
 
+## Multi-agent 演进路径（设计预留）
+
+`RunOnce(ctx, input) (string, error)` 就是子 agent 的正确原语——"一个子 agent"的本质是一次 headless、可编程消费结果的查询。本设计为 multi-agent 预留了三个接缝：
+
+### 已兼容的点（无需改动）
+
+1. **同步 + 结构化返回**：`RunOnce` 返回 `(string, error)`，父 agent 可拿到子 agent 答案并聚合。若只输出到 stdout 就断了这条路。
+2. **独立会话目录**：`initTempSession()` 每次 `GenerateID()`，每个子 agent 跑在自己的 `data/sessions/<id>/` 下，L1/L2/L3 天然隔离，并行写不冲突。
+3. **Headless UI**：TextUI 无终端、权限自动放行，子 agent 无需人工介入。
+
+### 未来接缝（实现时需满足，当前不实现）
+
+1. **`Runner` 实例工厂**：并行 N 个 agent 需要 N 个独立 `Runner` 实例（各自 store 指向不同会话目录）。需要一个 `NewRunner` 工厂函数（当前 `main.go` 手动拼装）。**约束**：`RunOnce` 不得依赖全局单例，保持实例方法。
+2. **`agent` 工具注入点**：父 agent 要发起子 agent，需注册 `agent` 工具（类似 Claude Code 的 Task 工具），其 `Execute` 内调用 `RunOnce`。`tool.Registry.Register`（`tool.go:287`）是开放接口，加 `NewAgentTool()` 即可，无需改框架。
+3. **事件流暴露（可选）**：`RunOnce` 目前只返回最终答案。multi-agent 下父 agent 可能订阅子 agent 进度——TextUI 的 `OnEvent` 回调（`text.go:50`）已存在，未来可给 `RunOnce` 加可选回调参数。不影响当前实现。
+
+### 并行执行通道
+
+现有 `executeToolCalls` 已有并行分类机制（`query_loop.go:334-373`）：`IsConcurrencySafe && IsReadOnly && Allow` 的工具自动 goroutine 并行执行。未来的 `agent` 工具声明 `IsConcurrencySafe=true` 后，多个子 agent 自动并行跑——框架层面的并行通道已存在。
+
 ## 涉及文件
 
 | 文件 | 改动 |
