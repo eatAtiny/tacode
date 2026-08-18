@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"agentic/internal/llm"
 )
@@ -297,12 +298,22 @@ func truncateProjectInstr(s string) string {
 	if len(s) <= projectInstrMaxSize {
 		return s
 	}
-	headLen := projectInstrMaxSize / 2
-	tailLen := projectInstrMaxSize - headLen
 	note := fmt.Sprintf("\n\n…(项目指令过大，已截断，原 %d 字符)…\n\n", len(s))
-	// 扣除提示信息长度。
-	for headLen+tailLen+len(note) > projectInstrMaxSize && headLen > 0 {
+	// 预留提示信息长度，剩余空间 head/tail 各半。
+	bodyLen := projectInstrMaxSize - len(note)
+	if bodyLen < 2 {
+		bodyLen = 2
+	}
+	headLen := bodyLen / 2
+	tailLen := bodyLen - headLen
+
+	// 边界回退：避免切断多字节 UTF-8 字符。
+	for headLen > 0 && !utf8.RuneStart(s[headLen]) {
 		headLen--
 	}
+	for tailLen > 0 && !utf8.RuneStart(s[len(s)-tailLen]) {
+		tailLen--
+	}
+
 	return s[:headLen] + note + s[len(s)-tailLen:]
 }
