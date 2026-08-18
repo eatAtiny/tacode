@@ -13,7 +13,9 @@ import (
 	"agentic/internal/memory"
 	"agentic/internal/session"
 	"agentic/internal/tool"
+	"agentic/internal/ui"
 	"agentic/internal/ui/bubble"
+	"agentic/internal/ui/text"
 )
 
 // loadEnvFile 从 .env 文件加载环境变量。
@@ -73,6 +75,7 @@ func main() {
 	sessionsDir := flag.String("sessions", "./data/sessions", "sessions directory path")
 	sessionID := flag.String("session", "", "resume a specific session by ID (optional)")
 	envFile := flag.String("env", ".env", "env file path")
+	oneShot := flag.String("one-shot", "", "run a single query and exit (headless, prints final answer)")
 	flag.Parse()
 
 	// ── 步骤 2: 加载 .env 文件 ──
@@ -160,14 +163,35 @@ func main() {
 	tools.Register(tool.NewGitTool())
 
 	// ── 步骤 11: 创建 UI 实例 ──
-	// BubbleUI: 终端美化 UI（lipgloss 样式 + glamour Markdown 渲染 + ANSI 光标控制）。
-	uiInstance := bubble.NewBubbleUI()
+	// 按模式分支：
+	//   - 默认：BubbleUI（终端美化 UI，lipgloss 样式 + glamour Markdown 渲染 + ANSI 光标控制）
+	//   - one-shot：TextUI（headless，无终端输出，权限默认放行）
+	var uiInstance ui.UI
+	if *oneShot != "" {
+		uiInstance = text.NewTextUI()
+	} else {
+		uiInstance = bubble.NewBubbleUI()
+	}
 	defer uiInstance.Close() // 确保退出时恢复终端状态
 
-	// ── 步骤 12: 创建 Runner 并启动 REPL 循环 ──
+	// ── 步骤 12: 创建 Runner 并执行 ──
 	// Runner 是顶层编排器，组合所有组件，驱动 REPL 交互循环。
-	// Run() 阻塞直到用户输入 exit 或发生致命错误。
 	runner := agent.NewRunner(client, history, summary, memStore, events, extractor, retriever, tools, sessions, uiInstance)
+
+	// one-shot 模式：同步执行单次查询后退出。
+	// 成功 → 输出答案到 stdout，return（让 defer Close() 执行）。
+	// 失败 → 输出错误到 stderr，退出码 1。
+	if *oneShot != "" {
+		answer, err := runner.RunOnce(context.Background(), *oneShot)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "one-shot 执行失败: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(answer)
+		return
+	}
+
+	// REPL 模式：Run() 阻塞直到用户输入 exit 或发生致命错误。
 	if err := runner.Run(context.Background()); err != nil {
 		fmt.Fprintf(os.Stderr, "agent run failed: %v\n", err)
 		// 不用 os.Exit(1)，让 defer Close() 执行以恢复终端状态
