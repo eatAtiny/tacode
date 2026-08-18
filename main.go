@@ -59,6 +59,7 @@ func loadEnvFile(path string) error {
 // 初始化调用链（按顺序）：
 //
 //	步骤 1: 解析命令行参数（sessions 目录、session ID、env 文件路径）
+//	   -one-shot "<任务>": 一次性运行单次查询（headless），输出最终答案后退出
 //	步骤 2: 加载 .env 文件（不覆盖已有环境变量）
 //	步骤 3: 创建 LLM 客户端（从环境变量读取 API Key 和配置）
 //	步骤 4: 初始化会话管理器（加载 manifest.json 或创建默认会话）
@@ -68,8 +69,8 @@ func loadEnvFile(path string) error {
 //	步骤 8: 初始化记忆提取器（Extractor，使用 LLM 从对话提取摘要和记忆）
 //	步骤 9: 初始化记忆检索器（Retriever，构建上下文 + 自动压缩）
 //	步骤 10: 注册内置工具（Shell、File）
-//	步骤 11: 创建 UI 实例（BubbleUI 终端美化 UI）
-//	步骤 12: 创建 Runner 并启动 REPL 循环
+//	步骤 11: 创建 UI 实例（REPL 模式 BubbleUI / one-shot 模式 TextUI）
+//	步骤 12: 创建 Runner 并执行（REPL 循环或 one-shot 单次查询）
 func main() {
 	// ── 步骤 1: 解析命令行参数 ──
 	sessionsDir := flag.String("sessions", "./data/sessions", "sessions directory path")
