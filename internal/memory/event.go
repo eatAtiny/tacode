@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -172,14 +173,7 @@ func (s *EventStore) Digest(lastN int) string {
 	for r := range rounds {
 		roundNums = append(roundNums, r)
 	}
-	// 排序
-	for i := 0; i < len(roundNums); i++ {
-		for j := i + 1; j < len(roundNums); j++ {
-			if roundNums[i] > roundNums[j] {
-				roundNums[i], roundNums[j] = roundNums[j], roundNums[i]
-			}
-		}
-	}
+	sort.Ints(roundNums)
 
 	start := len(roundNums) - lastN
 	if start < 0 {
