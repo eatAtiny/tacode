@@ -60,6 +60,10 @@ func (t *GitTool) Parameters() map[string]any {
 				"type":        "boolean",
 				"description": "仅 status/diff 使用：只看暂存区",
 			},
+			"stat": map[string]any{
+				"type":        "boolean",
+				"description": "仅 diff 使用：只看文件级变更统计（X files changed, +N/-N），不看具体 diff",
+			},
 			"max_count": map[string]any{
 				"type":        "integer",
 				"description": "仅 log 使用：最多显示几条，默认 20",
@@ -91,6 +95,7 @@ func (t *GitTool) Execute(args string) (string, error) {
 		Action      string `json:"action"`
 		Path        string `json:"path"`
 		Staged      bool   `json:"staged"`
+		Stat        bool   `json:"stat"`
 		MaxCount    int    `json:"max_count"`
 		Message     string `json:"message"`
 		Files       string `json:"files"`
@@ -113,7 +118,7 @@ func (t *GitTool) Execute(args string) (string, error) {
 	case "status":
 		return t.doStatus(ctx, params.Path, params.Staged)
 	case "diff":
-		return t.doDiff(ctx, params.Path, params.Staged)
+		return t.doDiff(ctx, params.Path, params.Staged, params.Stat)
 	case "log":
 		return t.doLog(ctx, params.MaxCount)
 	case "show":
@@ -251,8 +256,11 @@ func formatStatus(raw string, staged bool) string {
 	return strings.TrimRight(sb.String(), "\n")
 }
 
-func (t *GitTool) doDiff(ctx context.Context, path string, staged bool) (string, error) {
+func (t *GitTool) doDiff(ctx context.Context, path string, staged, stat bool) (string, error) {
 	args := []string{"diff", "--no-color"}
+	if stat {
+		args = append(args, "--stat")
+	}
 	if staged {
 		args = append(args, "--staged")
 	}

@@ -107,6 +107,36 @@ func TestGitDiff(t *testing.T) {
 	}
 }
 
+func TestGitDiff_Stat(t *testing.T) {
+	dir := initTestRepo(t)
+	writeTestFile(t, dir, "a.txt", "line1\nline2\n")
+	commitAll(t, dir, "init")
+	writeTestFile(t, dir, "a.txt", "line1\nline2\nline3\n")
+
+	g := NewGitToolIn(dir)
+
+	// stat=true → 文件级统计。
+	res, err := g.Execute(toJSON(map[string]any{"action": "diff", "stat": true}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !(strings.Contains(res, "file changed") || strings.Contains(res, "files changed")) || !strings.Contains(res, "insertion") {
+		t.Errorf("stat diff should contain file-level summary, got:\n%s", res)
+	}
+	if strings.Contains(res, "+line3") {
+		t.Errorf("stat diff should NOT contain full diff lines, got:\n%s", res)
+	}
+
+	// stat=false → 完整 diff（默认行为）。
+	res, err = g.Execute(toJSON(map[string]any{"action": "diff"}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(res, "+line3") {
+		t.Errorf("full diff should contain added line, got:\n%s", res)
+	}
+}
+
 func TestGitLog(t *testing.T) {
 	dir := initTestRepo(t)
 	writeTestFile(t, dir, "a.txt", "1\n")
