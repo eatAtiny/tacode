@@ -15,6 +15,7 @@ go run .                                 # run (requires OPENAI_API_KEY)
 go run . -sessions ./data/sessions       # custom sessions directory
 go run . -session <id>                   # resume a specific session
 go run . -env .env                       # custom env file path
+go run . -one-shot "列出当前目录文件"     # headless 单次运行，输出最终答案后退出
 go test ./...                            # run all tests
 ```
 
