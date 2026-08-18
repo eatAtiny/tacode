@@ -75,13 +75,16 @@ func NewOpenAIClientFromEnv() (*OpenAIClient, error) {
 // Chat 执行一次最小对话请求（system + user），返回完整文本。
 // temperature 固定 0.2。用于 Extractor 和 Retriever 的 LLM 调用。
 func (c *OpenAIClient) Chat(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
-	resp, err := c.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
-		Model: c.model,
-		Messages: []openai.ChatCompletionMessage{
-			{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
-			{Role: openai.ChatMessageRoleUser, Content: userPrompt},
-		},
-		Temperature: 0.2,
+	// 带重试的对话请求：429/5xx/网络错误自动重试（最多 defaultMaxRetries 次）。
+	resp, err := withRetry(ctx, defaultMaxRetries, func() (openai.ChatCompletionResponse, error) {
+		return c.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+			Model: c.model,
+			Messages: []openai.ChatCompletionMessage{
+				{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
+				{Role: openai.ChatMessageRoleUser, Content: userPrompt},
+			},
+			Temperature: 0.2,
+		})
 	})
 	if err != nil {
 		return "", fmt.Errorf("openai chat completion failed: %w", err)
@@ -185,7 +188,10 @@ func (c *OpenAIClient) ChatWithTools(ctx context.Context, messages []ChatMessage
 		req.Tools = tools
 	}
 
-	resp, err := c.client.CreateChatCompletion(ctx, req)
+	// 带重试的对话请求：429/5xx/网络错误自动重试（最多 defaultMaxRetries 次）。
+	resp, err := withRetry(ctx, defaultMaxRetries, func() (openai.ChatCompletionResponse, error) {
+		return c.client.CreateChatCompletion(ctx, req)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("openai chat completion failed: %w", err)
 	}
@@ -287,8 +293,11 @@ func (c *OpenAIClient) ChatWithToolsStream(ctx context.Context, messages []ChatM
 			req.Tools = tools
 		}
 
-		// ── 步骤 3: 创建流式连接 ──
-		stream, err := c.client.CreateChatCompletionStream(ctx, req)
+		// ── 步骤 3: 创建流式连接（带重试） ──
+		// 只重试 stream 创建前；流建立后的 Recv 中断不重试（避免重复 tool_calls 副作用）。
+		stream, err := withRetry(ctx, defaultMaxRetries, func() (*openai.ChatCompletionStream, error) {
+			return c.client.CreateChatCompletionStream(ctx, req)
+		})
 		if err != nil {
 			events <- StreamEvent{
 				Type:  StreamEventError,
