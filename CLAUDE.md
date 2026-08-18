@@ -80,6 +80,7 @@ main.go
 Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncated (truth source).
 
 **Context building** (`Retriever.BuildContext`):
+0. Project instructions (AGENTS.md, cached at startup, `/reload` to refresh)
 1. L3 memory index + high-importance memories
 2. L2 recent summaries (last 10)
 3. Fallback: L2 → EventStore digest → HistoryStore digest
@@ -128,6 +129,7 @@ Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncat
 | `/rename <name>` | Rename current session |
 | `/current` | Show current session info |
 | `/compress` | Manual summary compression |
+| `/reload` | Reload AGENTS.md project instructions |
 | `/memory` | List L3 memories |
 | `/memory add <content>` | Add L3 memory |
 | `/memory rm <name>` | Delete L3 memory |
