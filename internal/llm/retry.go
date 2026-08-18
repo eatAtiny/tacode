@@ -17,8 +17,9 @@ const defaultMaxRetries = 3
 // backoffBase 指数退避基数。
 const backoffBase = 500 * time.Millisecond
 
-// backoff 计算第 attempt 次重试前的等待时长（指数退避 + 随机抖动）。
-// attempt 从 1 开始（第一次重试）。抖动 ±20% 避免多个请求同时重试（惊群）。
+// backoff 计算第 attempt 次重试前的等待时长（指数退避 + 单向抖动）。
+// attempt 从 1 开始（第一次重试）。抖动范围 [0, base/5)，总等待 [base, 1.2*base)，
+// 使多个同时重试的请求错开（避免惊群）。
 func backoff(attempt int) time.Duration {
 	base := backoffBase * time.Duration(1<<uint(attempt-1))
 	jitter := time.Duration(rand.Int63n(int64(base) / 5)) // ±20%
@@ -48,14 +49,19 @@ func isRetryableError(err error) bool {
 // 重试耗尽后返回最后一次原始错误（不包装，保持 APIError 类型）。
 func withRetry[T any](ctx context.Context, maxRetries int, fn func() (T, error)) (T, error) {
 	var zero T
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			delay := backoff(attempt)
+			timer := time.NewTimer(delay)
 			select {
 			case <-ctx.Done():
+				timer.Stop()
 				return zero, ctx.Err()
-			case <-time.After(delay):
+			case <-timer.C:
 			}
 		}
 		result, err := fn()
