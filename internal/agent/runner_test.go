@@ -15,8 +15,9 @@ import (
 
 // newTestRunner 构造一个测试用 Runner（TextUI + 临时 sessions 目录）。
 //
-// 不调用真实 LLM（llm 字段由调用方注入或保持 nil），仅验证
-// RunOnce 的空输入校验和 initTempSession 的目录行为。
+// llm 注入空客户端（&llm.OpenAIClient{}）：本测试只验证 RunOnce 的
+// 空输入校验和 initTempSession 的目录行为，不触及 llm 字段——
+// 空客户端仅提供零值 model，调用 Model() 返回空字符串，安全无副作用。
 func newTestRunner(t *testing.T) *Runner {
 	t.Helper()
 	sessionsDir := t.TempDir()
@@ -42,7 +43,7 @@ func newTestRunner(t *testing.T) *Runner {
 	events := memory.NewEventStore(activeDir)
 
 	return &Runner{
-		llm:       &llm.OpenAIClient{}, // 空客户端：不发起真实 LLM 调用
+		llm:       &llm.OpenAIClient{}, // 空客户端：仅本文件测试使用，不读字段，Model() 返回零值
 		history:   history,
 		summary:   summary,
 		memStore:  memStore,
@@ -82,7 +83,7 @@ func TestInitTempSession_SetsPaths(t *testing.T) {
 	// 临时会话目录（预期惰性创建，initTempSession 不显式 MkdirAll）。
 	tempDir := r.sessions.SessionDir(r.tempID)
 
-	// 各 store 路径应指向临时目录。
+	// events 路径应指向临时目录（其余 store 共用同一 SetPath 代码路径）。
 	eventsPath := filepath.Dir(r.events.Path())
 	if eventsPath != tempDir {
 		t.Errorf("events path should be in tempDir, got %q want %q", eventsPath, tempDir)
