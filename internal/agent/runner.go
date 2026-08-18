@@ -351,12 +351,27 @@ func (r *Runner) RunOnce(ctx context.Context, input string) (string, error) {
 	r.ui.SetSessionName("new")
 	r.ui.SetModel(r.llm.Model())
 
+	// ── 记录用户输入事件（与 Run() 一致） ──
+	r.events.Append(memory.Event{
+		Type:    memory.EventUser,
+		Round:   1,
+		Content: input,
+	})
+
 	// ── 同步执行单次查询 ──
 	// round=1，inputForward=nil（TextUI 权限默认放行，不读此参数）。
 	answer, err := r.queryEngine(ctx, 1, input, nil)
 	if err != nil {
 		return "", fmt.Errorf("one-shot 查询失败: %w", err)
 	}
+
+	// ── 记录助手回答事件（与 Run() 一致） ──
+	r.events.Append(memory.Event{
+		Type:    memory.EventAssistant,
+		Round:   1,
+		Content: answer,
+		Model:   r.llm.Model(),
+	})
 
 	// ── 保存记忆（与 Run() 分支 B 一致） ──
 	if err := r.history.Append(1, input, answer); err != nil {
