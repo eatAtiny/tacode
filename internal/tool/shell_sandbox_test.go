@@ -86,3 +86,21 @@ func TestShellTool_NetworkApproval(t *testing.T) {
 		t.Error("without sandbox, network param should be ignored even after AllowNetworkFor")
 	}
 }
+
+func TestShellTool_NetworkApproval_DoesNotBypassDangerous(t *testing.T) {
+	st := NewShellToolWithSandbox(&mockSandbox{})
+	args := `{"command": "rm -rf /etc/passwd", "network": true}`
+
+	// 放行前：需确认。
+	perm := st.CheckPermission(args)
+	if perm.Allow {
+		t.Error("dangerous network command should require confirmation before approval")
+	}
+
+	// 放行后：危险命令仍需确认（approval 不能掩盖危险）。
+	st.AllowNetworkFor(args)
+	perm = st.CheckPermission(args)
+	if perm.Allow {
+		t.Error("dangerous command should still require confirmation after network approval")
+	}
+}

@@ -117,11 +117,18 @@ func (t *ShellTool) Execute(args string) (string, error) {
 
 // CheckPermission 检查 shell 命令是否需要用户确认。
 //
-// 策略：
-//   - 沙箱开启且请求 network=true → 需确认（网络访问是风险操作）
+// 策略（危险检查优先级最高，即使已放行网络也需每次确认）：
 //   - 包含危险命令模式（rm -rf、sudo、chmod 777 等）→ 需确认
+//   - 沙箱开启且请求 network=true → 需确认（网络访问是风险操作）
 //   - 其他命令 → 直接允许
 func (t *ShellTool) CheckPermission(args string) PermissionResult {
+	// 危险命令检查优先级最高：即使已放行网络，危险命令仍需每次确认。
+	if isDangerousShellCommand(args) {
+		return PermissionResult{
+			Allow:  false,
+			Reason: "该命令可能有风险，需要确认执行",
+		}
+	}
 	if t.sandbox != nil {
 		var params struct {
 			Network bool `json:"network"`
@@ -135,12 +142,6 @@ func (t *ShellTool) CheckPermission(args string) PermissionResult {
 				Allow:  false,
 				Reason: "需要网络访问，请确认",
 			}
-		}
-	}
-	if isDangerousShellCommand(args) {
-		return PermissionResult{
-			Allow:  false,
-			Reason: "该命令可能有风险，需要确认执行",
 		}
 	}
 	return PermissionResult{Allow: true}
