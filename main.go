@@ -207,20 +207,18 @@ func main() {
 		}
 		// 支持 "name@command args..." 语法：@ 前的部分是 server 名，
 		// 作为工具名前缀（如 "fetch@npx -y ..." → 工具名 "fetch_fetch"）。
-		// 无 @ 时回退到 "mcp" 前缀。
+		// 仅当首个 token 内含 @ 时按 name@command 解析；
+		// 否则整个命令保持原样（scoped 包名 @scope/pkg 中的 @ 不误判），
+		// server 名回退到 "mcp"。
 		name := "mcp"
-		rest := spec
-		if at := strings.Index(spec, "@"); at >= 0 {
-			name = spec[:at]
-			rest = spec[at+1:]
-		}
-		parts = strings.Fields(rest)
-		if len(parts) == 0 {
-			continue
+		command := parts[0]
+		if idx := strings.Index(parts[0], "@"); idx > 0 {
+			name = parts[0][:idx]
+			command = parts[0][idx+1:]
 		}
 		cfg := mcp.ServerConfig{
 			Name:    name,
-			Command: parts[0],
+			Command: command,
 			Args:    parts[1:],
 		}
 		connectCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

@@ -91,13 +91,16 @@ func TestAdapter_Execute_InvalidArgs(t *testing.T) {
 }
 
 // 集成测试（可选）：真实拉起 mcp-server-fetch，验证工具枚举。
-// 无 npx/node 时 t.Skip。
+// 无 npx/node 或网络受限时 t.Skip（-short 模式直接跳过，避免拖慢套件）。
 func TestConnect_FetchServer_Integration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
 	if _, err := exec.LookPath("npx"); err != nil {
 		t.Skip("npx not available")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	mgr := New()
