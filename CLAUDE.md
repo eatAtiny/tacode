@@ -17,6 +17,7 @@ go run . -session <id>                   # resume a specific session
 go run . -env .env                       # custom env file path
 go run . -one-shot "列出当前目录文件"     # headless 单次运行，输出最终答案后退出
 go run . -sandbox on                  # 启用 shell 沙箱（网络/文件系统隔离，macOS/Linux）
+go run . -mcp-server "fetch@npx -y @modelcontextprotocol/server-fetch"   # 连接 MCP server（WebFetch）
 go test ./...                            # run all tests
 ```
 
