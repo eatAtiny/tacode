@@ -11,10 +11,35 @@ import (
 // LinuxSandbox 用 Linux 原生机制隔离命令。
 //
 // v1 实现（务实路径，仅做可落地部分）：
-//   - 网络隔离：CLONE_NEWNET（全新网络命名空间）——通过 cmd.SysProcAttr 注入，
-//     子进程启动即处于空网络命名空间（无外部接口），从根上杜绝外发网络。
-//     这是 exec.Cmd 可落地、可验证的部分。
+//   - 网络隔离：CLONE_NEWNET + CLONE_NEWUSER（全新网络命名空间）——通过
+//     cmd.SysProcAttr 注入，子进程启动即处于空网络命名空间（无外部接口），
+//     从根上杜绝外发网络。这是 exec.Cmd 可落地、可验证的部分。
 //   - 文件系统隔离：Landlock（go-landlock 库）——v1 跳过，见下方局限性说明。
+//
+// ── 非 root 如何创建网络命名空间（CLONE_NEWNET + CLONE_NEWUSER） ──
+//
+// CLONE_NEWNET 单独使用要求调用者在所在 user namespace 持有 CAP_SYS_ADMIN，
+// 绝大多数发行版上非 root 直接 clone(2) 会返回 EPERM。因此必须同时加上
+// CLONE_NEWUSER：创建一个新的 user namespace，进程在其中拥有完整能力
+// （包括 CAP_SYS_ADMIN），从而能创建新的网络命名空间。两步合在一起即可让
+// 非 root 用户在开启 user namespaces 的发行版上获得网络隔离。
+//
+// 但 CLONE_NEWUSER 有一个关键陷阱：新 user namespace 的 uid_map/gid_map 初始
+// 为【空】。Go 只有在 cmd.SysProcAttr.Credential 非 nil 时才会写入单区间映射
+// "0 → (调用进程的 uid/gid)"；否则子进程的 uid 在内核内部无法映射，getuid()/
+// getgid() 返回 overflow id 65534（nobody），且对宿主文件系统的访问检查全部按
+// "未映射 uid" 处理——沙箱命令将无法读写用户目录下的任何文件，等于不可用。
+// 因此 Wrap 必须同时设置 Credential{Uid, Gid}（取当前进程的真实 uid/gid），
+// 让子进程成为"功能完整的 namespace root"：既能创建网络命名空间，又保有对
+// 用户自身文件的读写能力。这与 Docker/userns 沙箱的做法一致。
+//
+// 边界情况：
+//   - 以 root 运行时不需要 user namespace，但加上也无害（root 可直接 CLONE_NEWNET）。
+//   - 内核/发行版禁用 unprivileged user namespaces 时（如 Ubuntu 24.04 的
+//     AppArmor 限制、kernel.unprivileged_userns_clone=0），clone(2) 返回 EPERM，
+//     命令启动失败——错误对调用方可见，不会静默放行（fail-closed）。
+//   - 若调用方已设置 SysProcAttr（如 Credential 指向别的 uid），保留其字段，
+//     只合并 Cloneflags，避免覆盖其他配置。
 //
 // ── 文件系统隔离的局限性说明（为什么 v1 不实现 Landlock） ──
 //
@@ -62,19 +87,26 @@ func newLinuxSandbox(cfg Config) *LinuxSandbox {
 // Wrap 给 cmd 注入沙箱约束（原地修改并返回）。
 func (s *LinuxSandbox) Wrap(cmd *exec.Cmd) *exec.Cmd {
 	if !s.allowNetwork {
-		// 网络隔离：CLONE_NEWNET 让子进程跑在全新的网络命名空间里
-		// （只有 loopback，无外部接口），任何外发网络都会被内核拒绝。
-		//
-		// 注意：
-		//   - 非 root 可用性依赖 user namespaces（多数发行版默认开启
-		//     kernel.unprivileged_userns_clone）；否则 clone(2) 返回
-		//     EPERM，命令启动失败（调用方可见错误，不会静默放行）。
-		//   - 若调用方已设置 SysProcAttr（如其他命名空间），保留其
-		//     Cloneflags 并合并，避免覆盖。
+		// 网络隔离：CLONE_NEWNET + CLONE_NEWUSER 让子进程跑在全新的
+		// 网络命名空间里（只有 loopback，无外部接口），任何外发网络都
+		// 会被内核拒绝。见类型注释中"非 root 如何创建网络命名空间"一节。
 		if cmd.SysProcAttr == nil {
 			cmd.SysProcAttr = &syscall.SysProcAttr{}
 		}
-		cmd.SysProcAttr.Cloneflags |= syscall.CLONE_NEWNET
+		cmd.SysProcAttr.Cloneflags |= syscall.CLONE_NEWNET | syscall.CLONE_NEWUSER
+
+		// 为 CLONE_NEWUSER 提供 uid/gid 映射：让 Go 写入单区间映射
+		// "0 → 当前用户"，使子进程成为功能完整的 namespace root（否则
+		// 空映射下一切文件访问都失败）。取当前进程真实 uid/gid，因为
+		// 父进程就是执行 shell 命令的用户。
+		if cmd.SysProcAttr.Credential == nil {
+			cmd.SysProcAttr.Credential = &syscall.Credential{
+				Uid: uint32(os.Getuid()),
+				Gid: uint32(os.Getgid()),
+				// 避免 setgroups：单区间映射下附加组会带来权限不确定性。
+				NoSetGroups: true,
+			}
+		}
 	}
 	return cmd
 }
