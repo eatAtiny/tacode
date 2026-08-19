@@ -113,6 +113,31 @@ func (s *LinuxSandbox) Wrap(cmd *exec.Cmd) *exec.Cmd {
 
 **关键限制**：Landlock 文件系统隔离成熟；网络隔离内核 6.7+ 才原生支持。低版本 Linux 用 `unshare -n`（切到空网络命名空间）实现，user namespaces 可用时非 root 可执行。若均不可用 → 降级为文件系统隔离 + 网络警告。
 
+## 网络审批流程（确认后真正放行）
+
+**问题**：沙箱 profile 创建时固定 `AllowNetwork`，而"是否放行网络"由用户在权限确认时决定——确认发生在沙箱创建之后。若确认后仍用 deny 网络 profile，用户批准了却得不到批准的东西（误导性 UX）。
+
+**方案**：`ShellTool` 记录"已确认放行网络"的 args，`Execute` 按记录重建 allow-network profile。
+
+```
+queryLoop.checkToolPermission(tc, t, iter)
+  └─ t.CheckPermission(args) → Allow:false（network:true）
+       └─ 用户确认通过
+       └─ 若 t 实现 interface{ AllowNetworkFor(args string) } → t.AllowNetworkFor(args)
+            └─ ShellTool 记录 approved[args]=true
+
+ShellTool.Execute(args)
+  └─ network:true && approved[args] → 重建 AllowNetwork:true 的沙箱执行
+  └─ 否则 → 默认 deny 网络沙箱
+```
+
+涉及改动：
+- `ShellTool` 加 `approved map[string]bool` + `AllowNetworkFor(args)` 方法（ShellTool 特有，非 Tool 接口）+ `CheckPermission` 检查 approved
+- `queryLoop.checkToolPermission` 确认通过后，类型断言可选接口并调用
+- `Execute` 按 `network && approved` 决定沙箱网络策略（macOS 重建 profile / Linux 重建 SysProcAttr）
+
+**验证**：`network:true` → 确认 → 网络真放行；`network:false` 或未确认 → deny。
+
 ## shell 工具改造
 
 ```go
