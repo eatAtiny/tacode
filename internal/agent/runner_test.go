@@ -94,7 +94,7 @@ func TestTextUI_PermissionAutoApprove(t *testing.T) {
 	ui := text.NewTextUI()
 
 	// TextUI.ConfirmPermission 不读 inputForward，直接返回 true。
-	approved, err := ui.ConfirmPermission("shell", `{"command":"ls"}`, nil)
+	approved, err := ui.ConfirmPermission("shell", `{"command":"ls"}`, "", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

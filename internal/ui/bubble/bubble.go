@@ -414,13 +414,16 @@ func (b *BubbleUI) OnMessage(msg string) {
 }
 
 // ConfirmPermission 显示权限确认提示，等待用户输入。
-// 提示格式："⚠️ 权限确认: <tool>" + 参数 + "允许执行? [y/N] "。
+// 提示格式："⚠️ 权限确认: <tool>" + 参数 + 原因 + "允许执行? [y/N] "。
 // 如果 inputForward 不为 nil，从此 channel 读取用户输入；
 // 否则从 ReadInputChan 读取。
 // 返回 true 表示用户输入 "y" 或 "yes"（大小写不敏感）。
-func (b *BubbleUI) ConfirmPermission(tool, args string, inputForward <-chan string) (bool, error) {
+func (b *BubbleUI) ConfirmPermission(tool, args, reason string, inputForward <-chan string) (bool, error) {
 	fmt.Printf("\n%s %s\n", styleThink.Render("⚠️  权限确认:"), tool)
 	fmt.Printf("  参数: %s\n", styleMuted.Render(args))
+	if reason != "" {
+		fmt.Printf("  原因: %s\n", styleMuted.Render(reason))
+	}
 	fmt.Print(styleUserPrefix.Render("  允许执行? [y/N] "))
 	os.Stdout.Sync()
 

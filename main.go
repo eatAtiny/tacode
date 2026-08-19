@@ -165,17 +165,21 @@ func main() {
 	// Git: 结构化 git 操作（status/diff/log/show/branch 只读 + add/commit/stash/checkout 需确认）。
 	tools := tool.NewRegistry()
 	// shell 工具：默认无沙箱；-sandbox on 时启用平台沙箱（网络/文件系统隔离）。
+	var sb sandbox.Sandbox
 	if *sandboxMode == "on" {
-		sb := sandbox.NewSandbox(sandbox.Config{
+		sb = sandbox.NewSandbox(sandbox.Config{
 			AllowNetwork: false, // 默认拒绝网络（防外发），network:true 需确认
 			WorkDir:      "",    // 空 = cwd
 		})
-		if sandbox.IsActive(sb) {
-			tools.Register(tool.NewShellToolWithSandbox(sb))
-		} else {
-			fmt.Fprintf(os.Stderr, "warning: sandbox requested but not supported on %s, continuing without sandbox\n", runtime.GOOS)
-			tools.Register(tool.NewShellTool())
-		}
+	}
+	// 注意：sandbox.IsActive(nil) 对 nil 接口的类型断言返回 ok=false → 返回 true，
+	// 因此必须先判空再调用，避免 nil 接口方法调用 panic。
+	if sb != nil && sandbox.IsActive(sb) {
+		defer sb.Close() // 释放临时 profile（macOS seatbelt 文件）
+		tools.Register(tool.NewShellToolWithSandbox(sb))
+	} else if *sandboxMode == "on" {
+		fmt.Fprintf(os.Stderr, "warning: sandbox requested but not supported on %s, continuing without sandbox\n", runtime.GOOS)
+		tools.Register(tool.NewShellTool())
 	} else {
 		tools.Register(tool.NewShellTool())
 	}

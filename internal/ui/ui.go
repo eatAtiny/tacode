@@ -115,7 +115,7 @@ type UI interface {
 	// ── 交互组 ──────────────────────────────────────────
 
 	// ConfirmPermission 请求用户确认权限。
-	// tool 是工具名称，args 是 JSON 格式的参数。
+	// tool 是工具名称，args 是 JSON 格式的参数，reason 是需要确认的原因。
 	// inputForward 是输入转发 channel：实现应从该 channel 读取用户确认输入
 	// （而非从 ReadInputChan），这样 Runner 可以在确认期间继续接收控制命令。
 	//
@@ -127,7 +127,7 @@ type UI interface {
 	// inputForward 说明：
 	//   - 不为 nil 时，从此 channel 读取用户输入（与主循环共享输入流）
 	//   - 为 nil 时，实现应自行读取输入（如直接调用 ReadInput）
-	ConfirmPermission(tool, args string, inputForward <-chan string) (bool, error)
+	ConfirmPermission(tool, args, reason string, inputForward <-chan string) (bool, error)
 
 	// ── 生命周期组 ──────────────────────────────────────
 
