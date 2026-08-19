@@ -5,12 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"agentic/internal/tool"
 
 	mcpgo "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 )
+
+// mcpCallTimeout MCP 工具单次调用超时（与 shell 工具 30s 一致）。
+const mcpCallTimeout = 30 * time.Second
 
 // mcpToolAdapter 把 MCP 工具适配成 tool.Tool。
 // queryLoop 通过既有 Tool 接口无感知调用 MCP 工具。
@@ -52,6 +56,8 @@ func (a *mcpToolAdapter) IsReadOnly(args string) bool { return false }
 func (a *mcpToolAdapter) ResultLimit() int { return 12000 }
 
 // Execute 调用 MCP server 的 tools/call。
+// 带 mcpCallTimeout 超时：卡死的 MCP server 不应永久阻塞 queryLoop
+//（与 shell 工具的 30s 超时一致）。
 func (a *mcpToolAdapter) Execute(args string) (string, error) {
 	// ── 解析参数 JSON → map[string]any ──
 	var arguments map[string]any
@@ -59,12 +65,14 @@ func (a *mcpToolAdapter) Execute(args string) (string, error) {
 		return "", fmt.Errorf("parse mcp args: %w", err)
 	}
 
-	// ── 调用 MCP 工具 ──
+	// ── 调用 MCP 工具（带超时） ──
 	callReq := mcp.CallToolRequest{}
 	callReq.Params.Name = a.toolName
 	callReq.Params.Arguments = arguments
 
-	result, err := a.client.CallTool(context.Background(), callReq)
+	ctx, cancel := context.WithTimeout(context.Background(), mcpCallTimeout)
+	defer cancel()
+	result, err := a.client.CallTool(ctx, callReq)
 	if err != nil {
 		return "", fmt.Errorf("mcp tool %s call failed: %w", a.name, err)
 	}
