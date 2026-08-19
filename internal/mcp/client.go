@@ -6,8 +6,11 @@
 // 用法（main.go）：
 //
 //	mgr := mcp.New()
-//	mgr.Connect(ctx, mcp.ServerConfig{Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-fetch"}})
-//	for _, t := range mgr.Tools() {
+//	tools, err := mgr.Connect(ctx, mcp.ServerConfig{Name: "fetch", Command: "npx", Args: []string{"-y", "@modelcontextprotocol/server-fetch"}})
+//	if err != nil {
+//		// 失败可警告跳过，不阻断启动
+//	}
+//	for _, t := range tools {
 //		tools.Register(t)
 //	}
 //	defer mgr.Close()
@@ -49,9 +52,10 @@ func New() *Manager {
 	return &Manager{}
 }
 
-// Connect 启动一个 server 子进程，握手，枚举工具并构建适配器。
+// Connect 启动一个 server 子进程，握手，枚举工具并构建适配器，
+// 返回该 server 的工具适配器（只含本次连接的 server，便于逐 server 注册）。
 // 失败返回 error（调用方决定警告跳过还是退出）。
-func (m *Manager) Connect(ctx context.Context, cfg ServerConfig) error {
+func (m *Manager) Connect(ctx context.Context, cfg ServerConfig) ([]tool.Tool, error) {
 	name := cfg.Name
 	if name == "" {
 		name = cfg.Command
@@ -60,7 +64,7 @@ func (m *Manager) Connect(ctx context.Context, cfg ServerConfig) error {
 	// ── 创建 stdio client（自动启动子进程 transport） ──
 	c, err := mcpgo.NewStdioMCPClient(cfg.Command, nil, cfg.Args...)
 	if err != nil {
-		return fmt.Errorf("create mcp client for %s: %w", name, err)
+		return nil, fmt.Errorf("create mcp client for %s: %w", name, err)
 	}
 
 	// drain server stderr，防止管道阻塞。
@@ -74,14 +78,14 @@ func (m *Manager) Connect(ctx context.Context, cfg ServerConfig) error {
 	initReq.Params.ClientInfo = mcp.Implementation{Name: "agentic", Version: "0.1"}
 	if _, err := c.Initialize(ctx, initReq); err != nil {
 		c.Close()
-		return fmt.Errorf("initialize mcp server %s: %w", name, err)
+		return nil, fmt.Errorf("initialize mcp server %s: %w", name, err)
 	}
 
 	// ── 枚举工具（自动分页） ──
 	toolsResult, err := c.ListTools(ctx, mcp.ListToolsRequest{})
 	if err != nil {
 		c.Close()
-		return fmt.Errorf("list tools from %s: %w", name, err)
+		return nil, fmt.Errorf("list tools from %s: %w", name, err)
 	}
 
 	// ── 构建适配器 ──
@@ -97,7 +101,7 @@ func (m *Manager) Connect(ctx context.Context, cfg ServerConfig) error {
 	}
 
 	m.conns = append(m.conns, &serverConn{cfg: cfg, client: c, tools: adapters})
-	return nil
+	return adapters, nil
 }
 
 // Tools 返回所有已连接的 MCP 工具适配器。

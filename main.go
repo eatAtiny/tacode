@@ -8,9 +8,11 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"time"
 
 	"agentic/internal/agent"
 	"agentic/internal/llm"
+	"agentic/internal/mcp"
 	"agentic/internal/memory"
 	"agentic/internal/sandbox"
 	"agentic/internal/session"
@@ -71,6 +73,7 @@ func loadEnvFile(path string) error {
 //	步骤 8: 初始化记忆提取器（Extractor，使用 LLM 从对话提取摘要和记忆）
 //	步骤 9: 初始化记忆检索器（Retriever，构建上下文 + 自动压缩）
 //	步骤 10: 注册内置工具（Shell、File）
+//	步骤 10b: 连接 -mcp-server 指定的外部 MCP server，注册其工具
 //	步骤 11: 创建 UI 实例（REPL 模式 BubbleUI / one-shot 模式 TextUI）
 //	步骤 12: 创建 Runner 并执行（REPL 循环或 one-shot 单次查询）
 func main() {
@@ -80,6 +83,10 @@ func main() {
 	envFile := flag.String("env", ".env", "env file path")
 	oneShot := flag.String("one-shot", "", "run a single query and exit (headless, prints final answer)")
 	sandboxMode := flag.String("sandbox", "off", "sandbox mode: on (sandbox shell commands) / off (default)")
+	// 可重复 flag：-mcp-server "npx -y @modelcontextprotocol/server-fetch"
+	// 或带名称：-mcp-server "fetch@npx -y @modelcontextprotocol/server-fetch"（工具前缀用 "fetch"）。
+	var mcpServers mcpServerFlags
+	flag.Var(&mcpServers, "mcp-server", "MCP server command to connect (repeatable, e.g. \"npx -y @modelcontextprotocol/server-fetch\")")
 	flag.Parse()
 
 	// ── 步骤 2: 加载 .env 文件 ──
@@ -189,6 +196,48 @@ func main() {
 	tools.Register(tool.NewListTool())
 	tools.Register(tool.NewGitTool())
 
+	// ── 步骤 10b: MCP server 连接 ──
+	// -mcp-server flag 指定的外部 MCP server（如 mcp-server-fetch 提供 WebFetch）。
+	// 每个 server 的工具注册进 Registry；单个失败警告跳过，不阻断启动。
+	mcpMgr := mcp.New()
+	for _, spec := range mcpServers {
+		parts := strings.Fields(spec)
+		if len(parts) == 0 {
+			continue
+		}
+		// 支持 "name@command args..." 语法：@ 前的部分是 server 名，
+		// 作为工具名前缀（如 "fetch@npx -y ..." → 工具名 "fetch_fetch"）。
+		// 无 @ 时回退到 "mcp" 前缀。
+		name := "mcp"
+		rest := spec
+		if at := strings.Index(spec, "@"); at >= 0 {
+			name = spec[:at]
+			rest = spec[at+1:]
+		}
+		parts = strings.Fields(rest)
+		if len(parts) == 0 {
+			continue
+		}
+		cfg := mcp.ServerConfig{
+			Name:    name,
+			Command: parts[0],
+			Args:    parts[1:],
+		}
+		connectCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		serverTools, err := mcpMgr.Connect(connectCtx, cfg)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: mcp server %q connect failed: %v\n", cfg.Command, err)
+			continue
+		}
+		// 只注册本次连接的 server 的工具（Connect 返回该 server 的工具）。
+		for _, t := range serverTools {
+			tools.Register(t)
+		}
+		fmt.Fprintf(os.Stderr, "mcp server %q connected, %d tool(s) registered\n", cfg.Name, len(serverTools))
+	}
+	defer mcpMgr.Close()
+
 	// ── 步骤 11: 创建 UI 实例 ──
 	// 按模式分支：
 	//   - 默认：BubbleUI（终端美化 UI，lipgloss 样式 + glamour Markdown 渲染 + ANSI 光标控制）
@@ -223,4 +272,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "agent run failed: %v\n", err)
 		// 不用 os.Exit(1)，让 defer Close() 执行以恢复终端状态
 	}
+}
+
+// mcpServerFlags 可重复的 -mcp-server flag 值收集器。
+type mcpServerFlags []string
+
+func (f *mcpServerFlags) String() string { return strings.Join(*f, ",") }
+
+func (f *mcpServerFlags) Set(v string) error {
+	*f = append(*f, v)
+	return nil
 }
