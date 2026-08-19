@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/mattn/go-runewidth v0.0.19
 	github.com/sashabaranov/go-openai v1.41.2
+	golang.org/x/sys v0.46.0
 	golang.org/x/term v0.44.0
 )
 
@@ -41,6 +42,5 @@ require (
 	github.com/yuin/goldmark v1.7.13 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
 	golang.org/x/net v0.38.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.30.0 // indirect
 )

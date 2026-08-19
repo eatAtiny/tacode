@@ -9,9 +9,7 @@
 package sandbox
 
 import (
-	"fmt"
 	"os/exec"
-	"runtime"
 )
 
 // Sandbox 定义命令沙箱约束（网络/文件系统/资源）。
@@ -35,14 +33,7 @@ type Config struct {
 // 平台不支持时返回 NoopSandbox（无隔离）——不阻断启动，调用方可检查
 // sandbox.IsActive() 决定是否提示用户。
 func NewSandbox(cfg Config) Sandbox {
-	switch runtime.GOOS {
-	case "darwin":
-		return newMacOSSandbox(cfg)
-	case "linux":
-		return newLinuxSandbox(cfg)
-	default:
-		return &NoopSandbox{}
-	}
+	return newPlatformSandbox(cfg)
 }
 
 // NoopSandbox 无隔离后端（平台不支持时降级）。
@@ -62,8 +53,12 @@ func IsActive(s Sandbox) bool {
 // 工厂辅助：平台构建分派（避免 go:build 污染主文件）
 // ──────────────────────────────────────────────────────────
 
-// newMacOSSandbox 由 macos.go 实现（//go:build darwin）。
-// newLinuxSandbox 由 linux.go 实现（//go:build linux）。
-var (
-	_ = fmt.Sprintf // 保留 fmt 引用（平台文件使用）
-)
+// newPlatformSandbox 由平台文件提供实现（每平台恰好一个，见下）：
+//   - darwin:  macos.go（//go:build darwin）→ newMacOSSandbox
+//   - linux:   linux.go（//go:build linux）→ newLinuxSandbox
+//   - 其他:    sandbox_other.go（//go:build !darwin && !linux）→ NoopSandbox
+//
+// 注意：不使用 runtime.GOOS 的 switch 分派——那会让每个平台文件在编译期
+// 都引用另一平台的构造函数（未定义符号），导致各平台都无法编译。改为每个
+// 平台文件各自实现 newPlatformSandbox，Go 构建系统按 build tag 只选一个。
+// 若编译期报 "newPlatformSandbox undefined"，说明缺少对应平台文件。

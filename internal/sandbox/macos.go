@@ -20,6 +20,11 @@ type MacOSSandbox struct {
 	workDir      string // 可写目录
 }
 
+// newPlatformSandbox 创建 macOS 沙箱（构建分派入口，darwin 下实现）。
+func newPlatformSandbox(cfg Config) Sandbox {
+	return newMacOSSandbox(cfg)
+}
+
 // newMacOSSandbox 创建 macOS 沙箱，生成临时 profile 文件。
 func newMacOSSandbox(cfg Config) *MacOSSandbox {
 	s := &MacOSSandbox{
