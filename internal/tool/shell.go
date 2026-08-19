@@ -7,21 +7,29 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"agentic/internal/sandbox"
 )
 
 // ShellTool 执行 shell 命令。
 type ShellTool struct {
 	timeout time.Duration
+	sandbox sandbox.Sandbox // nil = 无沙箱（默认，向后兼容）
 }
 
-// NewShellTool 创建 Shell 工具，默认超时 30 秒。
+// NewShellTool 创建无沙箱 shell 工具（默认，向后兼容）。
 func NewShellTool() *ShellTool {
 	return &ShellTool{timeout: 30 * time.Second}
 }
 
+// NewShellToolWithSandbox 创建带沙箱的 shell 工具。
+func NewShellToolWithSandbox(sb sandbox.Sandbox) *ShellTool {
+	return &ShellTool{timeout: 30 * time.Second, sandbox: sb}
+}
+
 // ── Tool 接口：基础方法 ──
 
-func (t *ShellTool) Name() string    { return "shell" }
+func (t *ShellTool) Name() string      { return "shell" }
 func (t *ShellTool) Aliases() []string { return nil }
 
 func (t *ShellTool) Description() string {
@@ -36,6 +44,10 @@ func (t *ShellTool) Parameters() map[string]any {
 				"type":        "string",
 				"description": "要执行的 shell 命令",
 			},
+			"network": map[string]any{
+				"type":        "boolean",
+				"description": "是否需要网络访问（curl 等）。默认 false（沙箱禁止网络时需确认）",
+			},
 		},
 		"required": []string{"command"},
 	}
@@ -44,6 +56,7 @@ func (t *ShellTool) Parameters() map[string]any {
 func (t *ShellTool) Execute(args string) (string, error) {
 	var params struct {
 		Command string `json:"command"`
+		Network bool   `json:"network"`
 	}
 	if err := parseArgs(args, &params); err != nil {
 		return "", fmt.Errorf("parse args: %w", err)
@@ -56,6 +69,9 @@ func (t *ShellTool) Execute(args string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "bash", "-c", params.Command)
+	if t.sandbox != nil {
+		cmd = t.sandbox.Wrap(cmd)
+	}
 	output, err := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(output))
 
@@ -82,11 +98,21 @@ func (t *ShellTool) Execute(args string) (string, error) {
 // CheckPermission 检查 shell 命令是否需要用户确认。
 //
 // 策略：
+//   - 沙箱开启且请求 network=true → 需确认（网络访问是风险操作）
 //   - 包含危险命令模式（rm -rf、sudo、chmod 777 等）→ 需确认
 //   - 其他命令 → 直接允许
-//
-// 危险模式列表来自原有的 isDangerousShellCommand，现内移到工具自身。
 func (t *ShellTool) CheckPermission(args string) PermissionResult {
+	if t.sandbox != nil {
+		var params struct {
+			Network bool `json:"network"`
+		}
+		if err := parseArgs(args, &params); err == nil && params.Network {
+			return PermissionResult{
+				Allow:  false,
+				Reason: "需要网络访问，请确认",
+			}
+		}
+	}
 	if isDangerousShellCommand(args) {
 		return PermissionResult{
 			Allow:  false,

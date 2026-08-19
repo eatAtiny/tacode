@@ -6,11 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 
 	"agentic/internal/agent"
 	"agentic/internal/llm"
 	"agentic/internal/memory"
+	"agentic/internal/sandbox"
 	"agentic/internal/session"
 	"agentic/internal/tool"
 	"agentic/internal/ui"
@@ -77,6 +79,7 @@ func main() {
 	sessionID := flag.String("session", "", "resume a specific session by ID (optional)")
 	envFile := flag.String("env", ".env", "env file path")
 	oneShot := flag.String("one-shot", "", "run a single query and exit (headless, prints final answer)")
+	sandboxMode := flag.String("sandbox", "off", "sandbox mode: on (sandbox shell commands) / off (default)")
 	flag.Parse()
 
 	// ── 步骤 2: 加载 .env 文件 ──
@@ -161,7 +164,21 @@ func main() {
 	// List: 结构化目录列表，深度控制 + 排序输出。
 	// Git: 结构化 git 操作（status/diff/log/show/branch 只读 + add/commit/stash/checkout 需确认）。
 	tools := tool.NewRegistry()
-	tools.Register(tool.NewShellTool())
+	// shell 工具：默认无沙箱；-sandbox on 时启用平台沙箱（网络/文件系统隔离）。
+	if *sandboxMode == "on" {
+		sb := sandbox.NewSandbox(sandbox.Config{
+			AllowNetwork: false, // 默认拒绝网络（防外发），network:true 需确认
+			WorkDir:      "",    // 空 = cwd
+		})
+		if sandbox.IsActive(sb) {
+			tools.Register(tool.NewShellToolWithSandbox(sb))
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: sandbox requested but not supported on %s, continuing without sandbox\n", runtime.GOOS)
+			tools.Register(tool.NewShellTool())
+		}
+	} else {
+		tools.Register(tool.NewShellTool())
+	}
 	tools.Register(tool.NewFileTool())
 	tools.Register(tool.NewEditTool())
 	tools.Register(tool.NewGrepTool())
