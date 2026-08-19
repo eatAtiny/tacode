@@ -662,6 +662,12 @@ func (lc *queryLoopContext) checkToolPermission(tc llm.ToolCall, t tool.Tool, it
 		return false
 	}
 
+	// 用户确认通过：若工具支持放行接口（如 ShellTool 的 network 放行），
+	// 通知工具记录"已放行"，Execute 时据此重建允许网络/权限的沙箱。
+	if allow, ok := t.(interface{ AllowNetworkFor(args string) }); ok {
+		allow.AllowNetworkFor(tc.Arguments)
+	}
+
 	return true
 }
 

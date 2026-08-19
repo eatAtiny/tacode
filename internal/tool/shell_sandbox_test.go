@@ -51,3 +51,38 @@ func TestShellTool_NetworkPermission(t *testing.T) {
 		t.Error("network param should be ignored without sandbox")
 	}
 }
+
+func TestShellTool_NetworkApproval(t *testing.T) {
+	args := `{"command": "curl https://x.com", "network": true}`
+	st := NewShellToolWithSandbox(&mockSandbox{})
+
+	// 未确认 → 仍需确认。
+	if perm := st.CheckPermission(args); perm.Allow {
+		t.Error("network:true should require confirmation before approval")
+	}
+
+	// 确认放行（AllowNetworkFor 按原始 args JSON 记录）。
+	st.AllowNetworkFor(args)
+	if perm := st.CheckPermission(args); !perm.Allow {
+		t.Error("approved args should be allowed")
+	}
+
+	// 精确匹配：同命令不同 args JSON 不共享放行。
+	if perm := st.CheckPermission(`{"command":"curl https://x.com","network":true}`); perm.Allow {
+		t.Error("approval should be keyed by exact args string")
+	}
+
+	// 未请求 network 的命令不触发放行分支，也不应被放行状态影响。
+	st2 := NewShellToolWithSandbox(&mockSandbox{})
+	st2.AllowNetworkFor(args)
+	if perm := st2.CheckPermission(`{"command": "ls -la"}`); !perm.Allow {
+		t.Error("non-network command should still be allowed")
+	}
+
+	// 无沙箱工具调用 AllowNetworkFor 也应安全（map 惰性初始化）。
+	stPlain := NewShellTool()
+	stPlain.AllowNetworkFor(args)
+	if perm := stPlain.CheckPermission(`{"command": "curl https://x.com", "network": true}`); !perm.Allow {
+		t.Error("without sandbox, network param should be ignored even after AllowNetworkFor")
+	}
+}

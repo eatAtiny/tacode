@@ -13,18 +13,29 @@ import (
 
 // ShellTool 执行 shell 命令。
 type ShellTool struct {
-	timeout time.Duration
-	sandbox sandbox.Sandbox // nil = 无沙箱（默认，向后兼容）
+	timeout  time.Duration
+	sandbox  sandbox.Sandbox // nil = 无沙箱（默认，向后兼容）
+	approved map[string]bool // 已确认放行网络的 args（key=原始 args JSON）
 }
 
 // NewShellTool 创建无沙箱 shell 工具（默认，向后兼容）。
 func NewShellTool() *ShellTool {
-	return &ShellTool{timeout: 30 * time.Second}
+	return &ShellTool{timeout: 30 * time.Second, approved: make(map[string]bool)}
 }
 
 // NewShellToolWithSandbox 创建带沙箱的 shell 工具。
 func NewShellToolWithSandbox(sb sandbox.Sandbox) *ShellTool {
-	return &ShellTool{timeout: 30 * time.Second, sandbox: sb}
+	return &ShellTool{timeout: 30 * time.Second, sandbox: sb, approved: make(map[string]bool)}
+}
+
+// AllowNetworkFor 记录已确认放行网络的命令参数。
+// queryLoop 在用户确认 network:true 请求后调用，Execute 据此重建 allow-network 沙箱。
+// 这是 ShellTool 特有方法，通过类型断言被 queryLoop 发现。
+func (t *ShellTool) AllowNetworkFor(args string) {
+	if t.approved == nil {
+		t.approved = make(map[string]bool)
+	}
+	t.approved[args] = true
 }
 
 // ── Tool 接口：基础方法 ──
@@ -70,7 +81,16 @@ func (t *ShellTool) Execute(args string) (string, error) {
 
 	cmd := exec.CommandContext(ctx, "bash", "-c", params.Command)
 	if t.sandbox != nil {
-		cmd = t.sandbox.Wrap(cmd)
+		if params.Network && t.approved[args] {
+			// 用户已确认放行网络：重建 AllowNetwork:true 的沙箱。
+			// 注意：该临时沙箱的 Close() 不会被调用（仅 main.go 持有的原始沙箱会被关闭），
+			// 每次确认网络命令会泄漏一个临时 profile 文件（体积很小，OS 会清理 /tmp），
+			// 可接受；本任务不接线 per-command 沙箱的 Close。
+			sb := sandbox.NewSandbox(sandbox.Config{AllowNetwork: true})
+			cmd = sb.Wrap(cmd)
+		} else {
+			cmd = t.sandbox.Wrap(cmd)
+		}
 	}
 	output, err := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(output))
@@ -107,6 +127,10 @@ func (t *ShellTool) CheckPermission(args string) PermissionResult {
 			Network bool `json:"network"`
 		}
 		if err := parseArgs(args, &params); err == nil && params.Network {
+			// 已确认放行（AllowNetworkFor 已记录）→ 允许。
+			if t.approved[args] {
+				return PermissionResult{Allow: true}
+			}
 			return PermissionResult{
 				Allow:  false,
 				Reason: "需要网络访问，请确认",
