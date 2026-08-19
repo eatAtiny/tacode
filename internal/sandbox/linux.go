@@ -25,21 +25,27 @@ import (
 // 非 root 用户在开启 user namespaces 的发行版上获得网络隔离。
 //
 // 但 CLONE_NEWUSER 有一个关键陷阱：新 user namespace 的 uid_map/gid_map 初始
-// 为【空】。Go 只有在 cmd.SysProcAttr.Credential 非 nil 时才会写入单区间映射
-// "0 → (调用进程的 uid/gid)"；否则子进程的 uid 在内核内部无法映射，getuid()/
-// getgid() 返回 overflow id 65534（nobody），且对宿主文件系统的访问检查全部按
-// "未映射 uid" 处理——沙箱命令将无法读写用户目录下的任何文件，等于不可用。
-// 因此 Wrap 必须同时设置 Credential{Uid, Gid}（取当前进程的真实 uid/gid），
-// 让子进程成为"功能完整的 namespace root"：既能创建网络命名空间，又保有对
-// 用户自身文件的读写能力。这与 Docker/userns 沙箱的做法一致。
+// 为【空】，进程继承宿主 uid，但该 uid 在命名空间内未被映射——getuid()/
+// getgid() 返回 overflow id 65534（nobody），文件访问检查也按未映射 uid
+// 处理，沙箱命令将无法读写用户目录下的任何文件。因此必须【显式写入映射】：
+// 把容器内 uid 0 映射到宿主真实 uid/gid（"0 → 当前用户"），使子进程成为
+// 功能完整的 namespace root——既能创建网络命名空间，又保有对用户自身文件的
+// 读写能力。这与 Docker/userns 沙箱的做法一致。
+//
+// 写入映射的机制（Go 运行时）：syscall/exec_linux.go 只有在
+// SysProcAttr.UidMappings / GidMappings 非 nil 时才向 /proc/PID/uid_map、
+// gid_map 写映射（forkAndExecInChild 的父/子两侧协调完成）。注意
+// SysProcAttr.Credential 不触发映射写入——它只做 setgroups/setgid/setuid，
+// 而空映射下 setuid 会 EPERM。另外非特权用户写 gid_map 前必须先把
+// setgroups 写为 deny（GidMappingsEnableSetgroups=false 即满足）。
 //
 // 边界情况：
 //   - 以 root 运行时不需要 user namespace，但加上也无害（root 可直接 CLONE_NEWNET）。
 //   - 内核/发行版禁用 unprivileged user namespaces 时（如 Ubuntu 24.04 的
 //     AppArmor 限制、kernel.unprivileged_userns_clone=0），clone(2) 返回 EPERM，
 //     命令启动失败——错误对调用方可见，不会静默放行（fail-closed）。
-//   - 若调用方已设置 SysProcAttr（如 Credential 指向别的 uid），保留其字段，
-//     只合并 Cloneflags，避免覆盖其他配置。
+//   - 若调用方已设置 SysProcAttr（如已有 Cloneflags 或 Credential），保留其
+//     字段，只合并 Cloneflags，避免覆盖其他配置。
 //
 // ── 文件系统隔离的局限性说明（为什么 v1 不实现 Landlock） ──
 //
@@ -95,17 +101,23 @@ func (s *LinuxSandbox) Wrap(cmd *exec.Cmd) *exec.Cmd {
 		}
 		cmd.SysProcAttr.Cloneflags |= syscall.CLONE_NEWNET | syscall.CLONE_NEWUSER
 
-		// 为 CLONE_NEWUSER 提供 uid/gid 映射：让 Go 写入单区间映射
-		// "0 → 当前用户"，使子进程成为功能完整的 namespace root（否则
-		// 空映射下一切文件访问都失败）。取当前进程真实 uid/gid，因为
-		// 父进程就是执行 shell 命令的用户。
-		if cmd.SysProcAttr.Credential == nil {
-			cmd.SysProcAttr.Credential = &syscall.Credential{
-				Uid: uint32(os.Getuid()),
-				Gid: uint32(os.Getgid()),
-				// 避免 setgroups：单区间映射下附加组会带来权限不确定性。
-				NoSetGroups: true,
+		// 为 CLONE_NEWUSER 显式写 uid/gid 映射：容器内 uid 0 映射到宿主
+		// 真实 uid/gid，使子进程成为功能完整的 namespace root（否则空映射
+		// 下 getuid()=65534，一切文件访问失败）。取当前进程真实 uid/gid，
+		// 因为父进程就是执行 shell 命令的用户。仅当调用方未自定义映射时
+		// 才写入，避免覆盖已有配置。
+		if cmd.SysProcAttr.UidMappings == nil {
+			cmd.SysProcAttr.UidMappings = []syscall.SysProcIDMap{
+				{ContainerID: 0, HostID: os.Getuid(), Size: 1},
 			}
+		}
+		if cmd.SysProcAttr.GidMappings == nil {
+			cmd.SysProcAttr.GidMappings = []syscall.SysProcIDMap{
+				{ContainerID: 0, HostID: os.Getgid(), Size: 1},
+			}
+			// 非特权用户写 gid_map 前必须先把 setgroups 置为 deny
+			// （写 gid_map 后该命名空间内 setgroups(2) 永久禁用）。
+			cmd.SysProcAttr.GidMappingsEnableSetgroups = false
 		}
 	}
 	return cmd
