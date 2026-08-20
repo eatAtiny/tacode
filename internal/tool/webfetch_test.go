@@ -1,8 +1,12 @@
 package tool
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExtractMetadata_Title(t *testing.T) {
@@ -164,5 +168,164 @@ func TestConvertAndFormat_UnsupportedContentType(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "不支持的 Content-Type") {
 		t.Errorf("error message wrong: %v", err)
+	}
+}
+
+func TestExecute_HTML(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<html><head><title>Test</title></head><body><h1>Hi</h1></body></html>`)
+	}))
+	defer server.Close()
+
+	tl := NewWebFetchTool()
+	out, err := tl.Execute(fmt.Sprintf(`{"url": %q}`, server.URL))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "Title: Test") {
+		t.Errorf("missing title: %q", out)
+	}
+	if !strings.Contains(out, "Hi") {
+		t.Errorf("missing body: %q", out)
+	}
+}
+
+func TestExecute_EmptyURL(t *testing.T) {
+	tl := NewWebFetchTool()
+	_, err := tl.Execute(`{"url": ""}`)
+	if err == nil {
+		t.Error("expected error for empty url")
+	}
+}
+
+func TestExecute_InvalidURL(t *testing.T) {
+	tl := NewWebFetchTool()
+	_, err := tl.Execute(`{"url": "example.com"}`)
+	if err == nil || !strings.Contains(err.Error(), "http://") {
+		t.Errorf("expected scheme error, got: %v", err)
+	}
+}
+
+func TestExecute_404(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	tl := NewWebFetchTool()
+	_, err := tl.Execute(fmt.Sprintf(`{"url": %q}`, server.URL))
+	if err == nil || !strings.Contains(err.Error(), "404") {
+		t.Errorf("expected 404 error, got: %v", err)
+	}
+}
+
+func TestExecute_500(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	tl := NewWebFetchTool()
+	_, err := tl.Execute(fmt.Sprintf(`{"url": %q}`, server.URL))
+	if err == nil || !strings.Contains(err.Error(), "500") {
+		t.Errorf("expected 500 error, got: %v", err)
+	}
+}
+
+func TestExecute_Redirect(t *testing.T) {
+	final := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "redirected")
+	}))
+	defer final.Close()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, final.URL, http.StatusFound)
+	}))
+	defer server.Close()
+
+	tl := NewWebFetchTool()
+	out, err := tl.Execute(fmt.Sprintf(`{"url": %q}`, server.URL))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != "redirected" {
+		t.Errorf("output = %q, want %q", out, "redirected")
+	}
+}
+
+func TestExecute_TooManyRedirects(t *testing.T) {
+	// 构造循环重定向：A → B → A → B → ...
+	// 用共享指针延迟绑定 URL，避免前向引用。
+	var target string
+	serverB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target, http.StatusFound)
+	}))
+	defer serverB.Close()
+
+	serverA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, serverB.URL, http.StatusFound)
+	}))
+	defer serverA.Close()
+
+	// 现在 serverB 反向指向 serverA，形成循环。
+	target = serverA.URL
+
+	tl := NewWebFetchTool()
+	_, err := tl.Execute(fmt.Sprintf(`{"url": %q}`, serverA.URL))
+	if err == nil || !strings.Contains(err.Error(), "重定向") {
+		t.Errorf("expected redirect error, got: %v", err)
+	}
+}
+
+func TestExecute_LargeResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		// 写 6MB 数据
+		buf := make([]byte, 6*1024*1024)
+		w.Write(buf)
+	}))
+	defer server.Close()
+
+	tl := NewWebFetchTool()
+	_, err := tl.Execute(fmt.Sprintf(`{"url": %q}`, server.URL))
+	if err == nil || !strings.Contains(err.Error(), "过大") {
+		t.Errorf("expected large response error, got: %v", err)
+	}
+}
+
+func TestExecute_MaxChars(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, strings.Repeat("a", 1000))
+	}))
+	defer server.Close()
+
+	tl := NewWebFetchTool()
+	out, err := tl.Execute(fmt.Sprintf(`{"url": %q, "max_chars": 100}`, server.URL))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "已截断") {
+		t.Errorf("expected truncation marker, got len=%d", len(out))
+	}
+	if len(out) > 200 {
+		t.Errorf("output too long: %d chars", len(out))
+	}
+}
+
+func TestExecute_Timeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timeout test in short mode")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(35 * time.Second)
+	}))
+	defer server.Close()
+
+	tl := NewWebFetchTool()
+	_, err := tl.Execute(fmt.Sprintf(`{"url": %q}`, server.URL))
+	if err == nil {
+		t.Error("expected timeout error")
 	}
 }
