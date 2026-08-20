@@ -21,7 +21,7 @@ Agent 目前只能通过 `shell` 工具调用 `curl`/`wget` 抓取网页，输�
 | 最大响应体 | 5MB（防止意外下载大文件） |
 | 重定向 | 跟随最多 5 次 |
 | 结果上限 | `ResultLimit` = 16000 字符（与 shell 对齐） |
-| 元数据提取 | `<title>` 优先 + `<meta name="description">` + `<meta property="og:title/description">` |
+| 元数据提取 | `<title>` 优先（fallback `<meta property="og:title">`）；`<meta name="description">` 优先（fallback `<meta property="og:description">`） |
 
 ## 架构
 
@@ -53,12 +53,12 @@ WebFetchTool
   },
   "max_chars": {
     "type": "integer",
-    "description": "返回内容的最大字符数（默认 50000，超出会用 ResultLimit 截断）"
+    "description": "返回内容的最大字符数（默认 16000，与 ResultLimit 对齐；上限也是 16000，框架统一截断）"
   }
 }
 ```
 
-`url` 必填；`max_chars` 可选，不填则用 `ResultLimit`。
+`url` 必填；`max_chars` 可选，默认 16000（与 `ResultLimit` 对齐），上限也是 16000。
 
 ## 输出格式
 
