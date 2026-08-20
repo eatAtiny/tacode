@@ -329,3 +329,77 @@ func TestExecute_Timeout(t *testing.T) {
 		t.Error("expected timeout error")
 	}
 }
+
+func TestWebFetch_Name(t *testing.T) {
+	tl := NewWebFetchTool()
+	if tl.Name() != "webfetch" {
+		t.Errorf("Name() = %q, want %q", tl.Name(), "webfetch")
+	}
+}
+
+func TestWebFetch_Description(t *testing.T) {
+	tl := NewWebFetchTool()
+	desc := tl.Description()
+	if desc == "" {
+		t.Error("Description() is empty")
+	}
+	if !strings.Contains(desc, "Markdown") {
+		t.Errorf("Description should mention Markdown: %q", desc)
+	}
+}
+
+func TestWebFetch_Parameters(t *testing.T) {
+	tl := NewWebFetchTool()
+	params := tl.Parameters()
+	if params["type"] != "object" {
+		t.Errorf("Parameters type = %v, want object", params["type"])
+	}
+	props, ok := params["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("properties not a map")
+	}
+	if _, ok := props["url"]; !ok {
+		t.Error("missing url parameter")
+	}
+}
+
+func TestWebFetch_CheckPermission(t *testing.T) {
+	tl := NewWebFetchTool()
+	args := []string{
+		`{"url": "https://example.com"}`,
+		`{"url": "http://localhost:8080"}`,
+		``,
+		`{invalid json`,
+	}
+	for _, arg := range args {
+		result := tl.CheckPermission(arg)
+		if !result.Allow {
+			t.Errorf("CheckPermission(%q) = Allow=false, want true", arg)
+		}
+	}
+}
+
+func TestWebFetch_PromptGuide(t *testing.T) {
+	tl := NewWebFetchTool()
+	guide := tl.PromptGuide()
+	if guide == "" {
+		t.Error("PromptGuide() is empty")
+	}
+}
+
+func TestWebFetch_Concurrency(t *testing.T) {
+	tl := NewWebFetchTool()
+	if !tl.IsConcurrencySafe(`{"url": "https://example.com"}`) {
+		t.Error("IsConcurrencySafe() should be true")
+	}
+	if !tl.IsReadOnly(`{"url": "https://example.com"}`) {
+		t.Error("IsReadOnly() should be true")
+	}
+}
+
+func TestWebFetch_ResultLimit(t *testing.T) {
+	tl := NewWebFetchTool()
+	if tl.ResultLimit() != 16000 {
+		t.Errorf("ResultLimit() = %d, want 16000", tl.ResultLimit())
+	}
+}
