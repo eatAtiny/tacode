@@ -83,3 +83,86 @@ func TestFormatOutput_Truncate(t *testing.T) {
 		t.Errorf("expected truncation marker, got: %q", out)
 	}
 }
+
+func TestConvertAndFormat_HTML(t *testing.T) {
+	tl := NewWebFetchTool()
+	html := `<html><head><title>T</title></head><body><h1>Hello</h1><p>World</p></body></html>`
+	out, err := tl.convertAndFormat("text/html; charset=utf-8", []byte(html), 16000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "Title: T") {
+		t.Errorf("missing title: %q", out)
+	}
+	if !strings.Contains(out, "Hello") || !strings.Contains(out, "World") {
+		t.Errorf("missing body: %q", out)
+	}
+	// html-to-markdown 不输出原始 HTML 标签
+	if strings.Contains(out, "<h1>") || strings.Contains(out, "<p>") {
+		t.Errorf("raw HTML tags not converted: %q", out)
+	}
+}
+
+func TestConvertAndFormat_HTML_StripScript(t *testing.T) {
+	tl := NewWebFetchTool()
+	html := `<html><head><title>Page</title>
+		<script>alert('xss')</script>
+	</head><body><p>visible text</p></body></html>`
+	out, err := tl.convertAndFormat("text/html", []byte(html), 16000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(out, "alert(") || strings.Contains(out, "<script>") {
+		t.Errorf("script not stripped: %q", out)
+	}
+	if !strings.Contains(out, "visible text") {
+		t.Errorf("missing body: %q", out)
+	}
+}
+
+func TestConvertAndFormat_JSON(t *testing.T) {
+	tl := NewWebFetchTool()
+	body := `{"hello": "world"}`
+	out, err := tl.convertAndFormat("application/json", []byte(body), 16000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != body {
+		t.Errorf("output = %q, want %q", out, body)
+	}
+}
+
+func TestConvertAndFormat_PlainText(t *testing.T) {
+	tl := NewWebFetchTool()
+	body := "just plain text"
+	out, err := tl.convertAndFormat("text/plain", []byte(body), 16000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != body {
+		t.Errorf("output = %q, want %q", out, body)
+	}
+}
+
+func TestConvertAndFormat_Markdown(t *testing.T) {
+	tl := NewWebFetchTool()
+	body := "# Heading\n\ntext"
+	out, err := tl.convertAndFormat("text/markdown", []byte(body), 16000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != body {
+		t.Errorf("output = %q, want %q", out, body)
+	}
+}
+
+func TestConvertAndFormat_UnsupportedContentType(t *testing.T) {
+	tl := NewWebFetchTool()
+	_, err := tl.convertAndFormat("image/png", []byte{0x89, 0x50}, 16000)
+	if err == nil {
+		t.Error("expected error for unsupported content-type")
+	}
+	if !strings.Contains(err.Error(), "不支持的 Content-Type") {
+		t.Errorf("error message wrong: %v", err)
+	}
+}
