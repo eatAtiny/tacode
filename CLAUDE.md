@@ -95,7 +95,7 @@ Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncat
 
 - `tool.Tool` is one of two interfaces — implements `Name()`, `Description()`, `Parameters()`, `Execute()`.
 - `tool.Registry` manages registration and generates OpenAI function-calling definitions.
-- Built-in tools: `shell` (bash, 30s timeout), `file` (read/write, 8KB read cap), `edit` (search-and-replace), `grep`, `list`, and `git` (status/diff/log/show/branch read-only + add/commit/stash/checkout requiring confirmation).
+- Built-in tools: `shell` (bash, 30s timeout), `file` (read/write, 8KB read cap), `edit` (search-and-replace), `grep`, `list`, `git` (status/diff/log/show/branch read-only + add/commit/stash/checkout requiring confirmation), and `webfetch` (HTTP GET → Markdown + page metadata, 30s timeout, 5MB body cap, 5 redirect limit).
 - To add a new tool: implement `tool.Tool`, register it in `main.go`.
 
 ### UI System
