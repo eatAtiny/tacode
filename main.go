@@ -195,6 +195,8 @@ func main() {
 	tools.Register(tool.NewGrepTool())
 	tools.Register(tool.NewListTool())
 	tools.Register(tool.NewGitTool())
+	// webfetch 工具：抓取网页（HTML→Markdown + 提取元信息），仅 GET，默认放行。
+	tools.Register(tool.NewWebFetchTool())
 
 	// ── 步骤 10b: MCP server 连接 ──
 	// -mcp-server flag 指定的外部 MCP server（如 mcp-server-fetch 提供 WebFetch）。
