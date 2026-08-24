@@ -95,6 +95,68 @@ func TestFindProjectInstructions_BareVariant(t *testing.T) {
 	}
 }
 
+func TestFindProjectInstructions_CLAUDE_MD(t *testing.T) {
+	root := t.TempDir()
+	mkdirGitRoot(t, root)
+	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("claude instructions"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	path, content, err := findProjectInstructions(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.HasSuffix(path, "CLAUDE.md") {
+		t.Errorf("should find CLAUDE.md, got %s", path)
+	}
+	if content != "claude instructions" {
+		t.Errorf("content mismatch, got %q", content)
+	}
+}
+
+func TestFindProjectInstructions_ClaudePriorityOverAgents(t *testing.T) {
+	root := t.TempDir()
+	mkdirGitRoot(t, root)
+	// CLAUDE.md 与 AGENTS.md 共存时，CLAUDE.md 优先（与 Claude Code 习惯一致）。
+	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("from claude"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("from agents"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	path, content, err := findProjectInstructions(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.HasSuffix(path, "CLAUDE.md") {
+		t.Errorf("CLAUDE.md should take priority over AGENTS.md, got %s", path)
+	}
+	if content != "from claude" {
+		t.Errorf("content mismatch, got %q", content)
+	}
+}
+
+func TestFindProjectInstructions_CursorRulesFallback(t *testing.T) {
+	root := t.TempDir()
+	mkdirGitRoot(t, root)
+	// 无 CLAUDE.md / AGENTS 时，.cursorrules 作为最后候选。
+	if err := os.WriteFile(filepath.Join(root, ".cursorrules"), []byte("cursor rules"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	path, content, err := findProjectInstructions(root)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.HasSuffix(path, ".cursorrules") {
+		t.Errorf("should fall back to .cursorrules, got %s", path)
+	}
+	if content != "cursor rules" {
+		t.Errorf("content mismatch, got %q", content)
+	}
+}
+
 func TestTruncateProjectInstr(t *testing.T) {
 	small := strings.Repeat("a", 100)
 	if got := truncateProjectInstr(small); got != small {
@@ -178,6 +240,129 @@ func TestRetriever_BuildContext_NoInstructions(t *testing.T) {
 	}
 	if ctx != "" {
 		t.Errorf("empty repo should yield empty context, got %q", ctx)
+	}
+}
+
+func TestRetriever_BuildContext_ProjectMemory(t *testing.T) {
+	root := t.TempDir()
+	mkdirGitRoot(t, root)
+	r := newTestRetriever(t, root)
+
+	// 项目级记忆 store 指向独立目录，写入一条 project 类记忆。
+	projectRoot := t.TempDir()
+	projectMem, err := NewMemoryStore(projectRoot)
+	if err != nil {
+		t.Fatalf("NewMemoryStore failed: %v", err)
+	}
+	if err := projectMem.SaveEntry(MemoryEntry{
+		Name:        "project-convention",
+		Description: "项目约定：用中文注释",
+		Type:        "project",
+		Importance:  4,
+		Content:     "所有代码注释和文档用中文",
+	}); err != nil {
+		t.Fatalf("SaveEntry failed: %v", err)
+	}
+	r.SetProjectMemory(projectMem)
+
+	ctx, err := r.BuildContext("test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(ctx, "## 项目记忆索引") {
+		t.Error("BuildContext should contain project memory index section")
+	}
+	if !strings.Contains(ctx, "## 项目重要记忆") {
+		t.Error("BuildContext should contain project important memories section")
+	}
+	if !strings.Contains(ctx, "项目约定：用中文注释") {
+		t.Error("BuildContext should contain project memory content")
+	}
+	// 无项目指令时，项目记忆应在最前。
+	if !strings.HasPrefix(ctx, "## 项目记忆索引") {
+		t.Errorf("project memory should be first section without project instructions, got %q", ctx[:min(30, len(ctx))])
+	}
+}
+
+func TestRetriever_BuildContext_GlobalMemory(t *testing.T) {
+	root := t.TempDir()
+	mkdirGitRoot(t, root)
+	r := newTestRetriever(t, root)
+
+	// 全局记忆 store 指向独立目录，写入一条 user 类记忆。
+	globalRoot := t.TempDir()
+	globalMem, err := NewMemoryStore(globalRoot)
+	if err != nil {
+		t.Fatalf("NewMemoryStore failed: %v", err)
+	}
+	if err := globalMem.SaveEntry(MemoryEntry{
+		Name:        "user-language-pref",
+		Description: "用户偏好：中文回答",
+		Type:        "user",
+		Importance:  4,
+		Content:     "用户喜欢用中文回复",
+	}); err != nil {
+		t.Fatalf("SaveEntry failed: %v", err)
+	}
+	r.SetGlobalMemory(globalMem)
+
+	ctx, err := r.BuildContext("test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(ctx, "## 全局记忆索引") {
+		t.Error("BuildContext should contain global memory index section")
+	}
+	if !strings.Contains(ctx, "## 全局重要记忆") {
+		t.Error("BuildContext should contain global important memories section")
+	}
+	if !strings.Contains(ctx, "用户偏好：中文回答") {
+		t.Error("BuildContext should contain global memory content")
+	}
+}
+
+func TestRetriever_BuildContext_MemoryLayersOrder(t *testing.T) {
+	// 三级记忆顺序：项目指令 → 项目记忆 → 全局记忆 → 会话记忆。
+	root := t.TempDir()
+	mkdirGitRoot(t, root)
+	r := newTestRetriever(t, root)
+
+	// 项目记忆。
+	projectMem, _ := NewMemoryStore(t.TempDir())
+	_ = projectMem.SaveEntry(MemoryEntry{Name: "p1", Description: "项目约定", Type: "project", Importance: 4, Content: "x"})
+	r.SetProjectMemory(projectMem)
+
+	// 全局记忆。
+	globalMem, _ := NewMemoryStore(t.TempDir())
+	_ = globalMem.SaveEntry(MemoryEntry{Name: "g1", Description: "用户偏好", Type: "user", Importance: 4, Content: "y"})
+	r.SetGlobalMemory(globalMem)
+
+	ctx, err := r.BuildContext("test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	projIdx := strings.Index(ctx, "## 项目记忆索引")
+	globalIdx := strings.Index(ctx, "## 全局记忆索引")
+	if projIdx < 0 || globalIdx < 0 {
+		t.Fatalf("both layers should appear, project=%d global=%d", projIdx, globalIdx)
+	}
+	if projIdx > globalIdx {
+		t.Error("project memory should come before global memory")
+	}
+}
+
+func TestRetriever_BuildContext_GlobalMemory_NotEnabled(t *testing.T) {
+	// 未设置全局记忆时行为与旧版一致：不含全局记忆段。
+	root := t.TempDir()
+	mkdirGitRoot(t, root)
+	r := newTestRetriever(t, root)
+
+	ctx, err := r.BuildContext("test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(ctx, "全局记忆") {
+		t.Errorf("global memory should not appear when not enabled, got %q", ctx)
 	}
 }
 

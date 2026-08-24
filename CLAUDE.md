@@ -17,6 +17,7 @@ go run . -session <id>                   # resume a specific session
 go run . -env .env                       # custom env file path
 go run . -one-shot "列出当前目录文件"     # headless 单次运行，输出最终答案后退出
 go run . -sandbox on                  # 启用 shell 沙箱（网络/文件系统隔离，macOS/Linux）
+go run . -config config.yaml          # 加载配置文件（temperature/max_iterations/result_limit/compress_threshold/context_limit，参考 config.example.yaml）
 go run . -mcp-server "fetch@npx -y @modelcontextprotocol/server-fetch"   # 连接 MCP server（WebFetch）
 go test ./...                            # run all tests
 ```
@@ -79,17 +80,26 @@ main.go
 | L2 | `SummaryStore` | `summaries.jsonl` | LLM-extracted per-round summaries |
 | L3 | `MemoryStore` | `memory/*.md` | Structured long-term memory (frontmatter + content) |
 
+L3 memory is split into **three tiers** (extraction routes by `type`):
+- **Global** `data/global-memory/memory/` — `user`/`feedback` entries (cross-project preferences)
+- **Project** `data/project-memory/memory/` — `project`/`reference` entries (cross-session, project-specific)
+- **Session** — no L3 files (conversation details live in L2 summaries + EventStore)
+
+`MigrateLegacyMemory` (idempotent, runs at startup) relocates legacy session/global memory files to the right tier.
+
 Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncated (truth source).
 
 **Context building** (`Retriever.BuildContext`):
-0. Project instructions (AGENTS.md, cached at startup, `/reload` to refresh)
-1. L3 memory index + high-importance memories
+0. Project instructions (CLAUDE.md/AGENTS.md/.cursorrules, cached at startup, `/reload` to refresh)
+0.5. Project memory (`data/project-memory/`, project/reference entries, cross-session)
+0.6. Global memory (`data/global-memory/`, user entries, cross-project)
+1. Session L3 memory index + high-importance memories
 2. L2 recent summaries (last 10)
 3. Fallback: L2 → EventStore digest → HistoryStore digest
 
-**Auto-compression**: When estimated tokens exceed 80% of model context window, LLM merges old L2 summaries (keeps newest 3). In-loop message compression preserves system prompt + last 2 tool rounds, compresses older ones.
+**Auto-compression**: When estimated tokens exceed 80% of model context window, LLM merges old L2 summaries (keeps newest 3). In-loop message compression preserves system prompt + last 2 tool rounds, persists compressed tool results to `tool-results/` (readable via file read), compresses older ones.
 
-**Memory extraction** (`Extractor`): One LLM call per round extracts both L2 summary and L3 memory actions (create/update/delete).
+**Memory extraction** (`Extractor`): One LLM call per round extracts both L2 summary and L3 memory actions (create/update/delete). `user`/`feedback` memories go to global store (`data/global-memory/`), `project`/`reference` go to project store (`data/project-memory/`).
 
 ### Tool System
 
@@ -135,6 +145,7 @@ Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncat
 | `/memory` | List L3 memories |
 | `/memory add <content>` | Add L3 memory |
 | `/memory rm <name>` | Delete L3 memory |
+| `/interrupt` | During tool execution: abort remaining tools, let LLM adjust (mid-loop) |
 | `/stop` | Cancel running query |
 | `exit` | Quit |
 

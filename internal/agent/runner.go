@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"agentic/internal/config"
 	"agentic/internal/llm"
 	"agentic/internal/memory"
 	"agentic/internal/session"
@@ -14,6 +15,7 @@ import (
 )
 
 // ReAct 最大循环次数，防止无限循环。
+// 可通过 config（MaxIterations）覆盖；无 config 时保持 10。
 const maxIterations = 10
 
 // ──────────────────────────────────────────────────────────
@@ -55,13 +57,16 @@ type Runner struct {
 	llm       *llm.OpenAIClient       // LLM 客户端
 	history   *memory.HistoryStore    // L1 原始对话日志
 	summary   *memory.SummaryStore    // L2 摘要
-	memStore  *memory.MemoryStore     // L3 结构化记忆
-	events    *memory.EventStore      // 事件日志
+	memStore   *memory.MemoryStore    // L3 会话级结构化记忆（feedback 类，三级最内层）
+	globalMem  *memory.MemoryStore    // L3 全局记忆（user 类，跨项目），nil = 未启用
+	projectMem *memory.MemoryStore    // L3 项目级记忆（project/reference 类，跨会话），nil = 未启用
+	events     *memory.EventStore     // 事件日志
 	extractor *memory.Extractor       // 记忆提取器
 	retriever *memory.Retriever       // 记忆检索器
 	tools     *tool.Registry          // 工具注册表
 	sessions  *session.SessionManager // 会话管理器
 	ui        ui.UI                   // UI 接口
+	config    *config.Config          // 运行时配置（nil = 全部默认）
 
 	isTemporary        bool   // 临时会话：启动时创建，有对话后才落盘
 	tempID             string // 临时会话 ID
@@ -105,6 +110,54 @@ func NewRunner(
 		sessions:  sessions,
 		ui:        uiInstance,
 	}
+}
+
+// SetConfig 注入运行时配置。
+// 配置为 nil 时全部使用代码默认值（行为与未配置时完全一致）。
+// 通常在 NewRunner 之后、Run/RunOnce 之前调用。
+func (r *Runner) SetConfig(cfg *config.Config) {
+	r.config = cfg
+}
+
+// SetMemoryStores 注入全局与项目级记忆 store（三级记忆的外两层）。
+//   - globalStore: 全局记忆（user 类，跨项目），extractMemory 写入 user/feedback
+//   - projectStore: 项目级记忆（project/reference 类，跨会话），extractMemory 写入 project/reference
+//
+// 同时同步到 Retriever，使 BuildContext 合并这两层记忆。
+func (r *Runner) SetMemoryStores(globalStore, projectStore *memory.MemoryStore) {
+	r.globalMem = globalStore
+	r.projectMem = projectStore
+	if r.retriever != nil {
+		r.retriever.SetGlobalMemory(globalStore)
+		r.retriever.SetProjectMemory(projectStore)
+	}
+}
+
+// maxIter 返回 ReAct 最大循环次数。
+// 优先使用 config 中的显式设置，否则回退到代码默认 10。
+func (r *Runner) maxIter() int {
+	if r.config != nil && r.config.MaxIterations != nil {
+		return *r.config.MaxIterations
+	}
+	return maxIterations
+}
+
+// resultLimit 返回工具结果截断上限（字符数）。
+// 优先使用 config 中的显式设置，否则回退到代码默认 8000。
+func (r *Runner) resultLimit() int {
+	if r.config != nil && r.config.ResultLimit != nil {
+		return *r.config.ResultLimit
+	}
+	return defaultResultLimit
+}
+
+// compressThreshold 返回上下文压缩阈值（token 使用率）。
+// 优先使用 config 中的显式设置，否则回退到代码默认 0.8。
+func (r *Runner) compressThreshold() float64 {
+	if r.config != nil && r.config.CompressThreshold != nil {
+		return *r.config.CompressThreshold
+	}
+	return defaultCompressThreshold
 }
 
 // Run 进入交互循环：读用户输入 -> QueryEngine -> 保存记忆。
@@ -283,7 +336,7 @@ func (r *Runner) Run(ctx context.Context) error {
 					}
 					r.extractMemory(ctx, round, input, answer)
 					if r.isTemporary {
-						if err := r.ensurePersisted(); err != nil {
+						if err := r.ensurePersisted(input); err != nil {
 							r.ui.OnError(fmt.Errorf("保存会话失败: %v", err))
 						}
 					}
@@ -379,7 +432,7 @@ func (r *Runner) RunOnce(ctx context.Context, input string) (string, error) {
 	}
 	r.extractMemory(ctx, 1, input, answer)
 	if r.isTemporary {
-		if err := r.ensurePersisted(); err != nil {
+		if err := r.ensurePersisted(input); err != nil {
 			return "", fmt.Errorf("保存会话失败: %w", err)
 		}
 	}

@@ -6,11 +6,20 @@ import (
 	"os"
 	"strings"
 
+	"agentic/internal/config"
+
 	openai "github.com/sashabaranov/go-openai"
 )
 
 // 默认模型，可通过 OPENAI_MODEL 覆盖。
 const defaultModel = openai.GPT4oMini
+
+// defaultTemperature 默认采样温度（硬编码 0.2 的旧值，可通过 config 覆盖）。
+const defaultTemperature = 0.2
+
+// unknownModelContextLimit 未识别模型的保守上下文窗口默认值（32k）。
+// 保守值避免误判大窗口导致压缩过晚（128k 乐观假设的风险）。
+const unknownModelContextLimit = 32_000
 
 // ──────────────────────────────────────────────────────────
 // OpenAIClient — OpenAI API 封装
@@ -35,6 +44,7 @@ type OpenAIClient struct {
 	client       *openai.Client // go-openai 原始客户端
 	model        string         // 模型名称（如 gpt-4o-mini）
 	contextLimit int            // 模型上下文窗口大小（token 数），用于压缩判断
+	temperature  float64        // 采样温度，默认 0.2（可由 config 覆盖）
 }
 
 // NewOpenAIClientFromEnv 从环境变量初始化客户端。
@@ -65,6 +75,7 @@ func NewOpenAIClientFromEnv() (*OpenAIClient, error) {
 		client:       openai.NewClientWithConfig(config),
 		model:        model,
 		contextLimit: contextLimit,
+		temperature:  defaultTemperature,
 	}, nil
 }
 
@@ -73,7 +84,7 @@ func NewOpenAIClientFromEnv() (*OpenAIClient, error) {
 // ──────────────────────────────────────────────────────────
 
 // Chat 执行一次最小对话请求（system + user），返回完整文本。
-// temperature 固定 0.2。用于 Extractor 和 Retriever 的 LLM 调用。
+// temperature 默认 0.2（可由 config 覆盖）。用于 Extractor 和 Retriever 的 LLM 调用。
 func (c *OpenAIClient) Chat(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
 	// 带重试的对话请求：429/5xx/网络错误自动重试（最多 defaultMaxRetries 次）。
 	resp, err := withRetry(ctx, defaultMaxRetries, func() (openai.ChatCompletionResponse, error) {
@@ -83,7 +94,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, systemPrompt, userPrompt string
 				{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
 				{Role: openai.ChatMessageRoleUser, Content: userPrompt},
 			},
-			Temperature: 0.2,
+			Temperature: float32(c.temperature),
 		})
 	})
 	if err != nil {
@@ -182,7 +193,7 @@ func (c *OpenAIClient) ChatWithTools(ctx context.Context, messages []ChatMessage
 	req := openai.ChatCompletionRequest{
 		Model:       c.model,
 		Messages:    msgs,
-		Temperature: 0.2,
+		Temperature: float32(c.temperature),
 	}
 	if len(tools) > 0 {
 		req.Tools = tools
@@ -286,8 +297,12 @@ func (c *OpenAIClient) ChatWithToolsStream(ctx context.Context, messages []ChatM
 		req := openai.ChatCompletionRequest{
 			Model:       c.model,
 			Messages:    msgs,
-			Temperature: 0.2,
+			Temperature: float32(c.temperature),
 			Stream:      true, // 启用流式
+			// 流式响应默认不返回 usage 字段（token 统计恒 0）。
+			// include_usage=true 让最后一个 chunk 携带完整 token 统计，
+			// 供 queryLoop 累计输入/输出 token 与精确压缩判断。
+			StreamOptions: &openai.StreamOptions{IncludeUsage: true},
 		}
 		if len(tools) > 0 {
 			req.Tools = tools
@@ -417,10 +432,30 @@ func (c *OpenAIClient) ContextLimit() int {
 	return c.contextLimit
 }
 
+// Temperature 返回当前采样温度。
+func (c *OpenAIClient) Temperature() float64 {
+	return c.temperature
+}
+
+// SetConfig 应用 config 中的 LLM 相关设置。
+// 仅覆盖显式设置的字段；nil / 零值保持当前值不变。
+func (c *OpenAIClient) SetConfig(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	if cfg.ContextLimit != nil {
+		c.contextLimit = *cfg.ContextLimit
+	}
+	if cfg.Temperature != nil {
+		c.temperature = *cfg.Temperature
+	}
+}
+
 // inferContextLimit 根据模型名称推断上下文窗口大小。
 //
 // 支持 OPENAI_CONTEXT_LIMIT 环境变量覆盖（优先级最高）。
-// 未识别的模型默认使用 128k。
+// 未识别的模型使用保守默认值（32k）——乐观假设大窗口会导致压缩过晚，
+// 保守值牺牲一点容量换取安全（配合 config 的 context_limit 可精确覆盖）。
 //
 // 支持的模型家族：
 //   - MiMo (小米): mimo-v2.5-pro → 1M, mimo-v2-omni → 256k
@@ -477,6 +512,6 @@ func inferContextLimit(model string) int {
 		return 200_000
 
 	default:
-		return 128_000
+		return unknownModelContextLimit
 	}
 }

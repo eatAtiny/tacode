@@ -89,12 +89,15 @@ type UI interface {
 
 	// OnFinal 通知最终回答。
 	// answer 是 LLM 的完整最终回答（Markdown 格式）。
+	// inputTokens / outputTokens / totalTokens 是本轮累计的精确 token 用量
+	// （来自 API usage，include_usage 开启），UI 可在答案后展示统计行。
 	//
 	// 调用时机：queryLoop 完成，LLM 不再需要调用工具时。
 	// 这是每轮查询的终点，此后 Agent 回到空闲状态等待下一条用户输入。
 	//
-	// 典型实现：使用 Glamour 渲染 Markdown，添加分隔线标记本轮结束。
-	OnFinal(answer string)
+	// 典型实现：使用 Glamour 渲染 Markdown，添加分隔线标记本轮结束，
+	// 可选展示 token 统计。
+	OnFinal(answer string, inputTokens, outputTokens, totalTokens int)
 
 	// OnError 通知错误。
 	// err 可能来自 LLM 调用失败、工具执行异常、或业务逻辑错误。

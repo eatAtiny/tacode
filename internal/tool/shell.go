@@ -150,8 +150,13 @@ func (t *ShellTool) CheckPermission(args string) PermissionResult {
 // isDangerousShellCommand 检查是否是危险的 shell 命令。
 //
 // 从 internal/agent/permission.go 移入。
-// 检测方式：解析 JSON 参数，提取 command 字段，
-// 与危险命令模式列表进行子串匹配（大小写不敏感）。
+// 检测方式：解析 JSON 参数，提取 command 字段，对空白做归一化
+// （strings.Fields 按空白切分后重组，多个空格/制表符归为一个空格），
+// 再与危险命令模式列表进行子串匹配（大小写不敏感）。
+//
+// 归一化防止 "rm  -rf"（多空格）、"rm\t-rf"（制表符）绕过子串匹配。
+// 注意：变量拼接（"x=rm; $x -rf"）等间接构造无法静态识别——fail-open
+// 可接受（该命令已不属于只读，走串行 + 权限确认路径兜底）。
 func isDangerousShellCommand(args string) bool {
 	var params map[string]interface{}
 	if err := json.Unmarshal([]byte(args), &params); err != nil {
@@ -163,7 +168,10 @@ func isDangerousShellCommand(args string) bool {
 		return false
 	}
 
-	// 危险命令列表（子串匹配，大小写不敏感）。
+	// 空白归一化：任意连续空白（含制表符）→ 单个空格。
+	normalized := strings.Join(strings.Fields(command), " ")
+
+	// 危险命令列表（归一化后子串匹配，大小写不敏感）。
 	dangerousCommands := []string{
 		"rm -rf",
 		"rm -r",
@@ -186,7 +194,7 @@ func isDangerousShellCommand(args string) bool {
 		"poweroff",
 	}
 
-	commandLower := strings.ToLower(command)
+	commandLower := strings.ToLower(normalized)
 	for _, dangerous := range dangerousCommands {
 		if strings.Contains(commandLower, dangerous) {
 			return true
@@ -228,10 +236,13 @@ func (t *ShellTool) IsReadOnly(args string) bool {
 //
 // 这些命令只读取信息，不会修改文件系统或系统状态。
 // 匹配策略：提取命令的第一个词，去除路径前缀，与列表比较。
+//
+// 注意：sed/awk 因支持 -i 就地修改与输出重定向，curl/wget 因有网络副作用
+// （外发请求），均不列入（即使配合重定向检查也可能漏网，fail-closed）。
 var readOnlyCommands = []string{
 	"ls", "cat", "head", "tail", "less", "more",
 	"grep", "egrep", "fgrep", "find", "locate",
-	"wc", "sort", "uniq", "cut", "tr", "awk", "sed",
+	"wc", "sort", "uniq", "cut", "tr",
 	"echo", "printf", "date", "pwd", "whoami", "id",
 	"uname", "hostname", "which", "type", "command",
 	"env", "printenv", "df", "du", "free", "uptime",
@@ -242,7 +253,6 @@ var readOnlyCommands = []string{
 	"git log", "git show", "git diff", "git status", "git branch",
 	"go test", "go vet", "go list", "go doc", "go version", "go env",
 	"docker ps", "docker images", "docker inspect", "docker logs",
-	"curl", "wget",
 }
 
 // isReadOnlyShellCommand 检查 shell 命令是否为只读操作。

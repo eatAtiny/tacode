@@ -6,11 +6,13 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"agentic/internal/agent"
+	"agentic/internal/config"
 	"agentic/internal/llm"
 	"agentic/internal/mcp"
 	"agentic/internal/memory"
@@ -83,6 +85,7 @@ func main() {
 	envFile := flag.String("env", ".env", "env file path")
 	oneShot := flag.String("one-shot", "", "run a single query and exit (headless, prints final answer)")
 	sandboxMode := flag.String("sandbox", "off", "sandbox mode: on (sandbox shell commands) / off (default)")
+	configPath := flag.String("config", "", "config file path (yaml), optional")
 	// 可重复 flag：-mcp-server "npx -y @modelcontextprotocol/server-fetch"
 	// 或带名称：-mcp-server "fetch@npx -y @modelcontextprotocol/server-fetch"（工具前缀用 "fetch"）。
 	var mcpServers mcpServerFlags
@@ -95,6 +98,25 @@ func main() {
 		fmt.Fprintf(os.Stderr, "warning: load env file failed: %v\n", err)
 	}
 
+	// ── 步骤 2b: 加载 config 文件（可选） ──
+	// 优先级：config 文件 > 环境变量（OPENAI_CONTEXT_LIMIT 等）> 代码默认。
+	// 未指定 -config 时全部使用默认值，行为与旧版完全一致。
+	cfg := config.Default()
+	if *configPath != "" {
+		loaded, err := config.Load(*configPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "warning: config file %s not found, using defaults\n", *configPath)
+			} else {
+				fmt.Fprintf(os.Stderr, "load config failed: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			cfg = loaded.Apply(config.Default())
+			fmt.Fprintf(os.Stderr, "config loaded from %s\n", *configPath)
+		}
+	}
+
 	// ── 步骤 3: 创建 LLM 客户端 ──
 	// 从环境变量创建 OpenAI 客户端（OPENAI_API_KEY 必需）。
 	client, err := llm.NewOpenAIClientFromEnv()
@@ -102,6 +124,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "init llm client failed: %v\n", err)
 		os.Exit(1)
 	}
+	// config 的 ContextLimit / Temperature 覆盖环境推断值。
+	client.SetConfig(cfg)
 
 	// ── 步骤 4: 初始化会话管理器 ──
 	// 加载 manifest.json（首次运行时创建默认会话）。
@@ -145,6 +169,33 @@ func main() {
 		os.Exit(1)
 	}
 
+	// ── 步骤 6b: 初始化全局 + 项目级记忆（三级记忆的外两层） ──
+	// 数据目录（相对 sessions 的上级，即 data/ 下）：
+	//   - data/global-memory/memory/ — 全局记忆（user 类，跨项目）
+	//   - data/project-memory/memory/ — 项目级记忆（project/reference 类，跨会话）
+	// 会话级不再落 L3（对话细节靠 L2 摘要 + EventStore）。
+	dataRoot := filepath.Join(*sessionsDir, "..")
+	globalMem, err := memory.NewMemoryStore(filepath.Join(dataRoot, "global-memory"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init global memory store failed: %v\n", err)
+		os.Exit(1)
+	}
+	projectMem, err := memory.NewMemoryStore(filepath.Join(dataRoot, "project-memory"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init project memory store failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// ── 步骤 6c: 迁移旧记忆文件（幂等） ──
+	// 把旧版散落在会话目录 / 旧全局目录的 L3 记忆按 type 归位到全局/项目级。
+	if n := memory.MigrateLegacyMemory(globalMem, projectMem, *sessionsDir); n > 0 {
+		plural := "ies"
+		if n == 1 {
+			plural = "y"
+		}
+		fmt.Fprintf(os.Stderr, "migrated %d legacy memory entr%s to global/project stores\n", n, plural)
+	}
+
 	// ── 步骤 7: 初始化全量事件日志 ──
 	// EventStore（events.jsonl）是追加写入的完整事件流，永不截断，作为真相源。
 	events := memory.NewEventStore(activeDir)
@@ -157,6 +208,15 @@ func main() {
 	// Retriever 组合三层存储，在每轮查询前构建上下文（项目指令 + L3 记忆 + L2 摘要 + 降级 L1）。
 	// 同时负责自动压缩：当上下文 token 用量超过模型窗口 80% 时触发 L2 摘要合并。
 	retriever := memory.NewRetriever(history, summary, memStore, events)
+
+	// 注入 config 的压缩阈值（无显式设置时保持默认 0.8）。
+	if cfg.CompressThreshold != nil {
+		retriever.SetCompressThreshold(*cfg.CompressThreshold)
+	}
+
+	// 注入全局 + 项目级记忆 store：BuildContext 合并对应层级记忆。
+	retriever.SetGlobalMemory(globalMem)
+	retriever.SetProjectMemory(projectMem)
 
 	// 加载项目指令（AGENTS.md），失败只警告不退出（无指令文件时正常启动）。
 	if err := retriever.LoadProjectInstructions(); err != nil {
@@ -253,6 +313,10 @@ func main() {
 	// ── 步骤 12: 创建 Runner 并执行 ──
 	// Runner 是顶层编排器，组合所有组件，驱动 REPL 交互循环。
 	runner := agent.NewRunner(client, history, summary, memStore, events, extractor, retriever, tools, sessions, uiInstance)
+	// 注入运行时配置（maxIterations / resultLimit / compressThreshold 等）。
+	runner.SetConfig(cfg)
+	// 注入全局 + 项目级记忆 store：extractMemory 按类型分流写入对应目录。
+	runner.SetMemoryStores(globalMem, projectMem)
 
 	// one-shot 模式：同步执行单次查询后退出。
 	// 成功 → 输出答案到 stdout，return（让 defer Close() 执行）。

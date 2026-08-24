@@ -170,6 +170,76 @@ func (s *MemoryStore) loadEntry(path string) (MemoryEntry, error) {
 	return s.parseEntry(string(data)), nil
 }
 
+// MigrateLegacyMemory 迁移旧的记忆文件到三级记忆目录。
+//
+// 背景：v2.4 之前，L3 记忆写在会话目录（data/sessions/<id>/memory/）和
+// 旧的全局目录（data/global-memory/memory/）。三级记忆重构后：
+//   - user/feedback 类 → 全局（global-memory）
+//   - project/reference 类 → 项目级（project-memory）
+//
+// 本函数扫描旧位置，按 type 把文件复制到新 store（同名覆盖），
+// 并清理源文件（保留 MEMORY.md 重建）。幂等：重复运行无副作用。
+//
+// 返回迁移的条目数（调试用）。
+func MigrateLegacyMemory(globalStore, projectStore *MemoryStore, sessionsRoot string) int {
+	migrated := 0
+
+	// 辅助：把一条记忆迁到目标 store。
+	migrateEntry := func(entry MemoryEntry, target *MemoryStore) {
+		if target == nil {
+			return
+		}
+		if err := target.SaveEntry(entry); err == nil {
+			migrated++
+		}
+	}
+
+	// 1) 旧的全局目录（data/global-memory/memory/）——现在只应存 user 类。
+	//    project/reference 类移到项目级目录。
+	if entries, err := globalStore.ListEntries(); err == nil {
+		for _, e := range entries {
+			if e.Type == "project" || e.Type == "reference" {
+				migrateEntry(e, projectStore)
+				_ = globalStore.DeleteEntry(e.Name)
+			}
+		}
+	}
+
+	// 2) 各会话目录的 memory/ —— user/feedback 移到全局，project/reference 移到项目级。
+	sessionDirs, err := os.ReadDir(sessionsRoot)
+	if err != nil {
+		return migrated
+	}
+	for _, d := range sessionDirs {
+		if !d.IsDir() {
+			continue
+		}
+		sessionDir := filepath.Join(sessionsRoot, d.Name())
+		store, err := NewMemoryStore(sessionDir) // dir = <sessionDir>/memory
+		if err != nil {
+			continue
+		}
+		entries, err := store.ListEntries()
+		if err != nil || len(entries) == 0 {
+			continue
+		}
+		for _, e := range entries {
+			switch e.Type {
+			case "user", "feedback":
+				migrateEntry(e, globalStore)
+			case "project", "reference":
+				migrateEntry(e, projectStore)
+			default:
+				// 未知类型：默认归项目级（保守）。
+				migrateEntry(e, projectStore)
+			}
+			_ = store.DeleteEntry(e.Name)
+		}
+	}
+
+	return migrated
+}
+
 // parseEntry 解析 frontmatter + content 格式的记忆文件。
 // 格式：
 //

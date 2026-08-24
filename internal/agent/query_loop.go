@@ -18,11 +18,11 @@ import (
 )
 
 // ──────────────────────────────────────────────────────────
-// 常量定义
+// 常量定义（默认值，可由 config 覆盖）
 // ──────────────────────────────────────────────────────────
 
-// compressThreshold 压缩阈值：token 使用率超过 80% 触发压缩。
-const compressThreshold = 0.8
+// defaultCompressThreshold 默认压缩阈值：token 使用率超过 80% 触发压缩。
+const defaultCompressThreshold = 0.8
 
 // defaultResultLimit 默认结果截断上限（字符数）。
 const defaultResultLimit = 8000
@@ -40,6 +40,9 @@ type queryLoopContext struct {
 	toolRegistry      *tool.Registry         // 工具注册表，用于查找和执行工具
 	maxIter           int                    // 最大迭代次数
 	contextLimit      int                    // 模型上下文窗口大小（token 数）
+	compressThreshold float64                // 压缩阈值（token 使用率，默认 0.8）
+	resultLimit       int                    // 结果截断上限（字符数，默认 8000）
+	inputForward      <-chan string          // 输入转发通道（/interrupt 等控制命令），nil = 不启用
 	events            chan<- QueryEvent      // 事件输出 channel（yield 事件到此）
 	seenToolCalls     map[string]bool        // 已见过的工具调用签名（用于重复检测）
 	totalInputTokens  int                    // 累计输入 token 数
@@ -48,6 +51,7 @@ type queryLoopContext struct {
 	lastOutputTokens  int                    // 暂存每次调用的输出 token 数
 	currentIter       int                    // 当前迭代次数（用于 mtime 追踪）
 	fileReads         map[string]time.Time   // 已读文件的 mtime（key=绝对路径，用于 read-before-edit 检测）
+	msgTokens         int                    // 消息数组精确 token 数（来自 API usage），-1 = 未知（用估算）
 }
 
 // queryLoop 是纯粹的 Agent Loop 核心循环，使用异步生成器模式。
@@ -96,6 +100,7 @@ type queryLoopContext struct {
 //   - toolRegistry: 工具注册表，用于查找和执行工具
 //   - maxIter: 最大迭代次数，防止无限循环
 //   - contextLimit: 模型的上下文窗口大小（token 数），用于压缩检查
+//   - opts: 可选配置（压缩阈值、结果截断上限），零值使用默认
 //
 // 返回：
 //   - <-chan QueryEvent: 只读 channel，上层通过 range 实时读取中间事件
@@ -107,24 +112,43 @@ func queryLoop(
 	toolRegistry *tool.Registry,
 	maxIter int,
 	contextLimit int,
+	opts ...queryLoopOptions,
 ) <-chan QueryEvent {
 	events := make(chan QueryEvent)
 
 	go func() {
 		defer close(events)
 
+		// 应用可选配置（零值回退默认）。
+		compressThreshold := defaultCompressThreshold
+		resultLimit := defaultResultLimit
+		var inputForward <-chan string
+		if len(opts) > 0 {
+			if opts[0].CompressThreshold > 0 {
+				compressThreshold = opts[0].CompressThreshold
+			}
+			if opts[0].ResultLimit > 0 {
+				resultLimit = opts[0].ResultLimit
+			}
+			inputForward = opts[0].InputForward
+		}
+
 		// 初始化循环上下文。
 		lc := &queryLoopContext{
-			ctx:           ctx,
-			llmClient:     llmClient,
-			messages:      messages,
-			tools:         tools,
-			toolRegistry:  toolRegistry,
-			maxIter:       maxIter,
-			contextLimit:  contextLimit,
-			events:        events,
-			seenToolCalls: make(map[string]bool),
-			fileReads:     make(map[string]time.Time),
+			ctx:               ctx,
+			llmClient:         llmClient,
+			messages:          messages,
+			tools:             tools,
+			toolRegistry:      toolRegistry,
+			maxIter:           maxIter,
+			contextLimit:      contextLimit,
+			compressThreshold: compressThreshold,
+			resultLimit:       resultLimit,
+			inputForward:      inputForward,
+			events:            events,
+			seenToolCalls:     make(map[string]bool),
+			fileReads:         make(map[string]time.Time),
+			msgTokens:         -1, // 未知，首次压缩判断用估算
 		}
 
 		// 执行核心循环。
@@ -132,6 +156,14 @@ func queryLoop(
 	}()
 
 	return events
+}
+
+// queryLoopOptions queryLoop 的可选配置参数。
+// 零值表示使用默认值。
+type queryLoopOptions struct {
+	CompressThreshold float64 // token 使用率压缩阈值（默认 0.8）
+	ResultLimit       int     // 结果截断上限，字符数（默认 8000）
+	InputForward      <-chan string // 输入转发通道（/interrupt 等控制命令），nil = 不启用
 }
 
 // runLoop 执行核心 ReAct 循环。
@@ -221,10 +253,15 @@ func (lc *queryLoopContext) checkAndCompressContext(iter int) bool {
 		return true
 	}
 
-	totalTokens := estimateMessagesTokens(lc.messages)
+	// token 用量：优先用 API usage 校准的精确值（msgTokens），
+	// 未知（-1）或压缩后失效时回退到启发式估算。
+	totalTokens := lc.msgTokens
+	if totalTokens <= 0 {
+		totalTokens = estimateMessagesTokens(lc.messages)
+	}
 	usageRatio := float64(totalTokens) / float64(lc.contextLimit)
 
-	if usageRatio <= compressThreshold {
+	if usageRatio <= lc.compressThreshold {
 		return true
 	}
 
@@ -235,7 +272,10 @@ func (lc *queryLoopContext) checkAndCompressContext(iter int) bool {
 		Iteration: iter + 1,
 	}
 
-	lc.messages = compressMessages(lc.messages, iter)
+	// 压缩前持久化被丢弃的工具结果（保真：LLM 可回读），失败不阻断压缩。
+	lc.messages = lc.compressMessagesWithPersistence(lc.messages, iter, tool.DefaultToolResultsDir)
+	// 压缩改变了消息内容，旧账本失效：标记未知，下次用估算（或用新的 usage 重新校准）。
+	lc.msgTokens = -1
 	return true
 }
 
@@ -285,6 +325,12 @@ func (lc *queryLoopContext) callLLMStream(iter int) (string, []llm.ToolCall, boo
 			toolCalls = streamEvent.ToolCalls
 			inputTokens = streamEvent.InputTokens
 			outputTokens = streamEvent.OutputTokens
+			// usage.prompt_tokens 是本次请求输入消息的精确 token 数
+			// （API 计算，含 role 标记/JSON schema 结构开销）。
+			// 用它校准消息数组的 token 账本；0 表示 API 未返回（兜底估算）。
+			if inputTokens > 0 {
+				lc.msgTokens = inputTokens
+			}
 			if streamEvent.Content != "" {
 				fullContent = streamEvent.Content
 			}
@@ -382,13 +428,55 @@ func (lc *queryLoopContext) executeToolCalls(toolCalls []llm.ToolCall, iter int)
 	}
 
 	// ── 阶段 2: 串行执行其余工具 ──
+	// 每执行一个工具前检查中断信号（/interrupt 等）：收到则中止后续工具，
+	// 注入中断提示让 LLM 知道当前状态，继续循环让 LLM 调整策略。
 	for _, item := range serialItems {
+		if cmd := lc.peekInterrupt(); cmd != "" {
+			lc.injectInterruptNotice(item.tc, iter, cmd)
+			return true
+		}
 		if !lc.executeSingleTool(item.tc, iter) {
 			return false
 		}
 	}
 
 	return true
+}
+
+// peekInterrupt 非阻塞检查输入转发通道是否有控制命令（/interrupt、/retry）。
+// 返回命令字符串；无命令或通道未启用时返回空字符串。
+func (lc *queryLoopContext) peekInterrupt() string {
+	if lc.inputForward == nil {
+		return ""
+	}
+	select {
+	case cmd := <-lc.inputForward:
+		cmd = strings.TrimSpace(cmd)
+		if cmd == "/interrupt" || strings.HasPrefix(cmd, "/retry") {
+			return cmd
+		}
+		return ""
+	default:
+		return ""
+	}
+}
+
+// injectInterruptNotice 注入中断提示到消息历史。
+// 让 LLM 知道用户中断了工具执行，可据此调整策略（或直接回答）。
+func (lc *queryLoopContext) injectInterruptNotice(tc llm.ToolCall, iter int, cmd string) {
+	notice := fmt.Sprintf("用户已中断工具 %s 的执行（%s）。"+
+		"请根据已有信息调整策略：可直接给出回答，或尝试其他方案。", tc.Name, cmd)
+	lc.messages = append(lc.messages, llm.ChatMessage{
+		Role:    "user",
+		Content: notice,
+	})
+	lc.events <- QueryEvent{
+		Type:       QueryEventToolResult,
+		ToolName:   tc.Name,
+		ToolResult: notice,
+		IsError:    true,
+		Iteration:  iter + 1,
+	}
 }
 
 // toolExecResult 工具执行结果（用于并行执行收集）。
@@ -456,7 +544,7 @@ func (lc *queryLoopContext) executeConcurrentTools(toolCalls []llm.ToolCall, ite
 			// 统一截断 + 大结果持久化。
 			limit := t.ResultLimit()
 			if limit <= 0 {
-				limit = defaultResultLimit
+				limit = lc.resultLimit
 			}
 			if len(result) > limit {
 				fullResult := result
@@ -575,7 +663,7 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 	// 超过上限时：完整结果写入磁盘 → 模型可后续通过 file read 获取。
 	limit := t.ResultLimit()
 	if limit <= 0 {
-		limit = defaultResultLimit
+		limit = lc.resultLimit
 	}
 	if len(result) > limit {
 		fullResult := result
@@ -716,7 +804,10 @@ func (lc *queryLoopContext) generateFinalSummary() {
 		Content: "你已经尝试了多次工具调用。请根据已有信息直接给出回答，不要再调用工具。",
 	})
 
-	streamChan := lc.llmClient.ChatWithToolsStream(lc.ctx, lc.messages, lc.tools)
+	// 兜底总结不带任何工具定义：此轮目的是根据已有信息直接作答，
+	// 传 tools 会让 LLM 有机会再次返回 tool_calls，而本函数的事件循环
+	// 不处理 toolCalls（旧实现因此产生过空答案）。
+	streamChan := lc.llmClient.ChatWithToolsStream(lc.ctx, lc.messages, nil)
 	var finalContent string
 	var finalInputTokens, finalOutputTokens int
 
@@ -842,17 +933,19 @@ func (lc *queryLoopContext) recordFileRead(toolName string, args string) {
 
 // estimateMessagesTokens 估算消息数组的 token 数。
 //
-// 计算方式：遍历所有消息，拼接内容（含工具调用名和参数），
-// 使用 memory.EstimateTokens 估算（ASCII 约 4 字符/token，中文约 2 字符/token）。
+// 计算方式：遍历所有消息，对每条消息的 content、工具调用名和参数
+// 逐段调用 memory.EstimateTokens 累加（避免拼接大字符串的重复分配）。
+// 结果乘 1.2 安全系数，覆盖 role 标记、JSON schema 等结构性开销——
+// 纯文本估算会低估真实用量，压缩判断宁可偏早不可偏晚。
 func estimateMessagesTokens(messages []llm.ChatMessage) int {
-	var totalContent string
+	var total int
 	for _, msg := range messages {
-		totalContent += msg.Content
+		total += memory.EstimateTokens(msg.Content)
 		for _, tc := range msg.ToolCalls {
-			totalContent += tc.Name + tc.Arguments
+			total += memory.EstimateTokens(tc.Name + tc.Arguments)
 		}
 	}
-	return memory.EstimateTokens(totalContent)
+	return total + total/5 // *1.2 安全系数（total/5 为整数除法）
 }
 
 // compressMessages 压缩旧的工具调用消息，减少 token 用量。
@@ -861,8 +954,14 @@ func estimateMessagesTokens(messages []llm.ChatMessage) int {
 //   - 保留 system prompt（第 0 条，始终不动）
 //   - 保留最近 2 轮的工具调用（完整保留 4 条消息）
 //   - 压缩更早的 assistant(含 toolCalls) 消息 → "[已压缩] 调用工具: xxx"
-//   - 压缩更早的 tool(结果) 消息 → "[已压缩] 工具执行成功/失败"
+//   - 压缩更早的 tool(结果) 消息 → "[已压缩] 工具结果（完整内容已持久化）"
 //   - 非工具消息保留原样
+//
+// 与旧实现的差异：
+//   - tool 结果占位符改为中性描述，不再用 Contains("出错"/"错误") 猜测状态
+//     （工具输出含"错误码说明"文档也会被误判为失败）
+//   - 被压缩的完整结果由调用方（compressMessagesWithPersistence）持久化，
+//     LLM 可通过 file read 回读，避免信息不可逆丢失
 //
 // 这样在 token 接近上限时仍能保留上下文的关键信息。
 func compressMessages(messages []llm.ChatMessage, _ int) []llm.ChatMessage {
@@ -887,24 +986,26 @@ func compressMessages(messages []llm.ChatMessage, _ int) []llm.ChatMessage {
 		msg := messages[i]
 		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
 			// 压缩 assistant 的工具调用消息。
+			// 注意：必须保留 ToolCalls 结构！OpenAI API 要求 role=tool 消息
+			// 紧跟一条带匹配 tool_calls 的 assistant，否则返回 400
+			// ("Messages with role 'tool' must be a response to a preceding message with 'tool_calls'")。
+			// 只替换 Content 为占位符，ToolCalls 原样保留以维持配对。
 			toolNames := make([]string, len(msg.ToolCalls))
 			for j, tc := range msg.ToolCalls {
 				toolNames[j] = tc.Name
 			}
 			compressed = append(compressed, llm.ChatMessage{
-				Role:    "assistant",
-				Content: fmt.Sprintf("[已压缩] 调用工具: %s", strings.Join(toolNames, ", ")),
+				Role:      "assistant",
+				Content:   fmt.Sprintf("[已压缩] 调用工具: %s", strings.Join(toolNames, ", ")),
+				ToolCalls: msg.ToolCalls, // 保留，避免产生孤儿 tool 消息
 			})
 		} else if msg.Role == "tool" {
-			// 压缩工具结果消息（判断成功/失败）。
-			isSuccess := !strings.Contains(msg.Content, "出错") && !strings.Contains(msg.Content, "错误")
-			status := "成功"
-			if !isSuccess {
-				status = "失败"
-			}
+			// 压缩工具结果消息：中性占位符（不再猜测成功/失败）。
+			// 完整内容由 compressMessagesWithPersistence 预先持久化，
+			// 占位符带上回读提示（持久化失败时退化为纯占位符）。
 			compressed = append(compressed, llm.ChatMessage{
 				Role:       "tool",
-				Content:    fmt.Sprintf("[已压缩] 工具执行%s", status),
+				Content:    "[已压缩] 工具结果（完整内容已持久化，可使用 file read 读取）",
 				ToolCallID: msg.ToolCallID,
 			})
 		} else {
@@ -915,6 +1016,69 @@ func compressMessages(messages []llm.ChatMessage, _ int) []llm.ChatMessage {
 
 	// 保留最近的工具调用消息（完整保留）。
 	compressed = append(compressed, messages[compressEnd:]...)
+
+	return compressed
+}
+
+// compressMessagesWithPersistence 压缩消息，并在压缩前把被压缩的 tool 结果
+// 完整持久化到 toolResultsDir（默认 data/tool-results），占位符带回读路径。
+//
+// 调用时机：checkAndCompressContext 触发压缩时。
+// 持久化失败不阻断压缩（降级为纯占位符，与旧行为一致）。
+func (lc *queryLoopContext) compressMessagesWithPersistence(messages []llm.ChatMessage, iter int, toolResultsDir string) []llm.ChatMessage {
+	if len(messages) <= 3 {
+		return messages
+	}
+
+	// 先持久化将被压缩的 tool 结果，再替换占位符。
+	compressEnd := len(messages) - 4
+	if compressEnd < 1 {
+		compressEnd = 1
+	}
+
+	// 为每条将被压缩的 tool 消息持久化完整内容，并把路径写进占位符。
+	// 需要先持久化再构造消息：遍历被压缩区间，收集 tool 结果。
+	var toolResults []struct {
+		content   string
+		toolCallID string
+	}
+	for i := 1; i < compressEnd; i++ {
+		msg := messages[i]
+		if msg.Role == "tool" && strings.TrimSpace(msg.Content) != "" {
+			toolResults = append(toolResults, struct {
+				content   string
+				toolCallID string
+			}{content: msg.Content, toolCallID: msg.ToolCallID})
+		}
+	}
+
+	// 持久化每个结果。
+	if toolResultsDir == "" {
+		toolResultsDir = tool.DefaultToolResultsDir
+	}
+	savedPaths := make(map[string]string, len(toolResults)) // key=toolCallID
+	for _, tr := range toolResults {
+		if tr.content == "" {
+			continue
+		}
+		if path, err := tool.SaveLargeResult(toolResultsDir, "compressed", tr.content); err == nil {
+			savedPaths[tr.toolCallID] = path
+		}
+	}
+
+	compressed := compressMessages(messages, iter)
+
+	// 把占位符替换为带回读路径的版本（仅当持久化成功）。
+	if len(savedPaths) > 0 {
+		for i := range compressed {
+			if compressed[i].Role != "tool" {
+				continue
+			}
+			if path, ok := savedPaths[compressed[i].ToolCallID]; ok {
+				compressed[i].Content = fmt.Sprintf("[已压缩] 工具结果（完整内容已保存到: %s，可使用 file read 读取）", path)
+			}
+		}
+	}
 
 	return compressed
 }

@@ -112,7 +112,11 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 	// queryLoop 返回一个只读 channel，内部 goroutine 持续 yield 事件。
 	// 上层通过 range channel 实时消费事件，无需轮询。
 	contextLimit := r.llm.ContextLimit()
-	eventChan := queryLoop(ctx, r.llm, messages, tools, r.tools, maxIterations, contextLimit)
+	eventChan := queryLoop(ctx, r.llm, messages, tools, r.tools, r.maxIter(), contextLimit, queryLoopOptions{
+		CompressThreshold: r.compressThreshold(),
+		ResultLimit:       r.resultLimit(),
+		InputForward:      inputForward,
+	})
 
 	// ═══════════════════════════════════════════════════════
 	// 步骤 5: 消费事件（实时转发到 UI + EventStore）
@@ -179,10 +183,10 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 			r.ui.OnContinue(event.Iteration)
 
 		case QueryEventFinal:
-			// 最终回答：保存结果，通知 UI 渲染 Markdown。
+			// 最终回答：保存结果，通知 UI 渲染 Markdown + 本轮 token 统计。
 			finalAnswer = event.Content
 			finalIteration = event.Iteration
-			r.ui.OnFinal(finalAnswer)
+			r.ui.OnFinal(finalAnswer, event.InputTokens, event.OutputTokens, event.TotalTokens)
 
 		case QueryEventError:
 			// 错误：通知 UI 并返回错误信息。

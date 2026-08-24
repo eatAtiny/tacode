@@ -25,6 +25,27 @@ import (
 //	每次启动时 cleanOrphanTempDirs() 清理上次异常退出遗留的临时目录。
 // ──────────────────────────────────────────────────────────
 
+// maxSessionNameLen 会话名最大长度（runes），超出截断加省略号。
+const maxSessionNameLen = 40
+
+// deriveSessionName 从首条用户输入生成会话名。
+//
+// 规则：
+//   - 空输入 / 纯空白 → 兜底 "新会话"
+//   - 换行替换为空格、连续空白压缩为单个空格
+//   - 超过 maxSessionNameLen runes 截断并加省略号 "…"
+func deriveSessionName(input string) string {
+	cleaned := strings.Join(strings.Fields(input), " ")
+	if cleaned == "" {
+		return "新会话"
+	}
+	runes := []rune(cleaned)
+	if len(runes) > maxSessionNameLen {
+		return string(runes[:maxSessionNameLen]) + "…"
+	}
+	return cleaned
+}
+
 // switchSession 切换会话时重新初始化所有 store 路径。
 //
 // 所有 memory store 都有 SetPath 方法，切换会话时只需修改底层文件路径，
@@ -267,6 +288,8 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 // 流程（首次对话完成后调用）：
 //   1. 记录临时目录路径
 //   2. 调用 sessions.Create() 创建正式会话（加入 manifest + 设为 Active）
+//      会话名：用户通过 /new <name> 指定的名字优先；
+//      否则用首条用户输入（firstInput）自动生成；再否则兜底 "新会话"。
 //   3. 将临时目录下的文件移动到正式目录：
 //      - events.jsonl（全量事件日志）
 //      - history.jsonl（L1 原始对话）
@@ -277,14 +300,14 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 //   6. 设置 isTemporary = false
 //
 // 错误处理：单个文件移动失败不中断（仅输出警告），尽量迁移所有文件。
-func (r *Runner) ensurePersisted() error {
+func (r *Runner) ensurePersisted(firstInput string) error {
 	// ── 步骤 1: 记录临时目录路径 ──
 	tempDir := r.sessions.SessionDir(r.tempID)
 
 	// ── 步骤 2: 创建正式会话 ──
 	sessionName := r.pendingSessionName
 	if sessionName == "" {
-		sessionName = "新会话"
+		sessionName = deriveSessionName(firstInput)
 	}
 	r.pendingSessionName = ""
 	realID, err := r.sessions.Create(sessionName)

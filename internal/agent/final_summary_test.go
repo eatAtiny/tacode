@@ -1,0 +1,334 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"agentic/internal/llm"
+
+	openai "github.com/sashabaranov/go-openai"
+)
+
+// ──────────────────────────────────────────────────────────
+// P0①: generateFinalSummary 不再向 LLM 传递工具定义
+//
+// 回归背景：generateFinalSummary 是 maxIter 耗尽后的兜底回答。
+// 旧实现仍传入 lc.tools，LLM 可能再次返回 tool_calls，而该函数的
+// 事件循环忽略 done 事件里的 toolCalls → finalContent 为空 → 空答案。
+//
+// 修复后要求：兜底调用不带任何工具定义，从根上杜绝再次调工具。
+// 本测试用 httptest.Server 捕获请求体，断言 tools 字段为空。
+// ──────────────────────────────────────────────────────────
+
+// sseHandler 处理流式请求：捕获请求体并返回固定 SSE 流（stop finish）。
+type sseHandler struct {
+	mu       sync.Mutex
+	bodies   []map[string]any
+	response string
+}
+
+func (h *sseHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var parsed map[string]any
+	_ = json.Unmarshal(body, &parsed)
+
+	h.mu.Lock()
+	h.bodies = append(h.bodies, parsed)
+	h.mu.Unlock()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, h.response)
+}
+
+// stopResponseSSE 生成一个 finish_reason=stop 的流式响应（带 usage）。
+func stopResponseSSE() string {
+	return "data: " + `{"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,` +
+		`"model":"gpt-4o-mini","choices":[{"index":0,` +
+		`"delta":{"content":"final answer","role":"assistant"},"finish_reason":"stop"}],` +
+		`"usage":{"prompt_tokens":10,"completion_tokens":5}}` + "\n\n" +
+		"data: [DONE]\n\n"
+}
+
+// newLLMClientViaEnv 通过环境变量构造 LLM 客户端（走公共 API），
+// 把 OPENAI_BASE_URL 指向 mock server。
+func newLLMClientViaEnv(t *testing.T, serverURL string) *llm.OpenAIClient {
+	t.Helper()
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_BASE_URL", serverURL)
+	t.Setenv("OPENAI_MODEL", "gpt-4o-mini")
+	t.Setenv("OPENAI_CONTEXT_LIMIT", "128000")
+	client, err := llm.NewOpenAIClientFromEnv()
+	if err != nil {
+		t.Fatalf("NewOpenAIClientFromEnv failed: %v", err)
+	}
+	return client
+}
+
+// runGenerateFinalSummary 运行 generateFinalSummary，返回最终答案文本。
+// generateFinalSummary 是同步调用（事件 channel 不会被关闭），
+// 因此用带超时的非阻塞读取收集事件。
+//
+// withTools 控制是否预置工具定义：旧实现（传 lc.tools）在有工具定义时
+// 会把 tools 带上请求 → 测试应失败；修复后（传 nil）→ 测试通过。
+func runGenerateFinalSummary(t *testing.T, client *llm.OpenAIClient, messages []llm.ChatMessage, withTools bool) string {
+	t.Helper()
+	events := make(chan QueryEvent, 16)
+	lc := &queryLoopContext{
+		ctx:       context.Background(),
+		llmClient: client,
+		messages:  messages,
+		maxIter:   10,
+		events:    events,
+	}
+	if withTools {
+		lc.tools = []openai.Tool{
+			{
+				Type: openai.ToolTypeFunction,
+				Function: &openai.FunctionDefinition{
+					Name:        "shell",
+					Description: "run a shell command",
+					Parameters:  map[string]any{"type": "object"},
+				},
+			},
+		}
+	}
+	lc.generateFinalSummary()
+
+	var finalContent string
+	for {
+		select {
+		case evt := <-events:
+			if evt.Type == QueryEventFinal {
+				finalContent = evt.Content
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for QueryEventFinal")
+		default:
+			return finalContent
+		}
+	}
+}
+
+func TestGenerateFinalSummary_NoTools(t *testing.T) {
+	handler := &sseHandler{response: stopResponseSSE()}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	client := newLLMClientViaEnv(t, srv.URL)
+	finalContent := runGenerateFinalSummary(t, client, []llm.ChatMessage{
+		{Role: "system", Content: "system"},
+		{Role: "user", Content: "user"},
+	}, true)
+
+	if finalContent != "final answer" {
+		t.Errorf("final answer mismatch: got %q, want %q", finalContent, "final answer")
+	}
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if len(handler.bodies) != 1 {
+		t.Fatalf("expected exactly 1 request, got %d", len(handler.bodies))
+	}
+	reqBody := handler.bodies[0]
+
+	toolsField, hasTools := reqBody["tools"]
+	if hasTools {
+		if toolsField != nil {
+			t.Errorf("request must not carry tool definitions, got tools=%v", toolsField)
+		}
+		// tools 字段存在但为 null：等价于未传，可以接受。
+		t.Logf("tools field present but null (acceptable)")
+	}
+}
+
+func TestGenerateFinalSummary_AppendsStopPrompt(t *testing.T) {
+	handler := &sseHandler{response: stopResponseSSE()}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	client := newLLMClientViaEnv(t, srv.URL)
+	runGenerateFinalSummary(t, client, []llm.ChatMessage{
+		{Role: "system", Content: "system"},
+		{Role: "user", Content: "user"},
+	}, true)
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if len(handler.bodies) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(handler.bodies))
+	}
+	reqBody := handler.bodies[0]
+
+	msgsAny, ok := reqBody["messages"].([]any)
+	if !ok {
+		t.Fatalf("messages should be an array, got %T", reqBody["messages"])
+	}
+	if len(msgsAny) != 3 {
+		t.Fatalf("expected 3 messages (system+user+stop prompt), got %d", len(msgsAny))
+	}
+	last := msgsAny[len(msgsAny)-1].(map[string]any)
+	lastContent, _ := last["content"].(string)
+	if !strings.Contains(lastContent, "不要再调用工具") {
+		t.Errorf("last message should be the stop prompt, got %q", lastContent)
+	}
+}
+
+// ──────────────────────────────────────────────────────────
+// 流式请求的 token 精确统计
+//
+// 背景：ChatWithToolsStream 若未设置 stream_options.include_usage，
+// OpenAI 流式响应不返回 usage 字段 → InputTokens/OutputTokens 恒 0，
+// 累计 token 统计为空，压缩判断退化为纯估算。
+// 本测试断言流式请求必须带 include_usage=true。
+// ──────────────────────────────────────────────────────────
+
+func TestStreamRequest_IncludesUsage(t *testing.T) {
+	handler := &sseHandler{response: stopResponseSSE()}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	client := newLLMClientViaEnv(t, srv.URL)
+
+	// 触发一次流式请求（走 ChatWithToolsStream）。
+	events := make(chan QueryEvent, 16)
+	lc := &queryLoopContext{
+		ctx:       context.Background(),
+		llmClient: client,
+		messages: []llm.ChatMessage{
+			{Role: "system", Content: "s"},
+			{Role: "user", Content: "u"},
+		},
+		maxIter: 10,
+		events:  events,
+	}
+	// 用 callLLMStream 走流式路径。
+	go func() {
+		lc.callLLMStream(0)
+		close(events)
+	}()
+	for range events {
+	}
+
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if len(handler.bodies) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(handler.bodies))
+	}
+	reqBody := handler.bodies[0]
+
+	streamOpts, ok := reqBody["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream_options should be present, got %v", reqBody["stream_options"])
+	}
+	includeUsage, _ := streamOpts["include_usage"].(bool)
+	if !includeUsage {
+		t.Error("stream_options.include_usage must be true for token tracking")
+	}
+}
+
+// ──────────────────────────────────────────────────────────
+// Token 精确账本（usage 校准）
+//
+// queryLoopContext.msgTokens 记录消息数组的精确 token 数：
+//   - callLLMStream 收到 usage 时校准（API 真实值）
+//   - checkAndCompressContext 优先用精确值，未知时回退估算
+//   - 压缩后旧账本失效（消息变了）
+// ──────────────────────────────────────────────────────────
+
+// usageSSE 生成带 usage 的流式响应。
+func usageSSE() string {
+	return "data: " + `{"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,` +
+		`"model":"gpt-4o-mini","choices":[{"index":0,` +
+		`"delta":{"content":"final answer","role":"assistant"},"finish_reason":"stop"}],` +
+		`"usage":{"prompt_tokens":1234,"completion_tokens":56}}` + "\n\n" +
+		"data: [DONE]\n\n"
+}
+
+func TestCallLLMStream_CalibratesMsgTokens(t *testing.T) {
+	handler := &sseHandler{response: usageSSE()}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	client := newLLMClientViaEnv(t, srv.URL)
+	events := make(chan QueryEvent, 16)
+	lc := &queryLoopContext{
+		ctx:       context.Background(),
+		llmClient: client,
+		messages: []llm.ChatMessage{
+			{Role: "system", Content: "s"},
+			{Role: "user", Content: "u"},
+		},
+		maxIter:  10,
+		events:   events,
+		msgTokens: -1,
+	}
+
+	// 同步调用 callLLMStream（mock server 立即返回）。
+	go func() {
+		lc.callLLMStream(0)
+		close(events)
+	}()
+	for range events {
+	}
+
+	// usage.prompt_tokens=1234 → msgTokens 校准为 1234（API 真实值）。
+	if lc.msgTokens != 1234 {
+		t.Errorf("msgTokens should be calibrated to 1234, got %d", lc.msgTokens)
+	}
+}
+
+func TestCheckAndCompressContext_UsesExactTokens(t *testing.T) {
+	// 精确值（msgTokens=100）超过阈值 → 触发压缩；估算值（小消息）不会。
+	// 用一个小 contextLimit 放大对比。
+	lc := &queryLoopContext{
+		contextLimit:      200,
+		compressThreshold: 0.8,
+		msgTokens:         180, // 90% > 80% → 压缩
+		messages: []llm.ChatMessage{
+			{Role: "system", Content: "s"},
+			{Role: "user", Content: "u"},
+		},
+		events: make(chan QueryEvent, 16),
+	}
+	if !lc.checkAndCompressContext(0) {
+		t.Fatal("expected compression trigger")
+	}
+	// 压缩后账本失效。
+	if lc.msgTokens != -1 {
+		t.Errorf("msgTokens should be reset to -1 after compression, got %d", lc.msgTokens)
+	}
+}
+
+func TestCheckAndCompressContext_FallsBackToEstimate(t *testing.T) {
+	// msgTokens 未知（-1）时回退估算。
+	lc := &queryLoopContext{
+		contextLimit:      1_000_000,
+		compressThreshold: 0.8,
+		msgTokens:         -1,
+		messages: []llm.ChatMessage{
+			{Role: "system", Content: "s"},
+			{Role: "user", Content: "u"},
+		},
+		events: make(chan QueryEvent, 16),
+	}
+	// 消息很小，估算远低于 80% → 不压缩。
+	if !lc.checkAndCompressContext(0) {
+		t.Fatal("expected no compression for tiny messages")
+	}
+	// 未压缩，账本保持 -1（下次可能被 usage 校准）。
+	if lc.msgTokens != -1 {
+		t.Errorf("msgTokens should stay -1 without compression, got %d", lc.msgTokens)
+	}
+}

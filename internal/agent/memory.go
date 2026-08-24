@@ -52,7 +52,25 @@ func (r *Runner) extractMemory(ctx context.Context, round int, userInput, assist
 	}
 
 	// ── 步骤 7b-2: 处理 L3 记忆操作 ──
+	// 三级记忆分流：
+	//   - project / reference → 项目级 store（跨会话，data/project-memory/）
+	//   - user / feedback     → 全局 store（跨项目，data/global-memory/）
+	// 会话级不再落 L3（对话细节靠 L2 摘要 + EventStore）。
+	// 对应 store 未启用时回退到会话 store（保持旧行为）。
 	for _, action := range result.Memories {
+		// 选择目标 store。
+		store := r.memStore
+		switch action.Type {
+		case "project", "reference":
+			if r.projectMem != nil {
+				store = r.projectMem
+			}
+		case "user", "feedback":
+			if r.globalMem != nil {
+				store = r.globalMem
+			}
+		}
+
 		switch action.Action {
 		case "create", "update":
 			entry := memory.MemoryEntry{
@@ -63,15 +81,16 @@ func (r *Runner) extractMemory(ctx context.Context, round int, userInput, assist
 				Tags:        action.Tags,
 				Content:     action.Content,
 			}
-			if err := r.memStore.SaveEntry(entry); err != nil {
+			if err := store.SaveEntry(entry); err != nil {
 				r.ui.OnMessage(fmt.Sprintf("⚠️ 保存记忆失败: %v", err))
 			}
+			// 成功不提示：记忆保存是后台副作用，每轮刷屏会覆盖用户正在输入的输入框。
+			// 异常（失败）才值得打断用户。
 		case "delete":
-			if err := r.memStore.DeleteEntry(action.Name); err != nil {
+			if err := store.DeleteEntry(action.Name); err != nil {
 				r.ui.OnMessage(fmt.Sprintf("⚠️ 删除记忆失败: %v", err))
-			} else {
-				r.ui.OnMessage(fmt.Sprintf("🗑️ 记忆已删除: %s", action.Name))
 			}
+			// 成功不提示（同上：后台操作，避免刷屏）。
 		}
 	}
 }
@@ -133,23 +152,42 @@ func (r *Runner) handleMemoryCommand(parts []string) {
 	}
 }
 
-// listMemories 列出所有 L3 记忆（按重要性降序，带 ⭐ 重要度图标）。
+// listMemories 列出三级 L3 记忆（全局 → 项目 → 会话，按重要性降序）。
 func (r *Runner) listMemories() {
-	entries, err := r.memStore.ListEntries()
-	if err != nil {
-		r.ui.OnError(fmt.Errorf("读取记忆失败: %v", err))
-		return
-	}
-	if len(entries) == 0 {
-		r.ui.OnMessage("  (暂无记忆)")
-		return
+	// 辅助：列出单个 store 的记忆。
+	listStore := func(title string, store *memory.MemoryStore) {
+		if store == nil {
+			return
+		}
+		entries, err := store.ListEntries()
+		if err != nil {
+			r.ui.OnError(fmt.Errorf("读取记忆失败: %v", err))
+			return
+		}
+		if len(entries) == 0 {
+			return
+		}
+		r.ui.OnMessage(fmt.Sprintf("🌐 %s（%d 条）:", title, len(entries)))
+		for _, e := range entries {
+			importanceIcon := strings.Repeat("⭐", e.Importance)
+			r.ui.OnMessage(fmt.Sprintf("  [%s] %s", e.Type, e.Description))
+			r.ui.OnMessage(fmt.Sprintf("    %s name=%s", importanceIcon, e.Name))
+		}
 	}
 
-	r.ui.OnMessage(fmt.Sprintf("🧠 共 %d 条记忆:", len(entries)))
-	for _, e := range entries {
-		importanceIcon := strings.Repeat("⭐", e.Importance)
-		r.ui.OnMessage(fmt.Sprintf("  [%s] %s", e.Type, e.Description))
-		r.ui.OnMessage(fmt.Sprintf("    %s name=%s", importanceIcon, e.Name))
+	listStore("全局记忆", r.globalMem)
+	listStore("项目记忆", r.projectMem)
+	listStore("会话记忆", r.memStore)
+
+	if r.globalMem == nil && r.projectMem == nil {
+		// 无全局/项目 store（未启用）时只显示会话记忆，保持旧行为。
+		entries, err := r.memStore.ListEntries()
+		if err != nil {
+			return
+		}
+		if len(entries) == 0 {
+			r.ui.OnMessage("  (暂无记忆)")
+		}
 	}
 }
 

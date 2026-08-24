@@ -33,7 +33,6 @@ func TestShellIsConcurrencySafe_ReadOnly(t *testing.T) {
 		`{"command": "git status"}`,
 		`{"command": "go vet ./..."}`,
 		`{"command": "docker ps"}`,
-		`{"command": "curl -s https://example.com"}`,
 		`{"command": "diff a.txt b.txt"}`,
 		`{"command": "df -h"}`,
 	}
@@ -65,6 +64,11 @@ func TestShellIsConcurrencySafe_Dangerous(t *testing.T) {
 		`{"command": "sudo systemctl restart nginx"}`,
 		`{"command": "git push origin main"}`,
 		`{"command": "docker rm container"}`,
+		// 以下命令曾因只读前缀子串匹配被误判为只读（P1③ 加固）：
+		`{"command": "sed -i 's/a/b/' file.txt"}`,
+		`{"command": "awk '{print $1 > \"out.txt\"}' file"}`,
+		`{"command": "curl -s https://example.com"}`,
+		`{"command": "wget http://example.com/file"}`,
 	}
 
 	for _, cmd := range dangerousCommands {
@@ -595,6 +599,14 @@ func TestIsDangerousShellCommand(t *testing.T) {
 		{`{"command": "git status"}`, false},
 		{`{"command": "echo hello"}`, false},
 		{`{"command": "docker ps"}`, false},
+		// P1③ 加固：空白归一化，防止前缀子串匹配被多空格/制表符绕过。
+		{`{"command": "rm  -rf  /tmp/foo"}`, true},
+		{`{"command": "rm\t-rf\t/tmp/foo"}`, true},
+		{`{"command": "  rm -rf /tmp/foo"}`, true},
+		{`{"command": "RM -RF /tmp/foo"}`, true},
+		{`{"command": "rm -rf /tmp/foo && ls"}`, true},
+		// 变量拼接等间接绕过仍无法静态识别（fail-open 可接受，文档已注明）。
+		{`{"command": "x=rm; $x -rf /tmp/foo"}`, false},
 	}
 
 	for _, tt := range tests {

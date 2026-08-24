@@ -105,10 +105,15 @@ func (t *TextUI) OnContinue(iteration int) {
 	}
 }
 
-// OnFinal 转发最终回答事件。data 为 answer（string）。
-func (t *TextUI) OnFinal(answer string) {
+// OnFinal 转发最终回答事件。data 为 map：{"answer", "input_tokens", "output_tokens", "total_tokens"}。
+func (t *TextUI) OnFinal(answer string, inputTokens, outputTokens, totalTokens int) {
 	if t.OnEvent != nil {
-		t.OnEvent("final", answer)
+		t.OnEvent("final", map[string]any{
+			"answer":        answer,
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
+			"total_tokens":  totalTokens,
+		})
 	}
 }
 

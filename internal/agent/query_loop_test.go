@@ -358,6 +358,10 @@ func (lc *queryLoopContext) executeToolCallsHelper(toolCalls []llm.ToolCall, ite
 	}
 
 	for _, item := range serialItems {
+		if cmd := lc.peekInterrupt(); cmd != "" {
+			lc.injectInterruptNotice(item.tc, iter, cmd)
+			return true
+		}
 		if !lc.executeSingleTool(item.tc, iter) {
 			return false
 		}

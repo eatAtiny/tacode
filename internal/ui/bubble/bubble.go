@@ -367,7 +367,7 @@ func (b *BubbleUI) OnContinue(iteration int) {
 // 2. 如果之前有流式文本，打印 "✅ 思考完成"
 // 3. 用 Glamour 渲染 Markdown（带 2 空格缩进），失败则回退纯文本
 // 4. 打印分隔线标记本轮结束
-func (b *BubbleUI) OnFinal(answer string) {
+func (b *BubbleUI) OnFinal(answer string, inputTokens, outputTokens, totalTokens int) {
 	// 清除流式文本，保留"思考中..."行并改为"思考完成"。
 	if b.cursorSaved {
 		fmt.Print("\033[u\033[J")
@@ -400,6 +400,15 @@ func (b *BubbleUI) OnFinal(answer string) {
 	}
 	b.hasDelta = false
 	fmt.Println()
+
+	// 本轮 token 统计（精确值，来自 API usage）。
+	// totalTokens 为 0 时（API 未返回 usage）不展示，避免误导。
+	if totalTokens > 0 {
+		fmt.Println(styleMuted.Render(fmt.Sprintf(
+			"  ⚡ 本轮 %d tokens（输入 %d / 输出 %d）",
+			totalTokens, inputTokens, outputTokens,
+		)))
+	}
 	fmt.Println(styleSeparator.Render(strings.Repeat("─", 60)))
 }
 
