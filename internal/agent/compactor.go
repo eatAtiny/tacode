@@ -78,6 +78,16 @@ func (c *Compactor) SetContextCharLimit(limit int) {
 	}
 }
 
+// SetPaths 切换会话时更新 transcript/tool-results 目录。
+//
+// Compactor 的目录在构造时绑定一次，但会话切换（/new、/switch、/list、
+// ensurePersisted）后必须跟随当前会话，否则归档/转存会累积到旧会话目录。
+// 与 memory store 的 SetPath 语义一致。
+func (c *Compactor) SetPaths(transcriptDir, toolResultsDir string) {
+	c.transcriptDir = transcriptDir
+	c.toolResultsDir = toolResultsDir
+}
+
 // estimateChars 估算消息数组的字符数（镜像 s08 的 estimate_chars：JSON 序列化长度）。
 func estimateChars(messages []llm.ChatMessage) int {
 	data, err := json.Marshal(messages)

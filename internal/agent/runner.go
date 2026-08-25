@@ -382,6 +382,7 @@ func (r *Runner) initTempSession() error {
 	r.summary.SetPath(tempDir)
 	r.memStore.SetPath(tempDir)
 	r.events.SetPath(tempDir)
+	r.syncCompactorPaths(tempDir)
 	r.cleanOrphanTempDirs()
 	return nil
 }
