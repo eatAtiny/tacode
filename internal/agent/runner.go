@@ -71,6 +71,11 @@ type Runner struct {
 	isTemporary        bool   // 临时会话：启动时创建，有对话后才落盘
 	tempID             string // 临时会话 ID
 	pendingSessionName string // /new 指定的会话名，ensurePersisted 时使用
+
+	messages []llm.ChatMessage // 跨轮累积的对话消息（不含 system/preamble，仅累积对话本身）
+
+	memoryPreamble string        // 记忆 preamble 缓存（<system-reminder> 内容，会话内字节稳定，仅切换/首轮重建）
+	compactor      *Compactor    // s08 四步压缩管线（nil = 禁用）
 }
 
 // NewRunner 构造 Agent 执行器。
@@ -316,6 +321,12 @@ func (r *Runner) Run(ctx context.Context) error {
 			if result.err != nil {
 				r.ui.OnError(result.err)
 			} else {
+				// 跨轮累积：查询成功后保存本次完整消息数组。
+				// 失败/取消时不更新（保留上一轮累积），避免部分轮次消息进入下轮。
+				if result.messages != nil {
+					r.messages = result.messages
+				}
+
 				// 记录助手回答事件。
 				r.events.Append(memory.Event{
 					Type:    memory.EventAssistant,
@@ -413,10 +424,11 @@ func (r *Runner) RunOnce(ctx context.Context, input string) (string, error) {
 
 	// ── 同步执行单次查询 ──
 	// round=1，inputForward=nil（TextUI 权限默认放行，不读此参数）。
-	answer, err := r.queryEngine(ctx, 1, input, nil)
+	answer, messages, err := r.queryEngine(ctx, 1, input, nil, nil)
 	if err != nil {
 		return "", fmt.Errorf("one-shot 查询失败: %w", err)
 	}
+	r.messages = messages
 
 	// ── 记录助手回答事件（与 Run() 一致） ──
 	r.events.Append(memory.Event{
@@ -449,9 +461,12 @@ func (r *Runner) RunOnce(ctx context.Context, input string) (string, error) {
 //   - goroutine 完成后写入结果并关闭 channel
 func (r *Runner) runQueryAsync(ctx context.Context, round int, input string, inputForward <-chan string) <-chan queryResult {
 	ch := make(chan queryResult, 1)
+	// 在调用 goroutine 前拷贝 slice header，避免与主循环后续写 r.messages 产生竞争。
+	// queryEngine 只读此拷贝；主循环在收到结果（goroutine 完成）后才写回 r.messages。
+	conversation := r.messages
 	go func() {
-		answer, err := r.queryEngine(ctx, round, input, inputForward)
-		ch <- queryResult{answer: answer, err: err}
+		answer, messages, err := r.queryEngine(ctx, round, input, inputForward, conversation)
+		ch <- queryResult{answer: answer, messages: messages, err: err}
 	}()
 	return ch
 }

@@ -62,6 +62,10 @@ func (r *Runner) switchSession() {
 	r.summary.SetPath(activeDir)
 	r.memStore.SetPath(activeDir)
 	r.events.SetPath(activeDir)
+	// 切换会话：清空跨轮累积的对话消息与记忆 preamble 缓存。
+	// 下一轮查询将基于新会话的记忆重新构建（preamble + 记忆兜底）。
+	r.messages = nil
+	r.memoryPreamble = ""
 }
 
 // printSessionHistory 读取并展示指定会话的历史记录。
@@ -157,6 +161,7 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 			r.summary.SetPath(tempDir)
 			r.memStore.SetPath(tempDir)
 			r.events.SetPath(tempDir)
+			r.messages = nil // 新会话：清空跨轮累积
 			// 记住用户指定的会话名，ensurePersisted 时使用。
 			r.pendingSessionName = name
 			displayName := "新会话"

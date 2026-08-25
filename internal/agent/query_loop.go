@@ -52,6 +52,9 @@ type queryLoopContext struct {
 	currentIter       int                    // 当前迭代次数（用于 mtime 追踪）
 	fileReads         map[string]time.Time   // 已读文件的 mtime（key=绝对路径，用于 read-before-edit 检测）
 	msgTokens         int                    // 消息数组精确 token 数（来自 API usage），-1 = 未知（用估算）
+	compactor         *Compactor             // s08 四步压缩管线（nil = 禁用）
+	activeRequest     string                 // 当前轮用户请求（压缩时注入 [Compacted] 消息用）
+	reactiveRetries   int                    // prompt_too_long 补救重试次数（上限 MAX_REACTIVE_RETRIES）
 }
 
 // queryLoop 是纯粹的 Agent Loop 核心循环，使用异步生成器模式。
@@ -123,6 +126,8 @@ func queryLoop(
 		compressThreshold := defaultCompressThreshold
 		resultLimit := defaultResultLimit
 		var inputForward <-chan string
+		var activeRequest string
+		var compactor *Compactor
 		if len(opts) > 0 {
 			if opts[0].CompressThreshold > 0 {
 				compressThreshold = opts[0].CompressThreshold
@@ -131,6 +136,8 @@ func queryLoop(
 				resultLimit = opts[0].ResultLimit
 			}
 			inputForward = opts[0].InputForward
+			activeRequest = opts[0].ActiveRequest
+			compactor = opts[0].Compactor
 		}
 
 		// 初始化循环上下文。
@@ -149,6 +156,8 @@ func queryLoop(
 			seenToolCalls:     make(map[string]bool),
 			fileReads:         make(map[string]time.Time),
 			msgTokens:         -1, // 未知，首次压缩判断用估算
+			compactor:         compactor,
+			activeRequest:     activeRequest,
 		}
 
 		// 执行核心循环。
@@ -164,6 +173,8 @@ type queryLoopOptions struct {
 	CompressThreshold float64 // token 使用率压缩阈值（默认 0.8）
 	ResultLimit       int     // 结果截断上限，字符数（默认 8000）
 	InputForward      <-chan string // 输入转发通道（/interrupt 等控制命令），nil = 不启用
+	ActiveRequest     string  // 当前轮用户请求（压缩时注入 [Compacted] 消息用）
+	Compactor         *Compactor // s08 四步压缩管线（nil = 禁用，保持旧行为）
 }
 
 // runLoop 执行核心 ReAct 循环。
@@ -844,7 +855,7 @@ func (lc *queryLoopContext) yieldError(content string, err error) {
 }
 
 // yieldFinal yield 最终回答事件（通过 event channel 发送给上层）。
-// 包含完整的 token 统计。
+// 包含完整的 token 统计和查询结束后的完整消息数组（跨轮累积用）。
 func (lc *queryLoopContext) yieldFinal(content string, iter int) {
 	lc.events <- QueryEvent{
 		Type:         QueryEventFinal,
@@ -853,6 +864,7 @@ func (lc *queryLoopContext) yieldFinal(content string, iter int) {
 		InputTokens:  lc.totalInputTokens,
 		OutputTokens: lc.totalOutputTokens,
 		TotalTokens:  lc.totalInputTokens + lc.totalOutputTokens,
+		Messages:     lc.messages,
 	}
 }
 

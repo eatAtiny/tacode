@@ -12,8 +12,9 @@ import (
 // Runner.Run() 通过 channel 接收此结果。
 // answer 为空且 err 不为 nil 表示查询失败。
 type queryResult struct {
-	answer string
-	err    error
+	answer   string
+	messages []llm.ChatMessage // 查询结束后的完整消息数组（跨轮累积用，err 为 nil 时有效）
+	err      error
 }
 
 // ──────────────────────────────────────────────────────────
@@ -115,6 +116,9 @@ type QueryEvent struct {
 
 	// ── 错误字段 ──
 	Error error // 错误信息（error 类型）
+
+	// ── 跨轮累积字段（final 类型时有效） ──
+	Messages []llm.ChatMessage // 查询结束后的完整消息数组（供 Runner 跨轮累积）
 
 	// ── 权限请求字段（PermissionRequired 为 true 时有效） ──
 	PermissionRequired bool     // 是否需要权限确认
