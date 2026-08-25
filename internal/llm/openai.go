@@ -117,17 +117,17 @@ func (c *OpenAIClient) Chat(ctx context.Context, systemPrompt, userPrompt string
 
 // ChatMessage 表示一条对话消息，用于 ReAct 多轮交互。
 type ChatMessage struct {
-	Role       string     // "system" | "user" | "assistant" | "tool"
-	Content    string     // 消息文本内容
-	ToolCallID string     // tool 消息对应哪个 tool_call（仅 Role="tool" 时使用）
-	ToolCalls  []ToolCall // assistant 消息关联的工具调用列表
+	Role       string     `json:"role"`       // "system" | "user" | "assistant" | "tool"
+	Content    string     `json:"content"`    // 消息文本内容
+	ToolCallID string     `json:"tool_call_id,omitempty"` // tool 消息对应哪个 tool_call（仅 Role="tool" 时使用）
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // assistant 消息关联的工具调用列表
 }
 
 // ToolCall 表示 LLM 请求调用一个工具。
 type ToolCall struct {
-	ID        string // OpenAI 生成的 tool_call ID（用于关联 tool 消息）
-	Name      string // 工具名称（如 "shell"、"file"）
-	Arguments string // JSON 格式的调用参数
+	ID        string `json:"id"`        // OpenAI 生成的 tool_call ID（用于关联 tool 消息）
+	Name      string `json:"name"`      // 工具名称（如 "shell"、"file"）
+	Arguments string `json:"arguments"` // JSON 格式的调用参数
 }
 
 // ChatResponse 表示 LLM 的非流式响应（ChatWithTools 返回）。
