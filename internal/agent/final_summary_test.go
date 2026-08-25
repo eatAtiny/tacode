@@ -289,46 +289,56 @@ func TestCallLLMStream_CalibratesMsgTokens(t *testing.T) {
 	}
 }
 
-func TestCheckAndCompressContext_UsesExactTokens(t *testing.T) {
-	// 精确值（msgTokens=100）超过阈值 → 触发压缩；估算值（小消息）不会。
-	// 用一个小 contextLimit 放大对比。
+func TestPrepareIfNeeded_NoopWithoutCompactor(t *testing.T) {
+	// compactor 为 nil 时 prepareIfNeeded 是 no-op（保持旧行为）。
 	lc := &queryLoopContext{
-		contextLimit:      200,
-		compressThreshold: 0.8,
-		msgTokens:         180, // 90% > 80% → 压缩
 		messages: []llm.ChatMessage{
 			{Role: "system", Content: "s"},
 			{Role: "user", Content: "u"},
 		},
 		events: make(chan QueryEvent, 16),
 	}
-	if !lc.checkAndCompressContext(0) {
-		t.Fatal("expected compression trigger")
+	if !lc.prepareIfNeeded(0) {
+		t.Fatal("expected no-op to return true")
 	}
-	// 压缩后账本失效。
-	if lc.msgTokens != -1 {
-		t.Errorf("msgTokens should be reset to -1 after compression, got %d", lc.msgTokens)
+	if len(lc.messages) != 2 {
+		t.Errorf("messages should be unchanged without compactor")
 	}
 }
 
-func TestCheckAndCompressContext_FallsBackToEstimate(t *testing.T) {
-	// msgTokens 未知（-1）时回退估算。
+func TestPrepareIfNeeded_NoopForTinyMessages(t *testing.T) {
+	// 注入 compactor 但消息很小（未超限）→ prepare 返回不变。
 	lc := &queryLoopContext{
-		contextLimit:      1_000_000,
-		compressThreshold: 0.8,
-		msgTokens:         -1,
+		compactor: newTestCompactor(t),
 		messages: []llm.ChatMessage{
 			{Role: "system", Content: "s"},
 			{Role: "user", Content: "u"},
 		},
 		events: make(chan QueryEvent, 16),
 	}
-	// 消息很小，估算远低于 80% → 不压缩。
-	if !lc.checkAndCompressContext(0) {
-		t.Fatal("expected no compression for tiny messages")
+	if !lc.prepareIfNeeded(0) {
+		t.Fatal("expected prepare to return true")
 	}
-	// 未压缩，账本保持 -1（下次可能被 usage 校准）。
+	if len(lc.messages) != 2 {
+		t.Errorf("tiny messages should not be compressed, got %d", len(lc.messages))
+	}
+}
+
+func TestPrepareIfNeeded_CompactsOverLimit(t *testing.T) {
+	// 消息超限（字符数 > contextCharLimit）→ prepare 触发压缩（消息数减少）。
+	lc := &queryLoopContext{
+		compactor: newTestCompactor(t),
+		messages:  makeConversation(200, strings.Repeat("z", 2000)), // 大量长结果，远超 50K
+		events:    make(chan QueryEvent, 16),
+	}
+	if !lc.prepareIfNeeded(0) {
+		t.Fatal("expected prepare to return true")
+	}
+	if len(lc.messages) > snipMaxMessages+2 {
+		t.Errorf("messages should be compacted near %d, got %d", snipMaxMessages, len(lc.messages))
+	}
+	// 压缩后 token 账本失效。
 	if lc.msgTokens != -1 {
-		t.Errorf("msgTokens should stay -1 without compression, got %d", lc.msgTokens)
+		t.Errorf("msgTokens should be reset to -1 after compression, got %d", lc.msgTokens)
 	}
 }

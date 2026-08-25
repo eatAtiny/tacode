@@ -257,6 +257,8 @@ func main() {
 	tools.Register(tool.NewGitTool())
 	// webfetch 工具：抓取网页（HTML→Markdown + 提取元信息），仅 GET，默认放行。
 	tools.Register(tool.NewWebFetchTool())
+	// compact 工具：模型主动请求压缩（整批工具执行完后对已闭合回合做历史摘要）。
+	tools.Register(&agent.CompactTool{})
 
 	// ── 步骤 10b: MCP server 连接 ──
 	// -mcp-server flag 指定的外部 MCP server（如 mcp-server-fetch 提供 WebFetch）。
@@ -317,6 +319,9 @@ func main() {
 	runner.SetConfig(cfg)
 	// 注入全局 + 项目级记忆 store：extractMemory 按类型分流写入对应目录。
 	runner.SetMemoryStores(globalMem, projectMem)
+	// 注入 s08 四步压缩管线（transcript/tool-results 目录按会话隔离）。
+	compactor := agent.NewCompactor(client, filepath.Join(activeDir, "transcripts"), filepath.Join(activeDir, "tool-results"))
+	runner.SetCompactor(compactor)
 
 	// one-shot 模式：同步执行单次查询后退出。
 	// 成功 → 输出答案到 stdout，return（让 defer Close() 执行）。

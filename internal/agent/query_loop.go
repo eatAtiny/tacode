@@ -202,8 +202,9 @@ func (lc *queryLoopContext) runLoop() {
 		}
 
 		// ── 步骤 4e: 检查并压缩上下文 ──
-		// token 用量超过 80% 阈值时，压缩旧工具调用消息（保留 system + 最近 2 轮）。
-		if !lc.checkAndCompressContext(iter) {
+		// 每次模型调用前运行 s08 四步压缩管线（Prepare）。
+		// compactor 为 nil 时保持旧行为（不压缩）。
+		if !lc.prepareIfNeeded(iter) {
 			return
 		}
 
@@ -235,6 +236,14 @@ func (lc *queryLoopContext) runLoop() {
 			return
 		}
 
+		// ── 步骤 4c-后置: compact 工具 ──
+		// 整批工具执行完毕（tool 结果已全部追加）后，若模型请求了 compact，
+		// 对该已闭合的回合执行历史摘要（镜像 s08：避免孤儿 tool_result，不丢副作用记录）。
+		if lc.compactor != nil && lc.hasCompactRequest(toolCalls) {
+			lc.messages = lc.compactor.compactHistory(lc.messages, lc.activeRequest)
+			lc.msgTokens = -1
+		}
+
 		// ── 步骤 4d: 重复调用检测 ──
 		// 如果 LLM 重复调用相同的工具+参数，注入警告消息引导 LLM 改变策略。
 		lc.detectDuplicateAndWarn(toolCalls)
@@ -254,40 +263,44 @@ func (lc *queryLoopContext) runLoop() {
 // 压缩策略：
 //   - 保留 system prompt（第 0 条消息，始终不动）
 //   - 保留最近 2 轮的工具调用（4 条消息：assistant + tool × 2）
-//   - 压缩更早的工具调用：只保留摘要（"[已压缩] 调用工具: xxx" + "[已压缩] 工具执行成功/失败"）
+// prepareIfNeeded 每次模型调用前运行 s08 四步压缩管线。
+//
+// 与旧 checkAndCompressContext 的差异：
+//   - 由 token 阈值触发改为 Prepare 内部按字符超限分级触发（无条件跑步骤 1/2）
+//   - 旧压缩用占位符丢弃信息；新管线每步都落盘可恢复（transcript/tool-results）
+//   - compactor 为 nil 时 no-op（保持旧行为，保护不注入 compactor 的测试）
 //
 // 返回：
 //   - true: 继续执行
 //   - false: 发生错误，需要退出
-func (lc *queryLoopContext) checkAndCompressContext(iter int) bool {
-	if lc.contextLimit <= 0 {
+func (lc *queryLoopContext) prepareIfNeeded(iter int) bool {
+	if lc.compactor == nil {
 		return true
 	}
 
-	// token 用量：优先用 API usage 校准的精确值（msgTokens），
-	// 未知（-1）或压缩后失效时回退到启发式估算。
-	totalTokens := lc.msgTokens
-	if totalTokens <= 0 {
-		totalTokens = estimateMessagesTokens(lc.messages)
+	before := len(lc.messages)
+	lc.messages = lc.compactor.Prepare(lc.messages, lc.activeRequest)
+	if len(lc.messages) != before {
+		// 压缩改变了消息内容，旧 token 账本失效。
+		lc.msgTokens = -1
+		// yield: 压缩事件（供 UI 提示）。
+		lc.events <- QueryEvent{
+			Type:      QueryEventThink,
+			Content:   "🗜️ 上下文接近上限，正在压缩...",
+			Iteration: iter + 1,
+		}
 	}
-	usageRatio := float64(totalTokens) / float64(lc.contextLimit)
-
-	if usageRatio <= lc.compressThreshold {
-		return true
-	}
-
-	// yield: 压缩事件。
-	lc.events <- QueryEvent{
-		Type:      QueryEventThink,
-		Content:   "🗜️ 上下文接近上限，正在压缩...",
-		Iteration: iter + 1,
-	}
-
-	// 压缩前持久化被丢弃的工具结果（保真：LLM 可回读），失败不阻断压缩。
-	lc.messages = lc.compressMessagesWithPersistence(lc.messages, iter, tool.DefaultToolResultsDir)
-	// 压缩改变了消息内容，旧账本失效：标记未知，下次用估算（或用新的 usage 重新校准）。
-	lc.msgTokens = -1
 	return true
+}
+
+// hasCompactRequest 判断工具调用批次中是否包含 compact 请求。
+func (lc *queryLoopContext) hasCompactRequest(toolCalls []llm.ToolCall) bool {
+	for _, tc := range toolCalls {
+		if tc.Name == "compact" {
+			return true
+		}
+	}
+	return false
 }
 
 // callLLMStream 调用 LLM 流式接口，收集响应。
@@ -312,17 +325,44 @@ func (lc *queryLoopContext) callLLMStream(iter int) (string, []llm.ToolCall, boo
 		Iteration: iter + 1,
 	}
 
-	streamChan := lc.llmClient.ChatWithToolsStream(lc.ctx, lc.messages, lc.tools)
-
+	// ── 流式调用 + prompt_too_long 补救 ──
+	// 每次模型调用失败且为 too-long 错误时，reactiveCompact 压缩后重试（最多 1 次）。
+	// 镜像 s08 的 reactive_compact：保最近 5 条 + 摘要前置。
 	var fullContent string
 	var toolCalls []llm.ToolCall
 	var inputTokens, outputTokens int
+	for {
+		streamChan := lc.llmClient.ChatWithToolsStream(lc.ctx, lc.messages, lc.tools)
+		streamErr := lc.drainStream(streamChan, iter, &fullContent, &toolCalls, &inputTokens, &outputTokens)
+		if streamErr == nil {
+			break // 成功
+		}
+		if lc.compactor != nil && isTooLongError(streamErr) && lc.reactiveRetries < maxReactiveRetries {
+			lc.reactiveRetries++
+			lc.messages = lc.compactor.reactiveCompact(lc.messages, lc.activeRequest)
+			lc.msgTokens = -1
+			fullContent, toolCalls = "", nil
+			continue // 压缩后重试
+		}
+		// 非 too-long 或重试耗尽：yield 错误并返回失败。
+		lc.yieldError("stream error", streamErr)
+		return "", nil, false
+	}
 
+	// 暂存 token 信息，供后续 accumulateTokens() 累计。
+	lc.lastInputTokens = inputTokens
+	lc.lastOutputTokens = outputTokens
+
+	return fullContent, toolCalls, true
+}
+
+// drainStream 消费流式 channel，返回错误（nil = 成功）。
+func (lc *queryLoopContext) drainStream(streamChan <-chan llm.StreamEvent, iter int, fullContent *string, toolCalls *[]llm.ToolCall, inputTokens, outputTokens *int) error {
 	for streamEvent := range streamChan {
 		switch streamEvent.Type {
 		case llm.StreamEventDelta:
 			// 增量文本：追加到 fullContent 并实时 yield 给上层。
-			fullContent += streamEvent.Content
+			*fullContent += streamEvent.Content
 			lc.events <- QueryEvent{
 				Type:         QueryEventDelta,
 				Content:      streamEvent.Content,
@@ -333,31 +373,25 @@ func (lc *queryLoopContext) callLLMStream(iter int) (string, []llm.ToolCall, boo
 
 		case llm.StreamEventDone:
 			// 流式完成：提取最终的工具调用列表和 token 统计。
-			toolCalls = streamEvent.ToolCalls
-			inputTokens = streamEvent.InputTokens
-			outputTokens = streamEvent.OutputTokens
+			*toolCalls = streamEvent.ToolCalls
+			*inputTokens = streamEvent.InputTokens
+			*outputTokens = streamEvent.OutputTokens
 			// usage.prompt_tokens 是本次请求输入消息的精确 token 数
 			// （API 计算，含 role 标记/JSON schema 结构开销）。
 			// 用它校准消息数组的 token 账本；0 表示 API 未返回（兜底估算）。
-			if inputTokens > 0 {
-				lc.msgTokens = inputTokens
+			if *inputTokens > 0 {
+				lc.msgTokens = *inputTokens
 			}
 			if streamEvent.Content != "" {
-				fullContent = streamEvent.Content
+				*fullContent = streamEvent.Content
 			}
 
 		case llm.StreamEventError:
-			// 流式错误：yield Error 事件并返回失败。
-			lc.yieldError("stream error", streamEvent.Error)
-			return "", nil, false
+			// 流式错误：返回错误（由调用方决定补救或退出）。
+			return streamEvent.Error
 		}
 	}
-
-	// 暂存 token 信息，供后续 accumulateTokens() 累计。
-	lc.lastInputTokens = inputTokens
-	lc.lastOutputTokens = outputTokens
-
-	return fullContent, toolCalls, true
+	return nil
 }
 
 // lastInputTokens 和 lastOutputTokens 用于暂存每次调用的 token 数。

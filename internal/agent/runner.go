@@ -138,6 +138,12 @@ func (r *Runner) SetMemoryStores(globalStore, projectStore *memory.MemoryStore) 
 	}
 }
 
+// SetCompactor 注入 s08 四步压缩管线。
+// nil = 禁用压缩（保持旧行为）。在 Run/RunOnce 之前调用。
+func (r *Runner) SetCompactor(c *Compactor) {
+	r.compactor = c
+}
+
 // maxIter 返回 ReAct 最大循环次数。
 // 优先使用 config 中的显式设置，否则回退到代码默认 10。
 func (r *Runner) maxIter() int {
