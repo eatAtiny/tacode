@@ -321,6 +321,9 @@ func main() {
 	runner.SetMemoryStores(globalMem, projectMem)
 	// 注入 s08 四步压缩管线（transcript/tool-results 目录按会话隔离）。
 	compactor := agent.NewCompactor(client, filepath.Join(activeDir, "transcripts"), filepath.Join(activeDir, "tool-results"))
+	if cfg.ContextCharLimit != nil {
+		compactor.SetContextCharLimit(*cfg.ContextCharLimit)
+	}
 	runner.SetCompactor(compactor)
 
 	// one-shot 模式：同步执行单次查询后退出。

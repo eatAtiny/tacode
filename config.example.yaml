@@ -16,6 +16,10 @@ result_limit: 8000
 # 上下文压缩阈值：token 使用率超过该值触发压缩（默认 0.8，范围 (0, 1)）
 compress_threshold: 0.8
 
+# 上下文字符上限：超过该字符数触发压缩管线（默认 50000，必须 > 0）。
+# 镜像 s08 的 CONTEXT_CHAR_LIMIT：压缩管线（大结果转存→消息归档→微压缩→历史摘要）以此为触发基准。
+# context_char_limit: 50000
+
 # 模型上下文窗口大小（token 数）。
 # 覆盖 OPENAI_CONTEXT_LIMIT 与模型名推断；不设置则按 env → 模型推断。
 # context_limit: 128000

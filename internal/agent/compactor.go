@@ -70,6 +70,14 @@ func NewCompactor(llmClient *llm.OpenAIClient, transcriptDir, toolResultsDir str
 	}
 }
 
+// SetContextCharLimit 设置上下文字符上限（config 覆盖）。
+// 传入 <= 0 时保持当前值不变（防御性）。
+func (c *Compactor) SetContextCharLimit(limit int) {
+	if limit > 0 {
+		c.contextCharLimit = limit
+	}
+}
+
 // estimateChars 估算消息数组的字符数（镜像 s08 的 estimate_chars：JSON 序列化长度）。
 func estimateChars(messages []llm.ChatMessage) int {
 	data, err := json.Marshal(messages)

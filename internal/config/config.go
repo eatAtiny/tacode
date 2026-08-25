@@ -33,6 +33,10 @@ type Config struct {
 	// ContextLimit 模型上下文窗口大小（token 数）。
 	// nil 时回退到 OPENAI_CONTEXT_LIMIT 环境变量 → 模型名推断。
 	ContextLimit *int `yaml:"context_limit"`
+
+	// ContextCharLimit 上下文字符上限，超过触发压缩管线（默认 50000）。
+	// 镜像 s08 的 CONTEXT_CHAR_LIMIT；Compressor 的 micro/fit/compact 步骤以此触发。
+	ContextCharLimit *int `yaml:"context_char_limit"`
 }
 
 // Default 返回全部采用默认值的配置。
@@ -87,6 +91,9 @@ func (c *Config) Validate() error {
 	if c.ContextLimit != nil && *c.ContextLimit <= 0 {
 		return errors.New("context_limit must be > 0")
 	}
+	if c.ContextCharLimit != nil && *c.ContextCharLimit <= 0 {
+		return errors.New("context_char_limit must be > 0")
+	}
 	return nil
 }
 
@@ -119,6 +126,10 @@ func (c *Config) Apply(base *Config) *Config {
 	if c.ContextLimit != nil {
 		v := *c.ContextLimit
 		out.ContextLimit = &v
+	}
+	if c.ContextCharLimit != nil {
+		v := *c.ContextCharLimit
+		out.ContextCharLimit = &v
 	}
 	return &out
 }
