@@ -608,9 +608,14 @@ func (b *BubbleUI) statusBarTextLocked() string {
 }
 
 // clearStatusBar 清除状态栏所在行（将光标移到该行并清空）。
-// 状态栏渲染在输入提示符上方一行，追加输出前需先清除，输出完再重绘。
-// 状态位驱动：仅当状态栏当前在屏（statusBarShown）时才执行上移清行，
-// 避免"状态栏已清除却空上移清错行"。清除后置 statusBarShown = false。
+// 状态栏渲染在屏幕底部最后一行上方，追加输出前需先清除，输出完再重绘。
+// 状态位驱动：仅当状态栏当前在屏（statusBarShown）时才执行清除，
+// 避免"状态栏已清除却空操作"。清除后置 statusBarShown = false。
+//
+// 定位：先把光标移到屏幕底部最后一行（\033[999B 下移 999 行，实际停在最后一行），
+// 再上移一行到状态栏位置清除。这样无论光标此前在哪（工具框线内、思考中行、正文中间），
+// clear 都只作用于屏幕底部状态栏行，不会清错正文行。
+// 注意：清除后光标停留在状态栏行，调用方（追加式输出）会从该行覆盖新内容。
 func (b *BubbleUI) clearStatusBar() {
 	b.uiMu.Lock()
 	defer b.uiMu.Unlock()
@@ -620,18 +625,19 @@ func (b *BubbleUI) clearStatusBar() {
 	if !b.statusBarShown {
 		return
 	}
-	// 状态栏行在最后一行上方：光标上移 1 行、清行。
-	// 注意：不输出 \r 也不下移——调用方（追加式输出）会继续从该行输出新内容，
-	// 下移回来反而会造成换行错位。
-	fmt.Print("\033[1A\033[2K")
+	fmt.Print("\033[999B\033[1A\033[2K")
 	os.Stdout.Sync()
 	b.statusBarShown = false
 }
 
-// renderStatusBar 在输入提示符上方渲染状态栏。
-// 前提：调用时光标位于输入提示符行首。
+// renderStatusBar 在屏幕底部渲染状态栏。
 // 状态位驱动：仅当状态栏不在屏（!statusBarShown）时才执行上移输出，
 // 避免连续 render 时重复上移叠字。渲染后置 statusBarShown = true。
+//
+// 定位：先把光标移到屏幕底部最后一行（\033[999B），再上移一行渲染状态栏。
+// 多迭代场景下 OnToolCall 的 \033[u\033[J 会把光标恢复到"思考中"行（非输入提示符行），
+// 若直接 \033[1A 会把状态栏画进工具框线内（叠字）；\033[999B 先归位到底部可避免。
+// 渲染后光标停留在底部行（状态栏 \n 换行落到最后一行），与 runner 的 "> " 提示符衔接。
 func (b *BubbleUI) renderStatusBar() {
 	b.uiMu.Lock()
 	defer b.uiMu.Unlock()
@@ -639,12 +645,12 @@ func (b *BubbleUI) renderStatusBar() {
 		return
 	}
 	if b.statusBarShown {
-		// 已在屏：仅重绘内容（当前光标恰好在提示符行），不重复上移。
+		// 已在屏：重绘内容。仍先 \033[999B 定位到底部，避免光标漂移（多迭代/后台余额）时画进正文。
 		line := b.statusBarTextLocked()
 		if line == "" {
 			return
 		}
-		fmt.Printf("\033[1A\033[2K%s\n", line)
+		fmt.Printf("\033[999B\033[1A\033[2K%s\n", line)
 		os.Stdout.Sync()
 		return
 	}
@@ -652,8 +658,7 @@ func (b *BubbleUI) renderStatusBar() {
 	if line == "" {
 		return
 	}
-	// 上移一行（输入提示符上一行）、输出状态栏。光标留在状态栏行。
-	fmt.Printf("\033[1A%s\n", line)
+	fmt.Printf("\033[999B\033[1A%s\n", line)
 	os.Stdout.Sync()
 	b.statusBarShown = true
 }
