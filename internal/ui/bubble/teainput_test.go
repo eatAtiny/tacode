@@ -36,13 +36,14 @@ func TestTeaUIView_ContainsSeparator(t *testing.T) {
 	}
 }
 
-// teaAppendMsg 追加语义（流式合并）：不以 \n 结尾的内容是流式增量，合并进当前行；
-// 以 \n 结尾的内容是闭合块，若当前行未闭合（流式增量中）则先断开再另起新行。
+// teaAppendMsg 追加语义（流式合并）：不以 \n 结尾的内容是流式增量（AddDelta，合并进当前行）；
+// 以 \n 结尾的内容是闭合块（AddBlock，块从新行开始）。块方法会闭合未完成的流式行。
 func TestTeaUI_AppendConversation(t *testing.T) {
 	b := NewBubbleUI()
 
 	m := b.teaModel()
 	m.width = 60
+	m.height = 24
 
 	// 闭合块（思考行）：新起一行。
 	m2, cmd := m.Update(teaAppendMsg{content: "  ⏳ 思考中...\n"})
@@ -56,7 +57,7 @@ func TestTeaUI_AppendConversation(t *testing.T) {
 	if !strings.Contains(v, "你好世界") {
 		t.Errorf("流式增量应合并为同一行，View 缺少 %q，实际:\n%s", "你好世界", v)
 	}
-	// 思考行与流式行应分行（闭合块尾部 \n 断开）。
+	// 思考行与流式行应分行（闭合块从新行开始）。
 	if strings.Contains(v, "思考中...你好") {
 		t.Errorf("闭合块与流式行不应拼在同一行，实际:\n%s", v)
 	}
@@ -68,20 +69,25 @@ func TestTeaUI_AppendBlockBreaksStreamingLine(t *testing.T) {
 
 	m := b.teaModel()
 	m.width = 60
+	m.height = 24
 
-	m2, _ := m.Update(teaAppendMsg{content: "你好"})            // 流式增量（未闭合）
-	m3, _ := m2.Update(teaAppendMsg{content: "世界"})           // 流式增量（继续合并）
+	m2, _ := m.Update(teaAppendMsg{content: "你好"})          // 流式增量（未闭合）
+	m3, _ := m2.Update(teaAppendMsg{content: "世界"})         // 流式增量（继续合并）
 	m4, _ := m3.Update(teaAppendMsg{content: "  ✅ 思考完成\n"}) // 闭合块到达
 
 	v := m4.View()
-	if !strings.Contains(v, "你好世界\n") {
-		t.Errorf("闭合块应断开流式行另起，View 实际:\n%s", v)
+	if !strings.Contains(v, "你好世界") {
+		t.Errorf("流式增量应保留，View 实际:\n%s", v)
 	}
 	if strings.Contains(v, "你好世界  ✅ 思考完成") {
 		t.Errorf("闭合块不应与流式行拼在同一行，实际:\n%s", v)
 	}
 	if !strings.Contains(v, "✅ 思考完成") {
 		t.Errorf("闭合块内容应保留，实际:\n%s", v)
+	}
+	// 对话区仍为行模型（跨越多行，被视口裁剪），断言按行组织而非拼接成单块。
+	if lines := strings.Split(v, "\n"); len(lines) < 3 {
+		t.Errorf("对话区应包含多个行，实际行数 %d:\n%s", len(lines), v)
 	}
 }
 
@@ -91,29 +97,140 @@ func TestTeaUI_AppendDeltaAfterBlockStartsNewLine(t *testing.T) {
 
 	m := b.teaModel()
 	m.width = 60
+	m.height = 24
 
-	m2, _ := m.Update(teaAppendMsg{content: "  ⏳ 思考中...\n"}) // 闭合块
-	m3, _ := m2.Update(teaAppendMsg{content: "增量"})             // 流式增量 → 新行
+	m2, _ := m.Update(teaAppendMsg{content: "  ⏳ 思考中...\n"}) // 闭合块（新起一行，deltaOpen=false）
+	m3, _ := m2.Update(teaAppendMsg{content: "增量"})          // 流式增量 → 新起一行
 
 	v := m3.View()
-	if !strings.Contains(v, "思考中...\n增量") {
+	if !strings.Contains(v, "思考中...") {
+		t.Errorf("闭合块内容应保留，View 实际:\n%s", v)
+	}
+	if !strings.Contains(v, "增量") {
 		t.Errorf("闭合块后的流式增量应新起一行，View 实际:\n%s", v)
+	}
+	// 行模型：思考行与增量不在同一行。
+	for _, line := range strings.Split(v, "\n") {
+		if strings.Contains(line, "思考中...") && strings.Contains(line, "增量") {
+			t.Errorf("闭合块与流式增量不应拼在同一行，实际:\n%s", v)
+		}
 	}
 }
 
-// 对话区 View 的输出结构：对话 entry 行 + 分隔线 + 状态栏 + 输入框。
+// 对话区 View 的输出结构：对话行 + 分隔线 + 状态栏 + 输入框。
 func TestTeaUI_ViewStructure(t *testing.T) {
 	b := NewBubbleUI()
 
 	m := b.teaModel()
 	m.width = 60
+	m.height = 24
 	m2, _ := m.Update(teaAppendMsg{content: "  ⏳ 思考中...\n"})
 	m3, _ := m2.Update(teaAppendMsg{content: "回答内容\n"})
 
 	v := m3.View()
-	// 闭合块内容按行出现（\n join），分隔线在对话区之后。
-	if !strings.Contains(v, "思考中...\n回答内容") {
-		t.Errorf("对话区应分行累积，View 实际:\n%s", v)
+	// 闭合块按行累积（对话区行模型），分隔线在对话区之后。
+	if !strings.Contains(v, "思考中...") {
+		t.Errorf("对话区应包含思考行，View 实际:\n%s", v)
+	}
+	if !strings.Contains(v, "回答内容") {
+		t.Errorf("对话区应包含回答行，View 实际:\n%s", v)
+	}
+	// 分隔线出现在对话区与状态栏之间。
+	if strings.Contains(v, "回答内容"+strings.Repeat("─", 60)) {
+		t.Errorf("分隔线应位于对话区之后（独立行），View 实际:\n%s", v)
+	}
+}
+
+// 对话区滚动：↑/PgUp 上滚锁定（新内容不强制滚底），↓/PgDn 滚回底部解锁。
+func TestTeaUI_ScrollLock(t *testing.T) {
+	b := NewBubbleUI()
+
+	m := b.teaModel()
+	m.width = 60
+	m.height = 24
+
+	// 灌入足够内容（> 视口高度 20 行）使对话区可滚动。
+	for i := 0; i < 30; i++ {
+		m2, _ := m.Update(teaAppendMsg{content: fmt.Sprintf("line %02d\n", i)})
+		m = m2.(*teaUI)
+	}
+	// 默认跟随：应在底部（可见最后一行）。
+	if !m.conversation.IsAtBottom() {
+		t.Error("默认跟随模式下应自动滚到底部")
+	}
+	if !strings.Contains(m.View(), "line 29") {
+		t.Error("跟随模式下 View 应显示最后一行")
+	}
+
+	// ↑ 上滚 → 锁定滚动（新内容不再强制滚底）。
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = m2.(*teaUI)
+	if !m.scrollLock {
+		t.Error("↑ 上滚后应锁定滚动")
+	}
+	// 上滚 3 行后底部内容上移出视口（已离开底部）。
+	if strings.Contains(m.View(), "line 29") {
+		t.Error("上滚后不应再显示底部最后一行")
+	}
+
+	// 上滚后新内容到达：不强制滚到底部（阅读位置不被打断）。
+	m2, _ = m.Update(teaAppendMsg{content: "line 30\n"})
+	m = m2.(*teaUI)
+	if strings.Contains(m.View(), "line 30") {
+		t.Error("滚动锁定时新内容不应强制滚到底部显示")
+	}
+	if m.conversation.IsAtBottom() {
+		t.Error("滚动锁定时不应自动滚到底部")
+	}
+
+	// ↓ 滚回底部 → 解锁滚动（恢复自动跟随）。
+	for !m.conversation.IsAtBottom() {
+		m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = m2.(*teaUI)
+	}
+	if m.scrollLock {
+		t.Error("滚回底部后应解锁滚动")
+	}
+	// 解锁后新内容恢复自动滚底。
+	m2, _ = m.Update(teaAppendMsg{content: "line 31\n"})
+	m = m2.(*teaUI)
+	if !strings.Contains(m.View(), "line 31") {
+		t.Error("解锁后新内容应自动滚到底部显示")
+	}
+}
+
+// Enter 提交输入时解除滚动锁定（恢复自动跟随）。
+func TestTeaUI_SubmitUnlocksScroll(t *testing.T) {
+	b := NewBubbleUI()
+
+	m := b.teaModel()
+	m.width = 60
+	m.height = 24
+
+	for i := 0; i < 30; i++ {
+		m2, _ := m.Update(teaAppendMsg{content: fmt.Sprintf("line %02d\n", i)})
+		m = m2.(*teaUI)
+	}
+	// 上滚锁定。
+	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = m2.(*teaUI)
+	if !m.scrollLock {
+		t.Fatal("前置：上滚后应锁定滚动")
+	}
+
+	// 输入 "hello" 后 Enter 提交。
+	for _, r := range []rune("hello") {
+		m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = m2.(*teaUI)
+	}
+	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = m2.(*teaUI)
+
+	if m.scrollLock {
+		t.Error("提交输入后应解锁滚动")
+	}
+	if !m.conversation.IsAtBottom() {
+		t.Error("提交输入后应滚回底部（恢复跟随）")
 	}
 }
 

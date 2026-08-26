@@ -148,6 +148,27 @@ func (r *Runner) SetCompactor(c *Compactor) {
 	r.compactor = c
 }
 
+// isTeaUIMode 判断当前 UI 是否 tea 渲染模式（阶段 2）。
+// tea 模式下输入框由 tea 模型渲染（alt screen 全屏），主屏提示符不打印，
+// 否则主屏 "> " 与 tea 输入框叠加成双提示符。
+// 判断用类型断言而非接口方法：TextUI 等 headless UI 无 tea 程序。
+// r.ui 由 main.go 必传（NewRunner），不会为 nil。
+func (r *Runner) isTeaUIMode() bool {
+	_, ok := r.ui.(*bubble.BubbleUI)
+	return ok
+}
+
+// printPrompt 打印主屏输入提示符 "> "。
+// tea 模式（阶段 2）下输入框由 tea 模型渲染（位于底部输入栏），主屏提示符跳过，
+// 避免 "> > " 双提示符叠加；非 tea 模式（TextUI/阶段 1 回退）保持原行为。
+func (r *Runner) printPrompt() {
+	if r.isTeaUIMode() {
+		return
+	}
+	fmt.Print("> ")
+	os.Stdout.Sync()
+}
+
 // maxIter 返回 ReAct 最大循环次数。
 // 优先使用 config 中的显式设置，否则回退到代码默认 10。
 func (r *Runner) maxIter() int {
@@ -248,9 +269,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	var currentInput string              // 当前查询的用户输入，用于保存记忆
 	var inputForward chan string         // 查询期间转发输入到此 channel（权限确认等）
 
-	// 显示初始提示符（立即 flush 确保在用户输入前显示）。
-	fmt.Print("> ")
-	os.Stdout.Sync()
+	// 显示初始提示符（立即 flush 确保在用户输入前显示；tea 模式跳过，输入框由 tea 渲染）。
+	r.printPrompt()
 
 	for {
 		select {
@@ -268,8 +288,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 			if input == "" {
 				if !queryRunning {
-					fmt.Print("> ")
-					os.Stdout.Sync()
+					r.printPrompt()
 				}
 				continue
 			}
@@ -291,8 +310,7 @@ func (r *Runner) Run(ctx context.Context) error {
 					inputForward = nil
 					r.ui.OnMessage("⏹️  已停止")
 					round++
-					fmt.Print("> ")
-					os.Stdout.Sync()
+					r.printPrompt()
 				} else if inputForward != nil {
 					// 转发给 query 侧（权限确认等场景）。
 					inputForward <- input
@@ -312,8 +330,7 @@ func (r *Runner) Run(ctx context.Context) error {
 					r.ui.OnError(fmt.Errorf("未知命令，可用: /new, /list, /switch, /delete, /rename, /current, /compress, /memory, /reload, /balance"))
 				}
 				round++
-				fmt.Print("> ")
-				os.Stdout.Sync()
+				r.printPrompt()
 				continue
 			}
 
@@ -389,8 +406,7 @@ func (r *Runner) Run(ctx context.Context) error {
 				}(round, currentInput, result.answer)
 			}
 
-			fmt.Print("> ")
-			os.Stdout.Sync()
+			r.printPrompt()
 		}
 	}
 }
