@@ -81,6 +81,33 @@ func TestTeaUI_SubmitInput(t *testing.T) {
 	t.Skip("阶段2 骨架：输入提交的完整链路在 Task 6 接线后测试")
 }
 
+// submitInput 写入 tea 专用 channel（不经过 raw 路径的 inputChan），
+// 且永不 close（无 send-vs-close 竞态、无 panic）。
+func TestTeaUI_SubmitInputBridge(t *testing.T) {
+	b := NewBubbleUI()
+
+	// 写入 3 条（缓冲 1，超出丢弃），模拟 Runner 未及时消费时不阻塞。
+	b.submitInput("hello")
+	b.submitInput("second")
+	b.submitInput("third")
+
+	// 第一条应可读出（未被丢弃）。
+	ch := b.ReadTeaInputChan()
+	select {
+	case got := <-ch:
+		if got != "hello" {
+			t.Errorf("tea 输入 = %q, want %q", got, "hello")
+		}
+	default:
+		t.Error("tea 输入 channel 应含第一条提交")
+	}
+
+	// raw 路径的 inputChan 不应被 tea 输入启动/写入。
+	if b.inputChan != nil {
+		t.Errorf("submitInput 不应初始化 raw inputChan，实际非 nil")
+	}
+}
+
 // teaUI 的 Update 返回 tea.Model（接口签名），动态类型保持 *teaUI。
 func TestTeaUI_ValueReceiver(t *testing.T) {
 	b := NewBubbleUI()

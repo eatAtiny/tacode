@@ -93,6 +93,13 @@ type BubbleUI struct {
 	// inputOnce 保证后台输入 goroutine 只启动一次
 	inputOnce sync.Once
 
+	// teaInputCh 是 tea 输入桥接 channel（阶段 2 起 tea 输入专用，与 raw 路径隔离）。
+	// submitInput 写入，Runner 通过 ReadTeaInputChan 读取。
+	// 生命周期：由 NewBubbleUI 创建，永不关闭——与 raw 路径的 inputChan
+	// （sync.Once + rawInputLoop defer close）完全隔离，避免 close 与 send 竞态
+	// （go test -race 曾检测到 submitInput 发送 vs rawInputLoop close 的 data race）。
+	teaInputCh chan string
+
 	// oldTermState 生模式前的终端状态，Close() 时恢复以防止终端残留生模式。
 	oldTermState *term.State
 	// termFd 终端文件描述符。
@@ -121,6 +128,7 @@ func NewBubbleUI(_ ...tea.ProgramOption) *BubbleUI {
 		toolView:      components.NewToolViewModel(),
 		glamour:       glamourRenderer,
 		statusVisible: true,
+		teaInputCh:    make(chan string, 1),
 	}
 }
 
@@ -793,7 +801,8 @@ func (m *teaUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case teaBalanceMsg:
-		m.b.balanceText = v.balance
+		// 走 SetBalanceText（持 uiMu 锁），避免与后台余额查询 goroutine 并发写 race。
+		m.b.SetBalanceText(v.balance)
 		return m, nil
 	}
 	var cmd tea.Cmd
@@ -802,11 +811,11 @@ func (m *teaUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // setWidths 按终端宽度设置输入框与状态栏宽度。
-// 输入框宽度需减去提示符占位（> ），过窄时保留最小宽度避免 textinput 截断异常。
+// 注意：InputModel.SetWidth 内部已减去提示符占位（> ），这里直接传 m.width，
+// 若再减 4 会双重减法（net width-8）且与分割线宽度（m.width）不一致。
+// textinput 对 Width <= 0 时不做截断（完整渲染占位符），窄终端可安全退化为不限制宽度。
 func (m *teaUI) setWidths() {
-	if m.width > 4 {
-		m.input.SetWidth(m.width - 4)
-	}
+	m.input.SetWidth(m.width)
 	m.status.SetWidth(m.width)
 }
 
@@ -841,12 +850,22 @@ func (m *teaUI) View() string {
 	return sb.String()
 }
 
-// submitInput 把用户提交的输入桥接给 Runner（写入 inputChan）。
+// submitInput 把用户提交的输入桥接给 Runner（写入 tea 输入专用 channel）。
 //
-// 阶段 2：tea 渲染接管后，输入不再走 rawInputLoop。
-// 通过 inputChan 桥接（复用现有 Runner select 语义）。
-// 注意：inputChan 由 ReadInputChan 初始化（sync.Once）。
+// 阶段 2 起输入由 tea 接管，tea 输入与 raw 路径完全隔离：
+//   - 写 b.teaInputCh（NewBubbleUI 创建，永不关闭），不经 ReadInputChan/rawInputLoop，
+//     避免 raw loop 在非 TTY 下 term.MakeRaw 失败退出 → defer close(inputChan) 与发送竞态
+//     （go test -race 曾检测到 send vs close 的 data race，且 raw loop 退出后发送会 panic）。
+//   - 缓冲满（Runner 未及时消费）时丢弃输入，避免阻塞 tea 事件循环。
 func (b *BubbleUI) submitInput(value string) {
-	_ = b.ReadInputChan()
-	b.inputChan <- value
+	select {
+	case b.teaInputCh <- value:
+	default:
+		// 缓冲满（Runner 未及时消费）时丢弃，避免阻塞 tea 事件循环。
+	}
+}
+
+// ReadTeaInputChan 返回 tea 输入桥接 channel（阶段 2 起 Runner 从此读用户输入）。
+func (b *BubbleUI) ReadTeaInputChan() <-chan string {
+	return b.teaInputCh
 }
