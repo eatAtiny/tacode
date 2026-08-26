@@ -20,71 +20,44 @@ import (
 //
 // 执行流程（6 个步骤）：
 //
-//	步骤 1: 构建上下文 — 从三层记忆（L3 记忆 + L2 摘要 + 降级 L1）检索
-//	步骤 2: 自动压缩检查 — 上下文 token 用量超过模型窗口 80% 时触发压缩
+//	步骤 1: 组装消息 — 从累积对话（baseMessages）+ 记忆 preamble 组装
+//	步骤 2: 自动压缩检查 — 上下文超过阈值时压缩旧消息
 //	步骤 3: 构建 System/User Prompt — 组合 ReAct 提示词 + 工具描述
 //	步骤 4: 启动 queryLoop — 获取 event channel，开始异步生成器
 //	步骤 5: 消费事件 — 从 channel 实时读取事件并转发到 UI + EventStore
-//	步骤 6: 返回最终结果 — 将 final answer 返回给 Runner
+//	步骤 6: 返回最终结果 — 将 final answer + 完整消息数组返回给 Runner
 //
 // 设计：
 //   - 分离关注点：queryLoop 可独立测试和复用
 //   - QueryEngine 负责所有上层逻辑（UI、事件、记忆）
 //   - queryLoop 只负责核心循环逻辑（LLM 调用、工具执行、压缩）
+//   - messages 跨轮累积：baseMessages 是上一轮完成后的完整消息数组，
+//     本轮在其基础上追加用户任务（跨轮累积架构的核心）
 //
 // 参数：
 //   - ctx: 上下文，用于取消和超时控制（/stop 通过 cancel 实现）
 //   - round: 当前轮次号（从 1 开始）
 //   - userInput: 用户输入的原始文本
 //   - inputForward: 输入转发 channel（权限确认时从 Runner 转发用户输入到此）
+//   - baseMessages: 跨轮累积的对话消息（nil 时从记忆构建）
 //
 // 返回：
 //   - string: 最终回答文本（LLM 的完整回复）
+//   - []llm.ChatMessage: 查询结束后的完整消息数组（供 Runner 跨轮累积）
 //   - error: 错误信息
-func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, inputForward <-chan string) (string, error) {
+func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, inputForward <-chan string, baseMessages []llm.ChatMessage) (string, []llm.ChatMessage, error) {
 	// ═══════════════════════════════════════════════════════
-	// 步骤 1: 构建上下文（从三层记忆中检索）
+	// 步骤 1: 组装消息（跨轮累积 + 记忆 preamble）
 	// ═══════════════════════════════════════════════════════
-	// BuildContext 的检索顺序：
-	//   1) L3 记忆索引（MEMORY.md）
-	//   2) L3 高重要性记忆内容（importance >= 2，最多 10 条）
-	//   3) L2 最近摘要（最近 10 条）
-	//   4) L2 为空时降级 → EventStore 摘要 → HistoryStore 摘要
-	contextDigest, err := r.retriever.BuildContext(userInput)
-	if err != nil {
-		// 降级：从事件日志生成简易摘要。
-		contextDigest = r.events.Digest(10)
-	}
+	// 消息结构（前缀缓存优化）：
+	//   messages[0] = system（全静态，工具描述 + 指南，跨轮不变）
+	//   messages[1] = preamble（<system-reminder> 记忆参考，会话内字节稳定）
+	//   messages[2..] = 累积对话（baseMessages）
+	//   messages[last] = 用户任务（轮次 + 输入，唯一每轮变化的消息）
+	//
+	// 静态内容前置、可变内容后置，最大化前缀缓存命中。
 
-	// ═══════════════════════════════════════════════════════
-	// 步骤 2: 自动压缩检查
-	// ═══════════════════════════════════════════════════════
-	// 估算上下文 token 用量，接近模型窗口 80% 阈值时触发 L2 摘要压缩。
-	// 压缩策略：LLM 合并旧摘要为一段综合摘要，保留最近 3 条不动。
-	if contextDigest != "" {
-		totalTokens := memory.EstimateTokens(contextDigest + userInput + r.tools.Descriptions())
-		limit := r.llm.ContextLimit()
-		compressed, compErr := r.retriever.CheckAndCompress(ctx, r.llm, limit, totalTokens)
-		if compressed {
-			if compErr != nil {
-				r.ui.OnMessage(fmt.Sprintf("⚠️ 自动压缩失败: %v", compErr))
-			} else {
-				r.ui.OnMessage("🗜️ 上下文接近上限，已自动压缩摘要")
-				// 压缩后重新构建上下文（用新的压缩后摘要）。
-				if newCtx, err := r.retriever.BuildContext(userInput); err == nil {
-					contextDigest = newCtx
-				}
-			}
-		}
-	}
-
-	// ═══════════════════════════════════════════════════════
-	// 步骤 3: 构建 System/User Prompt
-	// ═══════════════════════════════════════════════════════
-	// System Prompt: ReAct 工作方式 + 可用工具列表 + 工具使用指南 + 注意事项
-	// User Prompt: 轮次号 + 记忆上下文 + 用户任务
-
-	// 收集各工具的使用引导（Tool.PromptGuide()）。
+	// 系统消息：全静态（工具描述 + 使用指南，无 round/记忆/时间戳）。
 	var guides []prompt.ToolGuide
 	for _, name := range r.tools.Names() {
 		t := r.tools.Get(name)
@@ -93,15 +66,45 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 			Guide: t.PromptGuide(),
 		})
 	}
-
 	systemPrompt := prompt.BuildReActSystemPrompt(r.tools.Descriptions(), guides)
-	userPrompt := prompt.BuildReActUserPrompt(round, contextDigest, userInput)
 
-	// 初始化消息数组（作为 queryLoop 的初始输入）。
-	messages := []llm.ChatMessage{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: userPrompt},
+	// 记忆 preamble：仅当无累积对话（首次查询/会话切换后）时注入。
+	// 缓存在 Runner 上，会话内字节稳定，前缀缓存可命中。
+	var messages []llm.ChatMessage
+	if len(baseMessages) == 0 && r.memoryPreamble == "" {
+		if digest, err := r.retriever.BuildContextFallback(userInput); err == nil && digest != "" {
+			r.memoryPreamble = digest
+		}
 	}
+
+	messages = append(messages, llm.ChatMessage{Role: "system", Content: systemPrompt})
+	if r.memoryPreamble != "" {
+		messages = append(messages, llm.ChatMessage{
+			Role:    "user",
+			Content: prompt.BuildSystemReminder(r.memoryPreamble),
+		})
+	}
+	// 累积对话（不含 system/preamble，仅累积对话本身）。
+	messages = append(messages, baseMessages...)
+	// 用户任务：每轮唯一变化的消息，放末尾。
+	messages = append(messages, llm.ChatMessage{
+		Role:    "user",
+		Content: prompt.BuildUserTask(round, userInput),
+	})
+
+	// ═══════════════════════════════════════════════════════
+	// 步骤 2: 自动压缩检查（s08 四步管线）
+	// ═══════════════════════════════════════════════════════
+	// 每轮组装完成后运行 compactor.Prepare：
+	//   大结果转存 → 消息数归档 → 微压缩 → 历史摘要（逐步升级，只有超限才进入有损步骤）。
+	// queryLoop 内每轮迭代前也会运行（reactive_compact 兜底 API 拒绝）。
+	if r.compactor != nil {
+		messages = r.compactor.Prepare(messages, userInput)
+	}
+
+	// ═══════════════════════════════════════════════════════
+	// 步骤 3: 构建 System/User Prompt（已并入步骤 1 组装）
+	// ═══════════════════════════════════════════════════════
 
 	// 获取 OpenAI function calling 格式的工具定义。
 	tools := r.tools.FunctionDefinitions()
@@ -116,6 +119,8 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 		CompressThreshold: r.compressThreshold(),
 		ResultLimit:       r.resultLimit(),
 		InputForward:      inputForward,
+		ActiveRequest:     userInput,
+		Compactor:         r.compactor,
 	})
 
 	// ═══════════════════════════════════════════════════════
@@ -132,6 +137,7 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 	//   - error      → UI.OnError()      显示错误并返回
 	var finalAnswer string
 	var finalIteration int
+	var finalMessages []llm.ChatMessage // 查询结束后的完整消息数组（跨轮累积）
 
 	for event := range eventChan {
 		switch event.Type {
@@ -186,12 +192,20 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 			// 最终回答：保存结果，通知 UI 渲染 Markdown + 本轮 token 统计。
 			finalAnswer = event.Content
 			finalIteration = event.Iteration
+			finalMessages = event.Messages
 			r.ui.OnFinal(finalAnswer, event.InputTokens, event.OutputTokens, event.TotalTokens)
+
+			// 每轮结束展示余额（/balance 开启后生效，失败静默；连续失败达到阈值时提示一次）。
+			if r.showBalance {
+				go func() {
+					r.queryBalanceWith(r.queryBalance)
+				}()
+			}
 
 		case QueryEventError:
 			// 错误：通知 UI 并返回错误信息。
 			r.ui.OnError(event.Error)
-			return "", fmt.Errorf("query loop error: %w", event.Error)
+			return "", nil, fmt.Errorf("query loop error: %w", event.Error)
 		}
 	}
 
@@ -199,5 +213,5 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 	// 步骤 6: 返回最终结果
 	// ═══════════════════════════════════════════════════════
 	_ = finalIteration
-	return finalAnswer, nil
+	return finalAnswer, finalMessages, nil
 }

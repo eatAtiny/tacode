@@ -16,24 +16,25 @@ import (
 //	Runner.Run() → 分支 B: 收到查询结果
 //	  └─ go func() {
 //	       └─ history.Append()          ← 步骤 7a: 保存 L1 原始对话
-//	       └─ extractMemory()           ← 步骤 7b: 提取 L2 摘要 + L3 记忆
-//	            └─ extractor.Extract()   ← 一次 LLM 调用，同时产出摘要和记忆操作
-//	            └─ summary.Append()      ← 保存 L2 摘要
+//	       └─ extractMemory()           ← 步骤 7b: 提取 L3 记忆
+//	            └─ extractor.Extract()   ← 一次 LLM 调用，产出记忆操作
 //	            └─ memStore.SaveEntry()  ← 保存/更新 L3 记忆
 //	            └─ memStore.DeleteEntry()← 删除 L3 记忆
 //	       └─ ensurePersisted()         ← 步骤 8: 临时会话落盘
 //	     }()
 // ──────────────────────────────────────────────────────────
 
-// extractMemory 调用 LLM 提取摘要和结构化记忆。
+// extractMemory 调用 LLM 提取结构化记忆（L3）。
 //
 // 流程（每次对话后执行一次）：
 //   1. 调用 extractor.Extract(userInput, assistantOutput)
 //      → LLM 分析对话，返回 ExtractionResult{Summary, Memories[]}
-//   2. 保存 L2 摘要（追加到 summaries.jsonl）
-//   3. 处理 L3 记忆操作：
+//   2. 处理 L3 记忆操作：
 //      - create/update → memStore.SaveEntry()（写入 .md 文件 + 更新 MEMORY.md）
 //      - delete → memStore.DeleteEntry()（删除 .md 文件 + 更新 MEMORY.md）
+//
+// 不再保存 L2 摘要：跨轮累积架构下对话细节由累积 messages 承载，
+// L2 只在压缩（compactHistory）时作为兜底写入。
 //
 // 这是后台操作，不阻塞主循环。失败时通过 UI.OnMessage 提示警告，
 // 不会中断 Agent 运行。
@@ -42,13 +43,6 @@ func (r *Runner) extractMemory(ctx context.Context, round int, userInput, assist
 	if err != nil {
 		r.ui.OnMessage(fmt.Sprintf("⚠️ 记忆提取失败: %v", err))
 		return
-	}
-
-	// ── 步骤 7b-1: 保存 L2 摘要 ──
-	if result.Summary != "" {
-		if err := r.summary.Append(round, result.Summary); err != nil {
-			r.ui.OnMessage(fmt.Sprintf("⚠️ 保存摘要失败: %v", err))
-		}
 	}
 
 	// ── 步骤 7b-2: 处理 L3 记忆操作 ──

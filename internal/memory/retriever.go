@@ -211,6 +211,61 @@ func (r *Retriever) BuildContext(query string) (string, error) {
 	return strings.Join(parts, "\n\n"), nil
 }
 
+// BuildContextFallback 构建记忆兜底上下文（跨轮累积架构用）。
+//
+// 与 BuildContext 的区别：去掉 L2「最近对话摘要」与 EventStore/HistoryStore 降级段。
+// 跨轮累积架构下，对话细节由累积的 messages 承载，L2 摘要只在压缩/新会话时兜底；
+// 记忆 preamble（项目指令 + L3 记忆）保持会话内字节稳定，以最大化前缀缓存命中。
+func (r *Retriever) BuildContextFallback(query string) (string, error) {
+	var parts []string
+
+	// ── 步骤 0: 项目指令（AGENTS.md） ──
+	if r.projectInstr != "" {
+		parts = append(parts, "## 项目指令\n"+r.projectInstr)
+	}
+
+	// ── 步骤 0.5: 项目级记忆（project/reference 类，跨会话） ──
+	if r.projectMemory != nil {
+		projIndex := r.projectMemory.LoadIndex()
+		if projIndex != "" {
+			parts = append(parts, "## 项目记忆索引\n"+projIndex)
+		}
+		projMemories, err := r.projectMemory.FormatForPrompt(maxMemoryEntries, minImportance)
+		if err == nil && projMemories != "" {
+			parts = append(parts, "## 项目重要记忆\n"+projMemories)
+		}
+	}
+
+	// ── 步骤 0.6: 全局记忆（user 类，跨项目） ──
+	if r.globalMemory != nil {
+		globalIndex := r.globalMemory.LoadIndex()
+		if globalIndex != "" {
+			parts = append(parts, "## 全局记忆索引\n"+globalIndex)
+		}
+		globalMemories, err := r.globalMemory.FormatForPrompt(maxMemoryEntries, minImportance)
+		if err == nil && globalMemories != "" {
+			parts = append(parts, "## 全局重要记忆\n"+globalMemories)
+		}
+	}
+
+	// ── 步骤 1.1: L3 会话记忆索引 ──
+	index := r.memory.LoadIndex()
+	if index != "" {
+		parts = append(parts, "## 记忆索引\n"+index)
+	}
+
+	// ── 步骤 1.2: L3 高重要性记忆内容 ──
+	memories, err := r.memory.FormatForPrompt(maxMemoryEntries, minImportance)
+	if err == nil && memories != "" {
+		parts = append(parts, "## 重要记忆\n"+memories)
+	}
+
+	if len(parts) == 0 {
+		return "", nil
+	}
+	return strings.Join(parts, "\n\n"), nil
+}
+
 // CheckAndCompress 检查是否需要压缩，超过阈值时自动压缩 L2 摘要。
 //
 // 调用时机：QueryEngine 步骤 2（构建上下文后、构建 prompt 前）。

@@ -79,10 +79,10 @@ type BubbleUI struct {
 	// inputOnce 保证后台输入 goroutine 只启动一次
 	inputOnce sync.Once
 
-		// oldTermState 生模式前的终端状态，Close() 时恢复以防止终端残留生模式。
-		oldTermState *term.State
-		// termFd 终端文件描述符。
-		termFd int
+	// oldTermState 生模式前的终端状态，Close() 时恢复以防止终端残留生模式。
+	oldTermState *term.State
+	// termFd 终端文件描述符。
+	termFd int
 }
 
 // NewBubbleUI 创建 BubbleUI 实例。
@@ -420,6 +420,11 @@ func (b *BubbleUI) OnError(err error) {
 // OnMessage 打印一般性消息（无额外样式）。
 func (b *BubbleUI) OnMessage(msg string) {
 	fmt.Println(msg)
+}
+
+// ShowBalance 展示账户余额（灰色浅显样式，与 token 统计一致，避免喧宾夺主）。
+func (b *BubbleUI) ShowBalance(line string) {
+	fmt.Println(styleMuted.Render(line))
 }
 
 // ConfirmPermission 显示权限确认提示，等待用户输入。

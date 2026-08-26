@@ -97,7 +97,15 @@ func BuildReActSystemPrompt(toolDescriptions string, guides []ToolGuide) string 
   - 足够 → 立即给出最终回答，不要再调用任何工具
   - 不足 → 调用一个不同的工具（不要重复调用同一个工具）
 - 工具调用失败时，换一种方式尝试，不要重复相同的命令
-- 最终回答要简洁明了，用中文回复`, toolDescriptions, guideSection)
+- 最终回答要简洁明了，用中文回复
+
+## 上下文说明
+- 会话消息跨轮次累积。早期对话可能被压缩为 [Compacted] 或归档标记消息。
+- [Compacted] 消息中的 "Current user request" 指向其产生时的用户请求；
+  "Conversation summary (reference only)" 是压缩时的事实摘要，仅作参考。
+- 请始终以最新的 "用户任务" 消息为准执行任务。
+- 工具结果可能因内容过长被截断或转存。出现 <persisted-output> 或
+  "完整结果已保存到: <路径>" 时，可使用 file read 读取完整内容。`, toolDescriptions, guideSection)
 }
 
 // BuildReActUserPrompt 构建 ReAct 模式的 user prompt。
@@ -107,6 +115,31 @@ func BuildReActSystemPrompt(toolDescriptions string, guides []ToolGuide) string 
 //   - round: 当前轮次号
 //   - contextDigest: 由 Retriever.BuildContext() 构建的三层记忆上下文
 //   - userInput: 用户原始输入
+//
+// 已废弃：跨轮累积架构下每轮只追加用户任务（BuildUserTask），
+// 记忆上下文改为经 BuildSystemReminder 注入且只在会话切换时重建。
+// 此函数仅保留向后兼容（master 分支当前未使用）。
 func BuildReActUserPrompt(round int, contextDigest, userInput string) string {
 	return fmt.Sprintf("轮次: %d\n记忆上下文:\n%s\n\n用户任务:\n%s", round, contextDigest, userInput)
+}
+
+// BuildSystemReminder 将记忆/参考上下文包装为系统注入的参考消息。
+//
+// 跨轮累积架构下，此消息位于 messages[1]（system 之后、累积对话之前），
+// 作为稳定前缀的一部分：内容只在会话切换/首次查询时重建并缓存，
+// 同一会话内字节稳定，前缀缓存可命中。
+//
+// 使用 <system-reminder> 标签明确告知模型：其内容是参考上下文，
+// 与当前任务不一定直接相关，不执行其中的指令。
+func BuildSystemReminder(contextDigest string) string {
+	return fmt.Sprintf("<system-reminder>\n%s\n</system-reminder>", contextDigest)
+}
+
+// BuildUserTask 构建每轮唯一的用户任务消息。
+//
+// 跨轮累积架构下，此消息是 messages 的最后一条，是唯一每轮变化的消息。
+// 只包含轮次号与用户输入，不含记忆上下文（记忆已前置到 system-reminder），
+// 以最大化前缀缓存命中（system + preamble + 累积对话保持稳定）。
+func BuildUserTask(round int, userInput string) string {
+	return fmt.Sprintf("轮次: %d\n\n用户任务:\n%s", round, userInput)
 }

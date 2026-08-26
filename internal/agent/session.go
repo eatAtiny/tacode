@@ -62,6 +62,24 @@ func (r *Runner) switchSession() {
 	r.summary.SetPath(activeDir)
 	r.memStore.SetPath(activeDir)
 	r.events.SetPath(activeDir)
+	// 切换会话：清空跨轮累积的对话消息与记忆 preamble 缓存。
+	// 下一轮查询将基于新会话的记忆重新构建（preamble + 记忆兜底）。
+	r.messages = nil
+	r.memoryPreamble = ""
+	r.syncCompactorPaths(activeDir)
+}
+
+// syncCompactorPaths 同步 Compactor 的 transcript/tool-results 目录到当前会话。
+//
+// Compactor 目录在构造时绑定一次，会话切换后必须跟随更新，
+// 否则归档/转存会累积到启动时的旧会话目录（路径绑定 bug）。
+func (r *Runner) syncCompactorPaths(dir string) {
+	if r.compactor != nil {
+		r.compactor.SetPaths(
+			filepath.Join(dir, "transcripts"),
+			filepath.Join(dir, "tool-results"),
+		)
+	}
 }
 
 // printSessionHistory 读取并展示指定会话的历史记录。
@@ -157,6 +175,8 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 			r.summary.SetPath(tempDir)
 			r.memStore.SetPath(tempDir)
 			r.events.SetPath(tempDir)
+			r.messages = nil // 新会话：清空跨轮累积
+			r.syncCompactorPaths(tempDir)
 			// 记住用户指定的会话名，ensurePersisted 时使用。
 			r.pendingSessionName = name
 			displayName := "新会话"
@@ -252,6 +272,12 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 				r.ui.OnMessage(fmt.Sprintf("当前会话: %s", activeID))
 			}
 		}
+		return 0, true
+
+	// ── /balance ──
+	// 手动查询余额；成功后开启每轮结束展示。
+	case "/balance":
+		r.handleBalanceCommand()
 		return 0, true
 
 	// ── /compress ──
@@ -362,6 +388,7 @@ func (r *Runner) ensurePersisted(firstInput string) error {
 	r.summary.SetPath(realDir)
 	r.memStore.SetPath(realDir)
 	r.events.SetPath(realDir)
+	r.syncCompactorPaths(realDir)
 
 	// ── 步骤 6: 标记为非临时 ──
 	r.isTemporary = false

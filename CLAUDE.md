@@ -38,12 +38,13 @@ All library code is under `internal/` (unexportable). The dependency graph:
 ```
 main.go
   └─ internal/agent  (runner.go, query_engine.go, query_loop.go, types.go,
-  │                    permission.go, memory.go, session.go)
-       ├─ internal/llm        (openai.go) — Chat + ChatWithToolsStream
-       ├─ internal/memory     (6 files) — 3-tier storage + retrieval + extraction
+  │                    permission.go, memory.go, session.go, compactor.go,
+  │                    compact_tool.go, balance.go)
+       ├─ internal/llm        (openai.go, balance.go, retry.go) — Chat + ChatWithToolsStream + 余额查询 + 重试
+       ├─ internal/memory     (7 files) — 3-tier storage + retrieval + extraction
        ├─ internal/prompt     (prompt.go) — ReAct prompt builder
        ├─ internal/session    (session.go, picker.go) — session CRUD + picker
-       ├─ internal/tool       (7 files) — Tool interface + Registry
+       ├─ internal/tool       (8 files) — Tool interface + Registry
        └─ internal/ui         (ui.go) — UI interface
             ├─ ui/bubble/     — BubbleUI (terminal, lipgloss + glamour)
             ├─ ui/text/       — TextUI (headless, callback-based)
@@ -55,41 +56,64 @@ main.go
 ### Two-Layer Query Architecture
 
 **QueryEngine** (`query_engine.go`) — upper coordination:
-1. Build context from 3-tier memory via `Retriever.BuildContext(query)`
-2. Auto-compress check at 80% token threshold
-3. Build system + user prompts
-4. Call `queryLoop()` → get `<-chan QueryEvent`
-5. Consume events → dispatch to UI + record in EventStore
-6. Return final answer
+1. Assemble messages: static system + memory preamble (`<system-reminder>`, cached) + accumulated conversation (`Runner.messages`) + per-round user task
+2. Run `Compactor.Prepare()` (s08 4-step pipeline) before the first model call
+3. Start `queryLoop()` → get `<-chan QueryEvent`
+4. Consume events → dispatch to UI + record in EventStore
+5. Return final answer + final message array (for cross-round accumulation)
 
 **queryLoop** (`query_loop.go`) — pure ReAct core (async generator pattern):
 1. `while iter < maxIterations (10)` loop
-2. Call LLM streaming → yield `Think` / `Delta` events
-3. If no tool_calls → yield `Final` and return
-4. If tool_calls → permission check → execute → yield `ToolCall` / `ToolResult`
-5. Push results back into messages → continue
-6. Auto-compress messages at 80% token threshold (in-loop)
-7. Detect duplicate tool calls → inject warning
-8. At max iterations → LLM generates final summary
+2. Run `prepareIfNeeded()` → `Compactor.Prepare` (s08 pipeline) before each model call
+3. Call LLM streaming → yield `Think` / `Delta` events
+4. If no tool_calls → yield `Final` (carrying full `Messages`) and return
+5. If tool_calls → permission check → execute → yield `ToolCall` / `ToolResult`
+6. Push results back into messages → continue
+7. If any tool call was `compact` → run `compactHistory` on the closed round
+8. On `prompt_too_long` / `too many tokens` → `reactiveCompact` + retry once (`maxReactiveRetries=1`)
+9. Detect duplicate tool calls → inject warning
+10. At max iterations → LLM generates final summary
+
+### Message Accumulation + Compaction (s08 port)
+
+Messages now **accumulate across rounds** in `Runner.messages` (cleared on session switch `/new`). The prompt layout is prefix-cache-optimized:
+
+```
+[0] system     — fully static (tool descriptions + guides)
+[1] preamble   — <system-reminder> memory reference (cached, rebuilt only on switch/first query)
+[2..]          — accumulated conversation
+[last]         — 轮次: N + 用户任务 (only per-round-changing message)
+```
+
+**`Compactor`** (`internal/agent/compactor.go`) — s08 4-step pipeline ported to Go's `role=tool` message model:
+1. `toolResultBudget` — persist >30K results in the latest tool batch (total >200K) to `<session>/tool-results/`, keep `<persisted-output>` 2000-char preview
+2. `snipCompact` — >50 messages: keep head 3 + tail 46, archive middle to `<session>/transcripts/`, insert marker; **pairing protection** keeps `assistant(ToolCalls)`↔`tool` pairs intact (else API 400)
+3. `microCompact` — shorten consumed results (keep last 3, >120 chars → path reference) toward 80% of `context_char_limit` (default 50K)
+4. `fitToolResults` — persist oversized results largest-first (1000-char preview)
+5. `compactHistory` — LLM state summary (only lossy step, preserves system + injects `activeRequest`)
+
+Plus `reactiveCompact` (API rejection salvage) and the `compact` tool (model-initiated, runs after the closed tool batch).
 
 ### Three-Layer Memory System
 
 | Layer | Store | File | Purpose |
 |-------|-------|------|---------|
 | L1 | `HistoryStore` | `history.jsonl` | Raw conversation records (max 50) |
-| L2 | `SummaryStore` | `summaries.jsonl` | LLM-extracted per-round summaries |
+| L2 | `SummaryStore` | `summaries.jsonl` | LLM-extracted summaries (compaction fallback) |
 | L3 | `MemoryStore` | `memory/*.md` | Structured long-term memory (frontmatter + content) |
 
 L3 memory is split into **three tiers** (extraction routes by `type`):
 - **Global** `data/global-memory/memory/` — `user`/`feedback` entries (cross-project preferences)
 - **Project** `data/project-memory/memory/` — `project`/`reference` entries (cross-session, project-specific)
-- **Session** — no L3 files (conversation details live in L2 summaries + EventStore)
+- **Session** — no L3 files (conversation details live in accumulated messages + EventStore)
 
 `MigrateLegacyMemory` (idempotent, runs at startup) relocates legacy session/global memory files to the right tier.
 
 Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncated (truth source).
 
-**Context building** (`Retriever.BuildContext`):
+**Memory as fallback** (decoupled from compaction): With messages accumulated, memory is injected **only** on first query / session switch via `Retriever.BuildContextFallback` (project instructions + L3, **no** L2/digest). L2 summaries are written only on compaction (`compactHistory`) as the "兜底" reference, no longer per-round.
+
+**Context building** (`Retriever.BuildContext` — fallback path only):
 0. Project instructions (CLAUDE.md/AGENTS.md/.cursorrules, cached at startup, `/reload` to refresh)
 0.5. Project memory (`data/project-memory/`, project/reference entries, cross-session)
 0.6. Global memory (`data/global-memory/`, user entries, cross-project)
@@ -97,15 +121,13 @@ Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncat
 2. L2 recent summaries (last 10)
 3. Fallback: L2 → EventStore digest → HistoryStore digest
 
-**Auto-compression**: When estimated tokens exceed 80% of model context window, LLM merges old L2 summaries (keeps newest 3). In-loop message compression preserves system prompt + last 2 tool rounds, persists compressed tool results to `tool-results/` (readable via file read), compresses older ones.
-
-**Memory extraction** (`Extractor`): One LLM call per round extracts both L2 summary and L3 memory actions (create/update/delete). `user`/`feedback` memories go to global store (`data/global-memory/`), `project`/`reference` go to project store (`data/project-memory/`).
+**Memory extraction** (`Extractor`): One LLM call per round extracts L3 memory actions (create/update/delete). `user`/`feedback` memories go to global store (`data/global-memory/`), `project`/`reference` go to project store (`data/project-memory/`). Per-round L2 summaries are no longer written (superseded by accumulated messages + compaction summaries).
 
 ### Tool System
 
 - `tool.Tool` is one of two interfaces — implements `Name()`, `Description()`, `Parameters()`, `Execute()`.
 - `tool.Registry` manages registration and generates OpenAI function-calling definitions.
-- Built-in tools: `shell` (bash, 30s timeout), `file` (read/write, 8KB read cap), `edit` (search-and-replace), `grep`, `list`, `git` (status/diff/log/show/branch read-only + add/commit/stash/checkout requiring confirmation), and `webfetch` (HTTP GET → Markdown + page metadata, 30s timeout, 5MB body cap, 5 redirect limit).
+- Built-in tools: `shell` (bash, 30s timeout), `file` (read/write, 8KB read cap), `edit` (search-and-replace), `grep`, `list`, `git` (status/diff/log/show/branch read-only + add/commit/stash/checkout requiring confirmation), `webfetch` (HTTP GET → Markdown + page metadata, 30s timeout, 5MB body cap, 5 redirect limit), and `compact` (model-initiated context compaction, `internal/agent/compact_tool.go`).
 - To add a new tool: implement `tool.Tool`, register it in `main.go`.
 
 ### UI System
@@ -141,6 +163,7 @@ Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncat
 | `/rename <name>` | Rename current session |
 | `/current` | Show current session info |
 | `/compress` | Manual summary compression |
+| `/balance` | 查询 DeepSeek 账户余额；成功后每轮对话结束自动展示剩余额度 |
 | `/reload` | Reload AGENTS.md project instructions |
 | `/memory` | List L3 memories |
 | `/memory add <content>` | Add L3 memory |
@@ -171,16 +194,19 @@ On each user input:
 
 ## File Map
 
-### `internal/agent/` (7 files)
-- `runner.go` — `Runner` struct, `Run()` REPL, async query dispatch
-- `query_engine.go` — context building, prompt assembly, event consumption
-- `query_loop.go` — core ReAct loop, streaming, tool execution, compression
+### `internal/agent/` (10 files)
+- `runner.go` — `Runner` struct, `Run()` REPL, async query dispatch, cross-round message accumulation
+- `query_engine.go` — message assembly (system + preamble + conversation + task), compactor prepare, event consumption
+- `query_loop.go` — core ReAct loop, streaming, tool execution, compaction wiring, reactive compact
 - `types.go` — `QueryEvent`, `QueryEventType` enum, `queryResult`
 - `permission.go` — `ToolPermissionChecker`, `DefaultPermissionChecker`, risk detection
-- `memory.go` — memory extraction, `/compress` and `/memory` commands
+- `memory.go` — L3 memory extraction, `/compress` and `/memory` commands
 - `session.go` — session commands, `ensurePersisted()`, `cleanOrphanTempDirs()`
+- `compactor.go` — s08 4-step compaction pipeline (Go port, pairing protection)
+- `compact_tool.go` — model-initiated `compact` tool
+- `balance.go` — 余额查询辅助 + 格式化 + `/balance` 命令处理
 
-### `internal/memory/` (6 files)
+### `internal/memory/` (7 files)
 - `types.go` — `MemoryEntry`, `Summary`, `ExtractionResult`, `Record`, `MemoryAction`
 - `event.go` — `EventStore` (append-only JSONL, truth source)
 - `history.go` — `HistoryStore` (L1, max 50 records)
