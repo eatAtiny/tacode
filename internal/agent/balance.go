@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"agentic/internal/llm"
 )
@@ -11,7 +13,8 @@ import (
 // 字段加在 runner.go 的 Runner struct 中（messages 字段附近）。
 
 // formatBalanceLine 格式化余额展示行。
-// 多货币逐行输出；货币符号: CNY→¥, USD→$。
+// 多货币逐行输出；货币符号: CNY→¥, USD→$，未知货币用币种代码。
+// 充值/赠金两段仅在对应余额非空时显示，用 " / " 连接，空段省略。
 func formatBalanceLine(resp *llm.BalanceResponse) string {
 	if resp == nil || !resp.IsAvailable {
 		return ""
@@ -23,39 +26,43 @@ func formatBalanceLine(resp *llm.BalanceResponse) string {
 			symbol = b.Currency + " "
 		}
 		line := fmt.Sprintf("💰 余额: %s%s", symbol, b.TotalBalance)
-		if b.ToppedUpBalance != "" || b.GrantedBalance != "" {
-			line += fmt.Sprintf("（充值 %s%s / 赠金 %s%s）",
-				symbol, b.ToppedUpBalance, symbol, b.GrantedBalance)
+
+		// 充值/赠金明细：仅展示非空字段，两段用 " / " 连接，空段省略。
+		segments := []string{}
+		if b.ToppedUpBalance != "" {
+			segments = append(segments, fmt.Sprintf("充值 %s%s", symbol, b.ToppedUpBalance))
+		}
+		if b.GrantedBalance != "" {
+			segments = append(segments, fmt.Sprintf("赠金 %s%s", symbol, b.GrantedBalance))
+		}
+		if len(segments) > 0 {
+			line += "（" + strings.Join(segments, " / ") + "）"
 		}
 		lines = append(lines, line)
 	}
 	if len(lines) == 0 {
 		return "💰 余额: 账户无可用余额"
 	}
-	return joinLines(lines)
-}
-
-func joinLines(lines []string) string {
-	out := ""
-	for _, l := range lines {
-		out += l + "\n"
-	}
-	return out[:len(out)-1]
+	return strings.Join(lines, "\n")
 }
 
 // queryBalance 查询余额并展示到 UI。
-// 返回 false 表示失败（每轮场景静默，/balance 场景由调用方提示原因）。
-func (r *Runner) queryBalance() bool {
-	resp, err := llm.FetchBalance(context.Background(), r.llm.APIKey(), balanceBaseURL(r.llm))
+// 返回 (展示行, 是否成功)：成功时展示并返回 (line, true)；
+// 失败返回 (错误原因, false)，空行/不可用返回 ("", false)。
+// 5s 超时 context 与 balanceClient 超时一致，避免网络异常挂死。
+func (r *Runner) queryBalance() (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := llm.FetchBalance(ctx, r.llm.APIKey(), balanceBaseURL(r.llm))
 	if err != nil {
-		return false
+		return err.Error(), false
 	}
 	line := formatBalanceLine(resp)
 	if line == "" {
-		return false
+		return "", false
 	}
 	r.ui.ShowBalance(line)
-	return true
+	return line, true
 }
 
 // balanceBaseURL 获取余额查询使用的 baseURL（复用 OpenAI client 的 BaseURL）。
@@ -64,10 +71,11 @@ func balanceBaseURL(c *llm.OpenAIClient) string {
 }
 
 // handleBalanceCommand 处理 /balance 命令。
-// 成功：展示余额并开启每轮展示；失败：提示原因。
+// 成功：展示余额并开启每轮展示；失败：展示原因（不开启）。
 func (r *Runner) handleBalanceCommand() {
-	if !r.queryBalance() {
-		r.ui.OnMessage("⚠️ 余额查询失败（每轮自动展示未开启）")
+	line, ok := r.queryBalance()
+	if !ok {
+		r.ui.OnMessage(fmt.Sprintf("⚠️ 余额查询失败: %s", line))
 		return
 	}
 	r.showBalance = true

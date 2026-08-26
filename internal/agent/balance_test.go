@@ -42,3 +42,32 @@ func TestFormatBalanceLine_Unavailable(t *testing.T) {
 		t.Errorf("nil line = %q, want empty", line)
 	}
 }
+
+func TestFormatBalanceLine_UnknownCurrency(t *testing.T) {
+	resp := &llm.BalanceResponse{
+		IsAvailable: true,
+		BalanceInfos: []llm.BalanceInfo{
+			{Currency: "EUR", TotalBalance: "100.00"},
+		},
+	}
+	line := formatBalanceLine(resp)
+	want := "💰 余额: EUR 100.00"
+	if line != want {
+		t.Errorf("formatBalanceLine = %q, want %q", line, want)
+	}
+}
+
+func TestFormatBalanceLine_GrantedOnly(t *testing.T) {
+	resp := &llm.BalanceResponse{
+		IsAvailable: true,
+		BalanceInfos: []llm.BalanceInfo{
+			{Currency: "USD", TotalBalance: "5.00", GrantedBalance: "2.00"},
+		},
+	}
+	line := formatBalanceLine(resp)
+	// 充值段为空时省略，仅展示赠金段。
+	want := "💰 余额: $5.00（赠金 $2.00）"
+	if line != want {
+		t.Errorf("formatBalanceLine = %q, want %q", line, want)
+	}
+}
