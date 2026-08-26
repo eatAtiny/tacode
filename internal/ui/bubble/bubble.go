@@ -134,6 +134,8 @@ var (
 	styleError = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
 	// styleMuted 次要文本样式：灰色（参数、提示等）
 	styleMuted = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	// styleCyan 青色高亮样式：账户余额等需要突出但与普通消息区分的输出
+	styleCyan = lipgloss.NewStyle().Foreground(lipgloss.Color("14"))
 	// styleSuccess 成功消息样式：绿色（工具执行成功标题）
 	styleSuccess = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 	// styleSeparator 分隔线样式：深灰色（每轮回答结束后的分隔线）
@@ -422,6 +424,11 @@ func (b *BubbleUI) OnMessage(msg string) {
 	fmt.Println(msg)
 }
 
+// ShowBalance 展示账户余额（青色高亮，与普通消息区分）。
+func (b *BubbleUI) ShowBalance(line string) {
+	fmt.Println(styleCyan.Render(line))
+}
+
 // ConfirmPermission 显示权限确认提示，等待用户输入。
 // 提示格式："⚠️ 权限确认: <tool>" + 参数 + 原因 + "允许执行? [y/N] "。
 // 如果 inputForward 不为 nil，从此 channel 读取用户输入；
@@ -456,7 +463,6 @@ func (b *BubbleUI) ConfirmPermission(tool, args, reason string, inputForward <-c
 func (b *BubbleUI) Welcome(model string) {
 	purple := lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true)
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	cyan := lipgloss.NewStyle().Foreground(lipgloss.Color("14"))
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
 	art := []string{
@@ -474,7 +480,7 @@ func (b *BubbleUI) Welcome(model string) {
 	fmt.Println()
 	fmt.Printf("  %s %s\n", muted.Render(":: Agentic ::"), muted.Render("v0.1"))
 	fmt.Println(dim.Render("  ─────────────────────────────────────────────"))
-	fmt.Printf("  %s  %s\n", muted.Render("Model"), cyan.Render(model))
+	fmt.Printf("  %s  %s\n", muted.Render("Model"), styleCyan.Render(model))
 	fmt.Printf("  %s  %s\n", muted.Render("Usage"), muted.Render("输入任务开始对话，输入 exit 退出"))
 	fmt.Printf("  %s  %s\n", muted.Render("Cmds "), muted.Render("/new /list /switch /delete /rename /current"))
 	fmt.Println()

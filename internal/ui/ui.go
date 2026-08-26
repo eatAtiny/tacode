@@ -7,7 +7,7 @@
 //
 // 接口方法按职责分为四组：
 //  1. 输入组：ReadInput / ReadInputChan — 读取用户输入
-//  2. 事件通知组：OnThink / OnDelta / OnToolCall / OnToolResult / OnContinue / OnFinal / OnError / OnMessage
+//  2. 事件通知组：OnThink / OnDelta / OnToolCall / OnToolResult / OnContinue / OnFinal / OnError / OnMessage / ShowBalance
 //  3. 交互组：ConfirmPermission — 权限确认
 //  4. 生命周期组：Welcome / Close / SetSessionName / SetModel / UpdateTokens / ResetTokens
 package ui
@@ -114,6 +114,10 @@ type UI interface {
 	//   - 记忆提取状态
 	//   - 压缩完成通知
 	OnMessage(msg string)
+
+	// ShowBalance 展示账户余额（每轮结束或 /balance 命令触发）。
+	// line 是已格式化的单行文本，如 "💰 余额: ¥110.00（充值 ¥100.00 / 赠金 ¥10.00）"。
+	ShowBalance(line string)
 
 	// ── 交互组 ──────────────────────────────────────────
 

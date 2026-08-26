@@ -39,10 +39,10 @@ type TextUI struct {
 	// 参数：
 	//   - event: 事件类型字符串，对应 UI 接口的方法名：
 	//     "think"、"delta"、"tool_call"、"tool_result"、"continue"、
-	//     "final"、"error"、"message"、"permission"
+	//     "final"、"error"、"message"、"permission"、"balance"
 	//   - data: 事件数据，类型因事件而异：
 	//     - think/continue: int（迭代次数）
-	//     - delta/final/message: string（文本内容）
+	//     - delta/final/message/balance: string（文本内容）
 	//     - tool_call: map[string]string{"name": ..., "args": ...}
 	//     - tool_result: map[string]any{"name": ..., "result": ..., "is_error": ...}
 	//     - error: error
@@ -114,6 +114,13 @@ func (t *TextUI) OnFinal(answer string, inputTokens, outputTokens, totalTokens i
 			"output_tokens": outputTokens,
 			"total_tokens":  totalTokens,
 		})
+	}
+}
+
+// ShowBalance 转发余额展示事件。data 为 line（string）。
+func (t *TextUI) ShowBalance(line string) {
+	if t.OnEvent != nil {
+		t.OnEvent("balance", line)
 	}
 }
 
