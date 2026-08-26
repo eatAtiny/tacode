@@ -71,3 +71,18 @@ func TestFormatBalanceLine_GrantedOnly(t *testing.T) {
 		t.Errorf("formatBalanceLine = %q, want %q", line, want)
 	}
 }
+
+func TestFormatBalanceLine_ToppedUpOnly(t *testing.T) {
+	resp := &llm.BalanceResponse{
+		IsAvailable: true,
+		BalanceInfos: []llm.BalanceInfo{
+			{Currency: "CNY", TotalBalance: "100.00", ToppedUpBalance: "100.00"},
+		},
+	}
+	line := formatBalanceLine(resp)
+	// 赠金段为空时省略，仅展示充值段。
+	want := "💰 余额: ¥100.00（充值 ¥100.00）"
+	if line != want {
+		t.Errorf("formatBalanceLine = %q, want %q", line, want)
+	}
+}

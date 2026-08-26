@@ -208,6 +208,7 @@ queryLoop 层 (query_loop.go)
 | `/rename <名称>` | 重命名当前会话 |
 | `/current` | 显示当前会话信息 |
 | `/compress` | 手动触发摘要压缩（合并旧摘要） |
+| `/balance` | 查询 DeepSeek 账户余额；成功后每轮对话结束自动展示剩余额度 |
 | `/memory` | 列出所有 L3 记忆 |
 | `/memory add <内容>` | 手动添加一条记忆 |
 | `/memory rm <name>` | 删除一条记忆 |

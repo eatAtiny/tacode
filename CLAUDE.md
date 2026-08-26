@@ -162,6 +162,7 @@ Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncat
 | `/rename <name>` | Rename current session |
 | `/current` | Show current session info |
 | `/compress` | Manual summary compression |
+| `/balance` | 查询 DeepSeek 账户余额；成功后每轮对话结束自动展示剩余额度 |
 | `/reload` | Reload AGENTS.md project instructions |
 | `/memory` | List L3 memories |
 | `/memory add <content>` | Add L3 memory |
