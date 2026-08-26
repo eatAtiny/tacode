@@ -79,10 +79,10 @@ type BubbleUI struct {
 	// inputOnce 保证后台输入 goroutine 只启动一次
 	inputOnce sync.Once
 
-		// oldTermState 生模式前的终端状态，Close() 时恢复以防止终端残留生模式。
-		oldTermState *term.State
-		// termFd 终端文件描述符。
-		termFd int
+	// oldTermState 生模式前的终端状态，Close() 时恢复以防止终端残留生模式。
+	oldTermState *term.State
+	// termFd 终端文件描述符。
+	termFd int
 }
 
 // NewBubbleUI 创建 BubbleUI 实例。
@@ -134,8 +134,6 @@ var (
 	styleError = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
 	// styleMuted 次要文本样式：灰色（参数、提示等）
 	styleMuted = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	// styleCyan 青色高亮样式：账户余额等需要突出但与普通消息区分的输出
-	styleCyan = lipgloss.NewStyle().Foreground(lipgloss.Color("14"))
 	// styleSuccess 成功消息样式：绿色（工具执行成功标题）
 	styleSuccess = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 	// styleSeparator 分隔线样式：深灰色（每轮回答结束后的分隔线）
@@ -424,9 +422,9 @@ func (b *BubbleUI) OnMessage(msg string) {
 	fmt.Println(msg)
 }
 
-// ShowBalance 展示账户余额（青色高亮，与普通消息区分）。
+// ShowBalance 展示账户余额（灰色浅显样式，与 token 统计一致，避免喧宾夺主）。
 func (b *BubbleUI) ShowBalance(line string) {
-	fmt.Println(styleCyan.Render(line))
+	fmt.Println(styleMuted.Render(line))
 }
 
 // ConfirmPermission 显示权限确认提示，等待用户输入。
@@ -463,6 +461,7 @@ func (b *BubbleUI) ConfirmPermission(tool, args, reason string, inputForward <-c
 func (b *BubbleUI) Welcome(model string) {
 	purple := lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true)
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	cyan := lipgloss.NewStyle().Foreground(lipgloss.Color("14"))
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
 	art := []string{
@@ -480,7 +479,7 @@ func (b *BubbleUI) Welcome(model string) {
 	fmt.Println()
 	fmt.Printf("  %s %s\n", muted.Render(":: Agentic ::"), muted.Render("v0.1"))
 	fmt.Println(dim.Render("  ─────────────────────────────────────────────"))
-	fmt.Printf("  %s  %s\n", muted.Render("Model"), styleCyan.Render(model))
+	fmt.Printf("  %s  %s\n", muted.Render("Model"), cyan.Render(model))
 	fmt.Printf("  %s  %s\n", muted.Render("Usage"), muted.Render("输入任务开始对话，输入 exit 退出"))
 	fmt.Printf("  %s  %s\n", muted.Render("Cmds "), muted.Render("/new /list /switch /delete /rename /current"))
 	fmt.Println()

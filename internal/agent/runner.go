@@ -54,19 +54,19 @@ const maxIterations = 10
 //   - 调用 QueryEngine 执行任务
 //   - 保存记忆（三层：L1 原始日志 + L2 摘要 + L3 结构化记忆）
 type Runner struct {
-	llm       *llm.OpenAIClient       // LLM 客户端
-	history   *memory.HistoryStore    // L1 原始对话日志
-	summary   *memory.SummaryStore    // L2 摘要
-	memStore   *memory.MemoryStore    // L3 会话级结构化记忆（feedback 类，三级最内层）
-	globalMem  *memory.MemoryStore    // L3 全局记忆（user 类，跨项目），nil = 未启用
-	projectMem *memory.MemoryStore    // L3 项目级记忆（project/reference 类，跨会话），nil = 未启用
-	events     *memory.EventStore     // 事件日志
-	extractor *memory.Extractor       // 记忆提取器
-	retriever *memory.Retriever       // 记忆检索器
-	tools     *tool.Registry          // 工具注册表
-	sessions  *session.SessionManager // 会话管理器
-	ui        ui.UI                   // UI 接口
-	config    *config.Config          // 运行时配置（nil = 全部默认）
+	llm        *llm.OpenAIClient       // LLM 客户端
+	history    *memory.HistoryStore    // L1 原始对话日志
+	summary    *memory.SummaryStore    // L2 摘要
+	memStore   *memory.MemoryStore     // L3 会话级结构化记忆（feedback 类，三级最内层）
+	globalMem  *memory.MemoryStore     // L3 全局记忆（user 类，跨项目），nil = 未启用
+	projectMem *memory.MemoryStore     // L3 项目级记忆（project/reference 类，跨会话），nil = 未启用
+	events     *memory.EventStore      // 事件日志
+	extractor  *memory.Extractor       // 记忆提取器
+	retriever  *memory.Retriever       // 记忆检索器
+	tools      *tool.Registry          // 工具注册表
+	sessions   *session.SessionManager // 会话管理器
+	ui         ui.UI                   // UI 接口
+	config     *config.Config          // 运行时配置（nil = 全部默认）
 
 	isTemporary        bool   // 临时会话：启动时创建，有对话后才落盘
 	tempID             string // 临时会话 ID
@@ -74,10 +74,11 @@ type Runner struct {
 
 	messages []llm.ChatMessage // 跨轮累积的对话消息（不含 system/preamble，仅累积对话本身）
 
-	showBalance bool // 每轮结束是否展示余额（/balance 成功后开启）
+	memoryPreamble string     // 记忆 preamble 缓存（<system-reminder> 内容，会话内字节稳定，仅切换/首轮重建）
+	compactor      *Compactor // s08 四步压缩管线（nil = 禁用）
 
-	memoryPreamble string        // 记忆 preamble 缓存（<system-reminder> 内容，会话内字节稳定，仅切换/首轮重建）
-	compactor      *Compactor    // s08 四步压缩管线（nil = 禁用）
+	showBalance      bool // 每轮结束是否展示余额（/balance 成功后开启）
+	balanceFailCount int  // 连续余额查询失败次数（达到阈值时提示一次，防止静默失效）
 }
 
 // NewRunner 构造 Agent 执行器。

@@ -195,10 +195,10 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 			finalMessages = event.Messages
 			r.ui.OnFinal(finalAnswer, event.InputTokens, event.OutputTokens, event.TotalTokens)
 
-			// 每轮结束展示余额（/balance 开启后生效，失败静默丢弃原因）。
+			// 每轮结束展示余额（/balance 开启后生效，失败静默；连续失败达到阈值时提示一次）。
 			if r.showBalance {
 				go func() {
-					_, _ = r.queryBalance()
+					r.queryBalanceWith(r.queryBalance)
 				}()
 			}
 
