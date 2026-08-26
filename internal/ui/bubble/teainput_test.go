@@ -141,7 +141,7 @@ func TestTeaUI_ViewStructure(t *testing.T) {
 	}
 }
 
-// 对话区滚动：↑/PgUp 上滚锁定（新内容不强制滚底），↓/PgDn 滚回底部解锁。
+// 对话区滚动：↑/PgUp 上滚锁定跟随（新内容不强制滚底），↓/PgDn 滚回底部解锁。
 func TestTeaUI_ScrollLock(t *testing.T) {
 	b := NewBubbleUI()
 
@@ -149,7 +149,7 @@ func TestTeaUI_ScrollLock(t *testing.T) {
 	m.width = 60
 	m.height = 24
 
-	// 灌入足够内容（> 视口高度 20 行）使对话区可滚动。
+	// 灌入足够内容（> 视口高度 19 行）使对话区可滚动。
 	for i := 0; i < 30; i++ {
 		m2, _ := m.Update(teaAppendMsg{content: fmt.Sprintf("line %02d\n", i)})
 		m = m2.(*teaUI)
@@ -162,13 +162,13 @@ func TestTeaUI_ScrollLock(t *testing.T) {
 		t.Error("跟随模式下 View 应显示最后一行")
 	}
 
-	// ↑ 上滚 → 锁定滚动（新内容不再强制滚底）。
+	// ↑ 上滚 → 锁定跟随（离开底部，新内容不再强制滚底）。
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m = m2.(*teaUI)
-	if !m.scrollLock {
-		t.Error("↑ 上滚后应锁定滚动")
+	if m.conversation.IsAtBottom() {
+		t.Error("↑ 上滚后应离开底部（滚动锁定）")
 	}
-	// 上滚 3 行后底部内容上移出视口（已离开底部）。
+	// 上滚 3 行后底部内容上移出视口。
 	if strings.Contains(m.View(), "line 29") {
 		t.Error("上滚后不应再显示底部最后一行")
 	}
@@ -183,13 +183,13 @@ func TestTeaUI_ScrollLock(t *testing.T) {
 		t.Error("滚动锁定时不应自动滚到底部")
 	}
 
-	// ↓ 滚回底部 → 解锁滚动（恢复自动跟随）。
+	// ↓ 滚回底部 → 解锁跟随（恢复自动跟随）。
 	for !m.conversation.IsAtBottom() {
 		m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 		m = m2.(*teaUI)
 	}
-	if m.scrollLock {
-		t.Error("滚回底部后应解锁滚动")
+	if !m.conversation.IsAtBottom() {
+		t.Error("滚回底部后应在底部")
 	}
 	// 解锁后新内容恢复自动滚底。
 	m2, _ = m.Update(teaAppendMsg{content: "line 31\n"})
@@ -211,11 +211,11 @@ func TestTeaUI_SubmitUnlocksScroll(t *testing.T) {
 		m2, _ := m.Update(teaAppendMsg{content: fmt.Sprintf("line %02d\n", i)})
 		m = m2.(*teaUI)
 	}
-	// 上滚锁定。
+	// 上滚锁定跟随。
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m = m2.(*teaUI)
-	if !m.scrollLock {
-		t.Fatal("前置：上滚后应锁定滚动")
+	if m.conversation.IsAtBottom() {
+		t.Fatal("前置：上滚后应离开底部（滚动锁定）")
 	}
 
 	// 输入 "hello" 后 Enter 提交。
@@ -226,11 +226,14 @@ func TestTeaUI_SubmitUnlocksScroll(t *testing.T) {
 	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = m2.(*teaUI)
 
-	if m.scrollLock {
-		t.Error("提交输入后应解锁滚动")
-	}
 	if !m.conversation.IsAtBottom() {
 		t.Error("提交输入后应滚回底部（恢复跟随）")
+	}
+	// 恢复跟随：新内容自动滚到底部。
+	m2, _ = m.Update(teaAppendMsg{content: "line 30\n"})
+	m = m2.(*teaUI)
+	if !strings.Contains(m.View(), "line 30") {
+		t.Error("提交输入后新内容应自动滚到底部显示")
 	}
 }
 

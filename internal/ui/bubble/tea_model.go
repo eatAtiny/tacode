@@ -15,9 +15,8 @@
 //
 // 滚动与跟随：
 //   - ↑/↓、PgUp/PgDn 在对话区滚动浏览历史（不触碰输入框）；
-//   - 用户上滚时置 scrollLock（ConversationModel.SetFollow(false)），新内容到达
-//     不再强制滚到底部（阅读位置不被打断）；
-//   - 滚回底部 / 提交输入时解除 scrollLock（SetFollow(true)），恢复自动跟随。
+//   - 用户上滚时 SetFollow(false) 锁定跟随，新内容到达不再强制滚到底部（阅读位置不被打断）；
+//   - 滚回底部 / 提交输入时 SetFollow(true) 恢复自动跟随。
 package bubble
 
 import (
@@ -55,7 +54,6 @@ type teaUI struct {
 	conversation *components.ConversationModel // 对话区（滚动视口，流式累积）
 	width        int                           // 终端宽度
 	height       int                           // 终端高度
-	scrollLock   bool                          // 用户主动滚动时锁定（不自动滚到底部）；滚到底部时解锁
 
 	input  components.InputModel  // textinput 输入框
 	status components.StatusModel // 状态栏
@@ -93,27 +91,27 @@ func (m *teaUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
 	case tea.KeyMsg:
 		// 对话区滚动按键：↑/↓/PgUp/PgDn 在对话区浏览历史（不触碰输入框）。
-		// 用户上滚时锁定滚动（scrollLock=true），新内容不再强制滚到底部；
-		// 滚回底部时解锁（scrollLock=false），恢复自动跟随。
+		// 用户上滚时锁定跟随（SetFollow(false)），新内容不再强制滚到底部；
+		// 滚回底部时解锁（SetFollow(true)），恢复自动跟随。
 		switch v.Type {
 		case tea.KeyUp:
 			m.conversation.ScrollUp(3)
-			m.setScrollLock(true)
+			m.conversation.SetFollow(false)
 			return m, nil
 		case tea.KeyDown:
 			m.conversation.ScrollDown(3)
 			if m.conversation.IsAtBottom() {
-				m.setScrollLock(false)
+				m.conversation.SetFollow(true)
 			}
 			return m, nil
 		case tea.KeyPgUp:
 			m.conversation.ScrollUp(m.viewportHeight())
-			m.setScrollLock(true)
+			m.conversation.SetFollow(false)
 			return m, nil
 		case tea.KeyPgDown:
 			m.conversation.ScrollDown(m.viewportHeight())
 			if m.conversation.IsAtBottom() {
-				m.setScrollLock(false)
+				m.conversation.SetFollow(true)
 			}
 			return m, nil
 		}
@@ -125,8 +123,8 @@ func (m *teaUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.input.SetValue("")
-			// 提交新输入：滚回底部并恢复自动跟随（用户重新开始阅读最新内容）。
-			m.setScrollLock(false)
+			// 提交新输入：恢复自动跟随（用户重新开始阅读最新内容）。
+			m.conversation.SetFollow(true)
 			// 提交输入：通过 BubbleUI 的 inputChan 桥接给 Runner。
 			m.b.submitInput(value)
 			return m, nil
@@ -158,14 +156,6 @@ func (m *teaUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// setScrollLock 设置滚动锁定状态（映射到 ConversationModel 的跟随模式）。
-//   - 上锁（用户上滚浏览历史）→ SetFollow(false)：新内容追加但不再强制滚底。
-//   - 解锁（滚回底部/提交输入）→ SetFollow(true)：滚到底部并恢复自动跟随。
-func (m *teaUI) setScrollLock(lock bool) {
-	m.scrollLock = lock
-	m.conversation.SetFollow(!lock)
-}
-
 // appendConversation 追加内容到对话区，实现流式合并语义。
 //
 // 规则（基于 ConversationModel 的行模型）：
@@ -185,9 +175,11 @@ func (m *teaUI) appendConversation(content string) {
 }
 
 // viewportHeight 对话区视口高度（屏高 - 底部固定区行数）。
-// 底部固定区 = 分隔线(1) + 状态栏(1) + 输入栏行(1) + 命令提示行(1) = 4。
+// 底部固定区 = 对话区末尾换行(1) + 分隔线(1) + 状态栏(1) + 输入栏行(1) + 命令提示行(1) = 5。
+// 注意对话区与分隔线之间有一条独立换行（见 View 的 sb.WriteString("\n")），
+// 固定区总计 5 行；若按 4 算，终端恰好满高时状态栏会被裁剪、滚动历史顶部不可达（off-by-one）。
 func (m *teaUI) viewportHeight() int {
-	h := m.height - 4
+	h := m.height - 5
 	if h < 1 {
 		h = 1
 	}
