@@ -71,25 +71,11 @@ func (r *Runner) queryBalance() (string, bool) {
 	return line, true
 }
 
-// queryBalancePerRound 每轮结束异步查询余额（/balance 开启后调用）。
-// 失败静默：仅当连续失败达到 balanceFailThreshold 次时提示一次原因，
-// 避免用户永远不知道余额展示已停止（网络抖动/鉴权过期等）。
-// 注意：仅主循环 goroutine 调用（queryEngine 事件消费），无需加锁。
-const balanceFailThreshold = 3
-
-func (r *Runner) queryBalancePerRound() {
-	if _, ok := r.queryBalance(); !ok {
-		r.balanceFailCount++
-		if r.balanceFailCount == balanceFailThreshold {
-			r.ui.OnMessage(fmt.Sprintf("⚠️ 余额查询连续失败 %d 次，请检查网络或 API key", balanceFailThreshold))
-		}
-		return
-	}
-	r.balanceFailCount = 0
-}
-
 // balanceQueryFunc 查询余额的签名，便于测试注入桩实现。
 type balanceQueryFunc func() (string, bool)
+
+// balanceFailThreshold 连续失败达到该次数时提示一次原因，避免用户永远不知道余额展示已停止。
+const balanceFailThreshold = 3
 
 // queryBalanceWith 用指定的查询函数执行每轮余额查询（生产走 queryBalance，测试注入桩）。
 func (r *Runner) queryBalanceWith(query balanceQueryFunc) {

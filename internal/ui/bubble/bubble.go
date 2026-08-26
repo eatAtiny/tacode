@@ -69,6 +69,15 @@ type BubbleUI struct {
 	balanceText string
 	// statusVisible 状态栏是否启用（阶段 1：默认启用；可通过 SetStatusBarVisible 控制）
 	statusVisible bool
+	// statusBarShown 状态栏是否当前在屏（renderStatusBar 后 true，clearStatusBar 后 false）。
+	// 状态位驱动生命周期：clear/render 仅在应然状态下执行 ANSI 序列，
+	// 避免"空上移清错行"与"重复上移叠字"。
+	statusBarShown bool
+
+	// uiMu 保护状态栏相关字段（balanceText/statusVisible/statusBarShown/sessionName/model/inputTokens/outputTokens）
+	// 与 clearStatusBar/renderStatusBar 的 ANSI 输出。
+	// 后台余额查询 goroutine（ShowBalance）与主循环并发访问，用单把大锁粗粒度串行化。
+	uiMu sync.Mutex
 
 	// hasDelta 本轮是否收到过 OnDelta（用于判断是否需要清除流式文本）
 	hasDelta bool
@@ -271,6 +280,8 @@ func (b *BubbleUI) rawInputLoop(fd int) {
 // 打印空行后保存光标位置（\033[s），然后显示 "⏳ 思考中..."。
 // cursorSaved 标记和 hasDelta 标记被设置，为后续可能的流式输出做准备。
 func (b *BubbleUI) OnThink(_ int) {
+	// 新一轮思考开始前清除在屏状态栏：下一轮内容将从该行覆盖输出。
+	// 若状态栏不在屏（正常场景）则空操作。
 	b.clearStatusBar()
 	fmt.Println()
 	// 保存光标位置：后续 OnDelta 的流式文本从此位置开始输出，
@@ -325,6 +336,9 @@ func (b *BubbleUI) OnToolCall(name, args string) {
 		fmt.Printf("  %s %s\n", styleToolPrefix.Render("│"), styleMuted.Render(line))
 	}
 	fmt.Printf("  %s\n", styleToolPrefix.Render("└"+strings.Repeat("─", width+1)))
+
+	// 多迭代时保持状态栏：工具调用框线后重绘（状态位守卫避免重复上移）。
+	b.renderStatusBar()
 }
 
 // OnToolResult 显示工具执行结果。
@@ -360,13 +374,18 @@ func (b *BubbleUI) OnToolResult(name, result string, isError bool) {
 			styleMuted.Render(fmt.Sprintf("... (共 %d 行，已截断)", totalLines)))
 	}
 	fmt.Printf("  %s\n", titleStyle.Render("└"+strings.Repeat("─", width+1)))
+
+	// 多迭代时保持状态栏：工具结果框线后重绘（状态位守卫避免重复上移）。
+	b.renderStatusBar()
 }
 
 // OnContinue 通知继续推理。清除流式状态，打印继续提示。
+// 后续 queryLoop 会立刻 yield 下一轮 OnThink（先 clearStatusBar），故此处不重复清除。
 func (b *BubbleUI) OnContinue(iteration int) {
 	b.hasDelta = false
 	b.cursorSaved = false
 	fmt.Println(styleThink.Render(fmt.Sprintf("  🔄 Continuing... (iteration %d)", iteration)))
+	b.renderStatusBar()
 }
 
 // OnFinal 显示最终回答。
@@ -386,6 +405,11 @@ func (b *BubbleUI) OnFinal(answer string, inputTokens, outputTokens, totalTokens
 		fmt.Println()
 	}
 	b.hasDelta = false
+
+	// \033[u 恢复光标位置后，光标回到 OnThink 保存的"思考中"行首——
+	// 状态栏位置假设（光标位于输入提示符行）已失效，先清除在屏状态栏，
+	// 防止后续渲染正文时把状态栏残留写进正文。
+	b.clearStatusBar()
 
 	// 用 Glamour 渲染 Markdown 最终答案（带左侧缩进）。
 	if b.glamour != nil {
@@ -424,12 +448,16 @@ func (b *BubbleUI) OnFinal(answer string, inputTokens, outputTokens, totalTokens
 
 // OnError 打印错误信息（红色加粗）。
 func (b *BubbleUI) OnError(err error) {
+	// 追加正文前先清除在屏状态栏，避免把状态栏写进错误行。
+	b.clearStatusBar()
 	fmt.Println(styleError.Render(fmt.Sprintf("❌ Error: %v", err)))
 	b.renderStatusBar()
 }
 
 // OnMessage 打印一般性消息（无额外样式）。
 func (b *BubbleUI) OnMessage(msg string) {
+	// 追加正文前先清除在屏状态栏，避免把状态栏写进消息行。
+	b.clearStatusBar()
 	fmt.Println(msg)
 	b.renderStatusBar()
 }
@@ -437,12 +465,13 @@ func (b *BubbleUI) OnMessage(msg string) {
 // ShowBalance 展示账户余额（阶段 1：更新状态栏并重绘）。
 // line 是已格式化的余额文本，如 "💰 ¥110.00（充值 ¥100.00 / 赠金 ¥10.00）"。
 // 阶段 1 后余额进状态栏，不再单独打印一行。
+// 注意：可能在后台 goroutine 调用（query_engine 每轮余额查询），
+// 锁保护字段读写 + 状态栏 ANSI 重绘，避免与主循环竞态。
 func (b *BubbleUI) ShowBalance(line string) {
 	b.SetBalanceText(line)
-	if b.statusVisible {
-		b.clearStatusBar()
-		b.renderStatusBar()
-	}
+	// clear/render 内部均有状态位 + statusVisible 守卫，外层无需重复判断。
+	b.clearStatusBar()
+	b.renderStatusBar()
 }
 
 // ConfirmPermission 显示权限确认提示，等待用户输入。
@@ -509,39 +538,60 @@ func (b *BubbleUI) Welcome(model string) {
 
 // SetSessionName 设置当前会话的显示名称。
 func (b *BubbleUI) SetSessionName(name string) {
+	b.uiMu.Lock()
 	b.sessionName = name
+	b.uiMu.Unlock()
 }
 
 // SetModel 设置当前使用的模型名称。
 func (b *BubbleUI) SetModel(model string) {
+	b.uiMu.Lock()
 	b.model = model
+	b.uiMu.Unlock()
 }
 
 // UpdateTokens 累计本轮 token 用量。
 func (b *BubbleUI) UpdateTokens(input, output int) {
+	b.uiMu.Lock()
 	b.inputTokens += input
 	b.outputTokens += output
+	b.uiMu.Unlock()
 }
 
 // ResetTokens 重置本轮 token 计数（新一轮查询开始前调用）。
 func (b *BubbleUI) ResetTokens() {
+	b.uiMu.Lock()
 	b.inputTokens = 0
 	b.outputTokens = 0
+	b.uiMu.Unlock()
 }
 
 // SetBalanceText 设置账户余额展示文本（空=不显示余额段）。
 func (b *BubbleUI) SetBalanceText(text string) {
+	b.uiMu.Lock()
 	b.balanceText = text
+	b.uiMu.Unlock()
 }
 
 // SetStatusBarVisible 控制状态栏是否渲染（阶段 3 全量模式接管后此开关用于过渡）。
 func (b *BubbleUI) SetStatusBarVisible(visible bool) {
+	b.uiMu.Lock()
 	b.statusVisible = visible
+	b.uiMu.Unlock()
 }
 
 // statusBarText 渲染状态栏单行文本（供测试与 renderStatusBar 共用）。
 // 复用 components.StatusModel 的渲染逻辑：同步 session/model/token/余额后调 View()。
+// 余额文本多货币时为 \n 分隔多行，进状态栏前 clamp 成单行（\n → 、），保持单行渲染。
 func (b *BubbleUI) statusBarText() string {
+	b.uiMu.Lock()
+	defer b.uiMu.Unlock()
+	return b.statusBarTextLocked()
+}
+
+// statusBarTextLocked 渲染状态栏单行文本，调用方必须持有 b.uiMu。
+// 拆出锁内实现，避免 renderStatusBar 锁内调用 statusBarText 时二次加锁死锁。
+func (b *BubbleUI) statusBarTextLocked() string {
 	if !b.statusVisible {
 		return ""
 	}
@@ -549,34 +599,63 @@ func (b *BubbleUI) statusBarText() string {
 	st.SetSession(b.sessionName)
 	st.SetModel(b.model)
 	st.SetTokens(b.inputTokens, b.outputTokens)
-	st.SetBalance(b.balanceText)
+	balance := b.balanceText
+	if strings.Contains(balance, "\n") {
+		balance = strings.ReplaceAll(balance, "\n", "、")
+	}
+	st.SetBalance(balance)
 	return st.View()
 }
 
 // clearStatusBar 清除状态栏所在行（将光标移到该行并清空）。
 // 状态栏渲染在输入提示符上方一行，追加输出前需先清除，输出完再重绘。
+// 状态位驱动：仅当状态栏当前在屏（statusBarShown）时才执行上移清行，
+// 避免"状态栏已清除却空上移清错行"。清除后置 statusBarShown = false。
 func (b *BubbleUI) clearStatusBar() {
+	b.uiMu.Lock()
+	defer b.uiMu.Unlock()
 	if !b.statusVisible {
 		return
 	}
-	// 状态栏行在最后一行上方：光标上移 1 行、清行、下移回来。
-	fmt.Print("\033[1A\033[2K\r")
+	if !b.statusBarShown {
+		return
+	}
+	// 状态栏行在最后一行上方：光标上移 1 行、清行。
+	// 注意：不输出 \r 也不下移——调用方（追加式输出）会继续从该行输出新内容，
+	// 下移回来反而会造成换行错位。
+	fmt.Print("\033[1A\033[2K")
 	os.Stdout.Sync()
+	b.statusBarShown = false
 }
 
 // renderStatusBar 在输入提示符上方渲染状态栏。
 // 前提：调用时光标位于输入提示符行首。
+// 状态位驱动：仅当状态栏不在屏（!statusBarShown）时才执行上移输出，
+// 避免连续 render 时重复上移叠字。渲染后置 statusBarShown = true。
 func (b *BubbleUI) renderStatusBar() {
+	b.uiMu.Lock()
+	defer b.uiMu.Unlock()
 	if !b.statusVisible {
 		return
 	}
-	line := b.statusBarText()
+	if b.statusBarShown {
+		// 已在屏：仅重绘内容（当前光标恰好在提示符行），不重复上移。
+		line := b.statusBarTextLocked()
+		if line == "" {
+			return
+		}
+		fmt.Printf("\033[1A\033[2K%s\n", line)
+		os.Stdout.Sync()
+		return
+	}
+	line := b.statusBarTextLocked()
 	if line == "" {
 		return
 	}
-	// 上移一行（输入提示符上一行）、输出状态栏、下移回输入行。
+	// 上移一行（输入提示符上一行）、输出状态栏。光标留在状态栏行。
 	fmt.Printf("\033[1A%s\n", line)
 	os.Stdout.Sync()
+	b.statusBarShown = true
 }
 
 // ──────────────────────────────────────────────────────────

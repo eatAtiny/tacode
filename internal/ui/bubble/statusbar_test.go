@@ -58,3 +58,31 @@ func TestStatusBar_UpdateTokens(t *testing.T) {
 		t.Errorf("状态栏应含累计 token，实际: %q", b.statusBarText())
 	}
 }
+
+// 状态栏生命周期：render 后 shown，clear 后 unshown。
+func TestStatusBarLifecycle(t *testing.T) {
+	b := NewBubbleUI()
+	b.SetSessionName("demo")
+	b.SetModel("m")
+
+	b.renderStatusBar()
+	if !b.statusBarShown {
+		t.Error("render 后 statusBarShown 应为 true")
+	}
+	b.clearStatusBar()
+	if b.statusBarShown {
+		t.Error("clear 后 statusBarShown 应为 false")
+	}
+}
+
+// 多行余额文本被 clamp 成单行。
+func TestStatusBar_MultiLineBalance(t *testing.T) {
+	b := NewBubbleUI()
+	b.SetSessionName("demo")
+	b.SetModel("m")
+	b.SetBalanceText("💰 ¥110.00\n💰 $5.00")
+
+	if strings.Contains(b.statusBarText(), "\n") {
+		t.Errorf("状态栏不应含换行，实际: %q", b.statusBarText())
+	}
+}
