@@ -274,6 +274,12 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 		}
 		return 0, true
 
+	// ── /balance ──
+	// 手动查询余额；成功后开启每轮结束展示。
+	case "/balance":
+		r.handleBalanceCommand()
+		return 0, true
+
 	// ── /compress ──
 	// 手动触发 L2 摘要压缩（LLM 合并旧摘要）。
 	case "/compress":

@@ -74,6 +74,8 @@ type Runner struct {
 
 	messages []llm.ChatMessage // 跨轮累积的对话消息（不含 system/preamble，仅累积对话本身）
 
+	showBalance bool // 每轮结束是否展示余额（/balance 成功后开启）
+
 	memoryPreamble string        // 记忆 preamble 缓存（<system-reminder> 内容，会话内字节稳定，仅切换/首轮重建）
 	compactor      *Compactor    // s08 四步压缩管线（nil = 禁用）
 }
@@ -280,7 +282,7 @@ func (r *Runner) Run(ctx context.Context) error {
 						round = newRound - 1
 					}
 				} else {
-					r.ui.OnError(fmt.Errorf("未知命令，可用: /new, /list, /switch, /delete, /rename, /current, /compress, /memory, /reload"))
+					r.ui.OnError(fmt.Errorf("未知命令，可用: /new, /list, /switch, /delete, /rename, /current, /compress, /memory, /reload, /balance"))
 				}
 				round++
 				fmt.Print("> ")

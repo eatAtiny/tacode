@@ -1,0 +1,44 @@
+package agent
+
+import (
+	"testing"
+
+	"agentic/internal/llm"
+)
+
+func TestFormatBalanceLine_CNY(t *testing.T) {
+	resp := &llm.BalanceResponse{
+		IsAvailable: true,
+		BalanceInfos: []llm.BalanceInfo{
+			{Currency: "CNY", TotalBalance: "110.00", GrantedBalance: "10.00", ToppedUpBalance: "100.00"},
+		},
+	}
+	line := formatBalanceLine(resp)
+	want := "💰 余额: ¥110.00（充值 ¥100.00 / 赠金 ¥10.00）"
+	if line != want {
+		t.Errorf("formatBalanceLine = %q, want %q", line, want)
+	}
+}
+
+func TestFormatBalanceLine_MultiCurrency(t *testing.T) {
+	resp := &llm.BalanceResponse{
+		IsAvailable: true,
+		BalanceInfos: []llm.BalanceInfo{
+			{Currency: "CNY", TotalBalance: "110.00"},
+			{Currency: "USD", TotalBalance: "5.00"},
+		},
+	}
+	line := formatBalanceLine(resp)
+	if line != "💰 余额: ¥110.00\n💰 余额: $5.00" {
+		t.Errorf("formatBalanceLine = %q, want two lines", line)
+	}
+}
+
+func TestFormatBalanceLine_Unavailable(t *testing.T) {
+	if line := formatBalanceLine(&llm.BalanceResponse{IsAvailable: false}); line != "" {
+		t.Errorf("unavailable line = %q, want empty", line)
+	}
+	if line := formatBalanceLine(nil); line != "" {
+		t.Errorf("nil line = %q, want empty", line)
+	}
+}

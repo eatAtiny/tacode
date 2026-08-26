@@ -43,6 +43,8 @@ const unknownModelContextLimit = 32_000
 type OpenAIClient struct {
 	client       *openai.Client // go-openai 原始客户端
 	model        string         // 模型名称（如 gpt-4o-mini）
+	apiKey       string         // API key（余额查询复用）
+	baseURL      string         // API Base URL（余额查询 host 推导）
 	contextLimit int            // 模型上下文窗口大小（token 数），用于压缩判断
 	temperature  float64        // 采样温度，默认 0.2（可由 config 覆盖）
 }
@@ -63,6 +65,12 @@ func NewOpenAIClientFromEnv() (*OpenAIClient, error) {
 		config.BaseURL = strings.TrimRight(baseURL, "/")
 	}
 
+	// baseURLForBalance 余额查询 host 推导用：有自定义网关才传，否则空（走官方地址）。
+	baseURLForBalance := ""
+	if baseURL != "" {
+		baseURLForBalance = strings.TrimRight(baseURL, "/")
+	}
+
 	model := strings.TrimSpace(os.Getenv("OPENAI_MODEL"))
 	if model == "" {
 		model = defaultModel
@@ -74,6 +82,8 @@ func NewOpenAIClientFromEnv() (*OpenAIClient, error) {
 	return &OpenAIClient{
 		client:       openai.NewClientWithConfig(config),
 		model:        model,
+		apiKey:       apiKey,
+		baseURL:      baseURLForBalance,
 		contextLimit: contextLimit,
 		temperature:  defaultTemperature,
 	}, nil
@@ -236,6 +246,12 @@ func (c *OpenAIClient) ChatWithTools(ctx context.Context, messages []ChatMessage
 func (c *OpenAIClient) Model() string {
 	return c.model
 }
+
+// APIKey 返回 API key（余额查询等场景复用）。
+func (c *OpenAIClient) APIKey() string { return c.apiKey }
+
+// BaseURL 返回 API Base URL（余额查询 host 推导用）。
+func (c *OpenAIClient) BaseURL() string { return c.baseURL }
 
 // ChatWithToolsStream 支持 Function Calling 的流式对话。
 //
