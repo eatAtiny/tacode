@@ -36,23 +36,84 @@ func TestTeaUIView_ContainsSeparator(t *testing.T) {
 	}
 }
 
-// teaAppendMsg 消息应追加到对话区（Update 返回的模型携带累积状态）。
+// teaAppendMsg 追加语义（流式合并）：不以 \n 结尾的内容是流式增量，合并进当前行；
+// 以 \n 结尾的内容是闭合块，若当前行未闭合（流式增量中）则先断开再另起新行。
 func TestTeaUI_AppendConversation(t *testing.T) {
 	b := NewBubbleUI()
 
 	m := b.teaModel()
 	m.width = 60
-	m2, cmd := m.Update(teaAppendMsg{content: "第一行"})
+
+	// 闭合块（思考行）：新起一行。
+	m2, cmd := m.Update(teaAppendMsg{content: "  ⏳ 思考中...\n"})
 	if cmd != nil {
 		t.Errorf("teaAppendMsg 不应产生命令，实际: %v", cmd)
 	}
-	m3, _ := m2.Update(teaAppendMsg{content: "第二行"})
+	m3, _ := m2.Update(teaAppendMsg{content: "你好"}) // 流式增量
+	m4, _ := m3.Update(teaAppendMsg{content: "世界"}) // 流式增量 → 合并
+
+	v := m4.View()
+	if !strings.Contains(v, "你好世界") {
+		t.Errorf("流式增量应合并为同一行，View 缺少 %q，实际:\n%s", "你好世界", v)
+	}
+	// 思考行与流式行应分行（闭合块尾部 \n 断开）。
+	if strings.Contains(v, "思考中...你好") {
+		t.Errorf("闭合块与流式行不应拼在同一行，实际:\n%s", v)
+	}
+}
+
+// 流式行未闭合时收到闭合块（最终回答/工具框线）：块从新行开始，不与流式 token 拼接。
+func TestTeaUI_AppendBlockBreaksStreamingLine(t *testing.T) {
+	b := NewBubbleUI()
+
+	m := b.teaModel()
+	m.width = 60
+
+	m2, _ := m.Update(teaAppendMsg{content: "你好"})            // 流式增量（未闭合）
+	m3, _ := m2.Update(teaAppendMsg{content: "世界"})           // 流式增量（继续合并）
+	m4, _ := m3.Update(teaAppendMsg{content: "  ✅ 思考完成\n"}) // 闭合块到达
+
+	v := m4.View()
+	if !strings.Contains(v, "你好世界\n") {
+		t.Errorf("闭合块应断开流式行另起，View 实际:\n%s", v)
+	}
+	if strings.Contains(v, "你好世界  ✅ 思考完成") {
+		t.Errorf("闭合块不应与流式行拼在同一行，实际:\n%s", v)
+	}
+	if !strings.Contains(v, "✅ 思考完成") {
+		t.Errorf("闭合块内容应保留，实际:\n%s", v)
+	}
+}
+
+// 闭合块后追加流式增量：新起一行（不再合并进上一个闭合块）。
+func TestTeaUI_AppendDeltaAfterBlockStartsNewLine(t *testing.T) {
+	b := NewBubbleUI()
+
+	m := b.teaModel()
+	m.width = 60
+
+	m2, _ := m.Update(teaAppendMsg{content: "  ⏳ 思考中...\n"}) // 闭合块
+	m3, _ := m2.Update(teaAppendMsg{content: "增量"})             // 流式增量 → 新行
 
 	v := m3.View()
-	for _, want := range []string{"第一行", "第二行"} {
-		if !strings.Contains(v, want) {
-			t.Errorf("View 缺少对话行 %q，实际:\n%s", want, v)
-		}
+	if !strings.Contains(v, "思考中...\n增量") {
+		t.Errorf("闭合块后的流式增量应新起一行，View 实际:\n%s", v)
+	}
+}
+
+// 对话区 View 的输出结构：对话 entry 行 + 分隔线 + 状态栏 + 输入框。
+func TestTeaUI_ViewStructure(t *testing.T) {
+	b := NewBubbleUI()
+
+	m := b.teaModel()
+	m.width = 60
+	m2, _ := m.Update(teaAppendMsg{content: "  ⏳ 思考中...\n"})
+	m3, _ := m2.Update(teaAppendMsg{content: "回答内容\n"})
+
+	v := m3.View()
+	// 闭合块内容按行出现（\n join），分隔线在对话区之后。
+	if !strings.Contains(v, "思考中...\n回答内容") {
+		t.Errorf("对话区应分行累积，View 实际:\n%s", v)
 	}
 }
 

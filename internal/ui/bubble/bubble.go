@@ -14,6 +14,13 @@
 // 注意：阶段 1 的直接写 os.Stdout + ANSI 光标控制路径仍保留（Welcome、
 // RunSessionPicker 等外部输出），但在 tea 模式（Start 后）自动退位为 no-op，
 // 避免与 tea 渲染冲突。
+//
+// 文件组织（本文件仅含阶段 1 核心 + 事件转发；tea 部分已拆分）：
+//   - bubble.go      阶段 1 ANSI（clearStatusBar/renderStatusBar/statusBarText）、
+//                    事件转发方法（OnDelta/OnFinal/...，含 tea 分支）、样式、字段
+//   - tea_model.go   teaUI 渲染模型（Init/Update/View/statusSnapshot）+ 消息类型
+//   - tea_lifecycle.go  Start/sendToTea/IsTeaMode/PauseTea/ResumeTea/输入桥接
+//   - box.go         工具框线/最终回答共享渲染（阶段 1 与 tea 模式共用）
 package bubble
 
 import (
@@ -106,10 +113,11 @@ type BubbleUI struct {
 
 	// teaProgram 是阶段 2 起的 tea 渲染程序（Start 启动，sendToTea 投递消息）。
 	// tea 在后台 goroutine 运行，事件通过 Program.Send 投递（tea 并发模型要求消息走 channel，
-	// 不直接改模型字段）。tea 未启动时为 nil，sendToTea 安全丢弃。
+	// 不直接改模型字段）。tea 未启动/已退出时为 nil，sendToTea 安全丢弃。
 	teaProgram *tea.Program
 	// teaMu 保护 teaProgram 字段读写：Start/cancel 在主 goroutine，sendToTea/IsTeaMode
-	// 在事件 goroutine（queryEngine 事件流 + 后台余额查询），二者并发访问。
+	// 在事件 goroutine（queryEngine 事件流 + 后台余额查询），tea.Run 返回后的清理
+	// 也在后台 goroutine——三者并发访问，必须加锁。
 	teaMu sync.Mutex
 
 	// oldTermState 生模式前的终端状态，Close() 时恢复以防止终端残留生模式。
@@ -154,104 +162,6 @@ func (b *BubbleUI) Close() error {
 	return nil
 }
 
-// Start 启动 tea 渲染程序（阶段 2 起 BubbleUI 的主渲染循环）。
-// 返回后 tea 在后台 goroutine 渲染，UI 事件通过 Program.Send 投递。
-// 返回 cancel 函数：退出时调用以停止 tea 程序。
-//
-// 选项说明：
-//   - tea.WithAltScreen()：对话区累积在 tea 模型内全屏渲染，正文与状态栏/输入框
-//     由 tea 统一重绘。必须 alt screen——否则追加式长对话会超出主屏回滚区，
-//     与阶段 1 的"滚动后状态栏错位"问题同源。
-//   - 环境分支（按 stdout 是否 TTY）：
-//     * TTY（真实终端）：标准渲染器 + 默认输入（tea 接管 raw 模式读键），
-//       textinput 正常接收 KeyMsg，输入框可交互。
-//     * 非 TTY（测试/CI/管道）：tea.WithInput(nil) + tea.WithoutRenderer()
-//       ——tea v1 在非 TTY 下默认会 openInputTTY（/dev/tty），失败则 Run 返回错误；
-//       显式禁输入 + headless 渲染让事件循环在测试环境完整运转（sendToTea 可用）。
-//       此时 WithAltScreen 无效果（nilRenderer.altScreen 恒 false），安全。
-func (b *BubbleUI) Start() (func(), error) {
-	b.teaMu.Lock()
-	if b.teaProgram != nil {
-		b.teaMu.Unlock()
-		return func() {}, nil // 已启动
-	}
-	opts := []tea.ProgramOption{tea.WithAltScreen()}
-	if !term.IsTerminal(int(os.Stdout.Fd())) {
-		// 非 TTY：headless 模式（见方法注释）。
-		opts = append(opts, tea.WithInput(nil), tea.WithoutRenderer())
-	}
-	p := tea.NewProgram(b.teaModel(), opts...)
-	b.teaProgram = p
-	b.teaMu.Unlock()
-
-	go func() {
-		if _, err := p.Run(); err != nil {
-			// tea 运行错误：记录（阶段 2 容错，不 panic）。
-			// 可能原因：外部信号 Kill 等。tea 程序停止后 sendToTea 仍安全
-			// （Program.Send 在 ctx 结束后直接丢弃）。
-			fmt.Fprintf(os.Stderr, "bubbletea run error: %v\n", err)
-		}
-	}()
-
-	return func() {
-		b.teaMu.Lock()
-		p := b.teaProgram
-		if p != nil {
-			p.Quit() // 优雅退出：Quit 是 no-op if not running，安全
-		}
-		b.teaProgram = nil
-		b.teaMu.Unlock()
-	}, nil
-}
-
-// sendToTea 把消息投递给 tea 模型（非阻塞，tea 未启动时丢弃）。
-// 可能从多个 goroutine 调用（queryEngine 事件流 + 后台余额查询），teaProgram
-// 读写走 teaMu 锁；Program.Send 自身在程序退出后安全丢弃（channel 关闭）。
-func (b *BubbleUI) sendToTea(msg tea.Msg) {
-	b.teaMu.Lock()
-	p := b.teaProgram
-	b.teaMu.Unlock()
-	if p != nil {
-		p.Send(msg)
-	}
-}
-
-// IsTeaMode 是否处于 tea 渲染模式（Start 已调用且未取消）。
-// tea 模式下阶段 1 的 ANSI 直写路径（clearStatusBar/renderStatusBar/OnThink
-// 等）全部退位为 no-op，避免与 tea 全屏渲染冲突。
-func (b *BubbleUI) IsTeaMode() bool {
-	b.teaMu.Lock()
-	started := b.teaProgram != nil
-	b.teaMu.Unlock()
-	return started
-}
-
-// PauseTea 暂停 tea 渲染程序并释放终端（退出 alt screen、恢复终端状态）。
-// 用于 /list 等前台运行其他全屏程序（独立 tea 程序）的场景：
-// 两个 tea 程序共享一个终端，主程序不暂停则选择器渲染被 alt screen 遮蔽且输入被抢占。
-// 未启动/已暂停时安全 no-op（返回 nil）。Task 8 将进一步融合 /list。
-func (b *BubbleUI) PauseTea() error {
-	b.teaMu.Lock()
-	p := b.teaProgram
-	b.teaMu.Unlock()
-	if p == nil {
-		return nil
-	}
-	return p.ReleaseTerminal()
-}
-
-// ResumeTea 恢复被 PauseTea 暂停的 tea 渲染程序（重进 alt screen、重启渲染）。
-// 未启动时安全 no-op。
-func (b *BubbleUI) ResumeTea() error {
-	b.teaMu.Lock()
-	p := b.teaProgram
-	b.teaMu.Unlock()
-	if p == nil {
-		return nil
-	}
-	return p.RestoreTerminal()
-}
-
 // ──────────────────────────────────────────────────────────
 // 样式定义
 // ──────────────────────────────────────────────────────────
@@ -276,7 +186,7 @@ var (
 )
 
 // ──────────────────────────────────────────────────────────
-// UI 接口实现
+// UI 接口实现：输入组
 // ──────────────────────────────────────────────────────────
 
 // ReadInput 同步读取用户输入。打印提示符 "> " 后阻塞等待。
@@ -394,12 +304,16 @@ func (b *BubbleUI) rawInputLoop(fd int) {
 	}
 }
 
+// ──────────────────────────────────────────────────────────
+// UI 接口实现：事件通知组
+// ──────────────────────────────────────────────────────────
+
 // OnThink 通知新一轮思考开始。
 // 阶段 1：打印空行后保存光标位置（\033[s），然后显示 "⏳ 思考中..."。
-// 阶段 2（tea 模式）：直接 sendToTea 追加思考行，ANSI 光标控制退位。
+// 阶段 2（tea 模式）：sendToTea 追加闭合行（尾部 \n），ANSI 光标控制退位。
 func (b *BubbleUI) OnThink(_ int) {
 	if b.IsTeaMode() {
-		b.sendToTea(teaAppendMsg{content: "  ⏳ 思考中..."})
+		b.sendToTea(teaAppendMsg{content: "  ⏳ 思考中...\n"})
 		return
 	}
 	// 新一轮思考开始前清除在屏状态栏：下一轮内容将从该行覆盖输出。
@@ -416,7 +330,7 @@ func (b *BubbleUI) OnThink(_ int) {
 
 // OnDelta 输出流式增量文本。
 // 阶段 1：直接打印 content（不换行、不加前缀），用灰色斜体样式。
-// 阶段 2（tea 模式）：sendToTea 追加增量（tea 模型内逐段累积同一行内容）。
+// 阶段 2（tea 模式）：sendToTea 追加流式增量（tea 模型合并进当前行）。
 func (b *BubbleUI) OnDelta(content string) {
 	if b.IsTeaMode() {
 		b.sendToTea(teaAppendMsg{content: content})
@@ -438,7 +352,7 @@ func (b *BubbleUI) OnDelta(content string) {
 //	└──────────────────────────────────────
 func (b *BubbleUI) OnToolCall(name, args string) {
 	if b.IsTeaMode() {
-		// tea 模式：直接 sendToTea 追加工具调用框线（对话区累积），ANSI 退位。
+		// tea 模式：追加工具调用框线（闭合块，尾部 \n，见 box.go），ANSI 退位。
 		b.sendToTea(teaAppendMsg{content: toolCallBox(name, args)})
 		return
 	}
@@ -477,7 +391,7 @@ func (b *BubbleUI) OnToolCall(name, args string) {
 // 框线样式与 OnToolCall 保持一致。
 func (b *BubbleUI) OnToolResult(name, result string, isError bool) {
 	if b.IsTeaMode() {
-		// tea 模式：追加工具结果框线（截断逻辑与阶段 1 一致）。
+		// tea 模式：追加工具结果框线（闭合块，尾部 \n，见 box.go）。
 		b.sendToTea(teaAppendMsg{content: toolResultBox(name, result, isError)})
 		return
 	}
@@ -519,8 +433,8 @@ func (b *BubbleUI) OnToolResult(name, result string, isError bool) {
 // 后续 queryLoop 会立刻 yield 下一轮 OnThink（先 clearStatusBar），故此处不重复清除。
 func (b *BubbleUI) OnContinue(iteration int) {
 	if b.IsTeaMode() {
-		// tea 模式：追加继续推理行。
-		b.sendToTea(teaAppendMsg{content: fmt.Sprintf("  🔄 Continuing... (iteration %d)", iteration)})
+		// tea 模式：追加继续推理闭合行。
+		b.sendToTea(teaAppendMsg{content: fmt.Sprintf("  🔄 Continuing... (iteration %d)\n", iteration)})
 		return
 	}
 	b.hasDelta = false
@@ -536,14 +450,18 @@ func (b *BubbleUI) OnContinue(iteration int) {
 // 4. 打印分隔线标记本轮结束
 func (b *BubbleUI) OnFinal(answer string, inputTokens, outputTokens, totalTokens int) {
 	if b.IsTeaMode() {
-		// tea 模式：最终回答追加到对话区（走 sendToTea，tea 模型内累积）。
-		// token 统计与分隔线也一并追加，保持与阶段 1 一致的信息层级。
-		content := "  ✅ 思考完成\n" + finalAnswerText(b, answer)
+		// tea 模式：最终回答作为闭合块追加到对话区（尾部 \n）。
+		// 内容含换行结尾，Update 的合并逻辑会与流式增量（不含换行）区分开：
+		// 若当前行是未闭合流式行，先补 \n 断开，最终回答另起一行。
+		var sb strings.Builder
+		sb.WriteString("  ✅ 思考完成\n")
+		sb.WriteString(finalAnswerText(b, answer))
 		if totalTokens > 0 {
-			content += fmt.Sprintf("  ⚡ 本轮 %d tokens（输入 %d / 输出 %d）", totalTokens, inputTokens, outputTokens) + "\n"
+			sb.WriteString(fmt.Sprintf("  ⚡ 本轮 %d tokens（输入 %d / 输出 %d）\n", totalTokens, inputTokens, outputTokens))
 		}
-		content += strings.Repeat("─", 60)
-		b.sendToTea(teaAppendMsg{content: content})
+		sb.WriteString(strings.Repeat("─", 60))
+		sb.WriteString("\n")
+		b.sendToTea(teaAppendMsg{content: sb.String()})
 		return
 	}
 	// 清除流式文本，保留"思考中..."行并改为"思考完成"。
@@ -598,35 +516,10 @@ func (b *BubbleUI) OnFinal(answer string, inputTokens, outputTokens, totalTokens
 	b.renderStatusBar()
 }
 
-// finalAnswerText 渲染最终回答文本（tea 模式用）：Glamour Markdown 渲染，
-// 失败回退纯文本，带 2 空格缩进。不直接使用 b.glamour 字段读——渲染器
-// 初始化后只读，无并发写，直接读安全。
-func finalAnswerText(b *BubbleUI, answer string) string {
-	if b.glamour != nil {
-		rendered, err := b.glamour.Render(answer)
-		if err == nil {
-			var sb strings.Builder
-			for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {
-				sb.WriteString("  ")
-				sb.WriteString(line)
-				sb.WriteString("\n")
-			}
-			return sb.String()
-		}
-	}
-	var sb strings.Builder
-	for _, line := range strings.Split(answer, "\n") {
-		sb.WriteString("  ")
-		sb.WriteString(line)
-		sb.WriteString("\n")
-	}
-	return sb.String()
-}
-
 // OnError 打印错误信息（红色加粗）。
 func (b *BubbleUI) OnError(err error) {
 	if b.IsTeaMode() {
-		b.sendToTea(teaAppendMsg{content: fmt.Sprintf("❌ Error: %v", err)})
+		b.sendToTea(teaAppendMsg{content: fmt.Sprintf("❌ Error: %v\n", err)})
 		return
 	}
 	// 追加正文前先清除在屏状态栏，避免把状态栏写进错误行。
@@ -638,6 +531,9 @@ func (b *BubbleUI) OnError(err error) {
 // OnMessage 打印一般性消息（无额外样式）。
 func (b *BubbleUI) OnMessage(msg string) {
 	if b.IsTeaMode() {
+		if !strings.HasSuffix(msg, "\n") {
+			msg += "\n"
+		}
 		b.sendToTea(teaAppendMsg{content: msg})
 		return
 	}
@@ -671,6 +567,8 @@ func (b *BubbleUI) ShowBalance(line string) {
 // 否则从 ReadInputChan 读取。
 // 返回 true 表示用户输入 "y" 或 "yes"（大小写不敏感）。
 func (b *BubbleUI) ConfirmPermission(tool, args, reason string, inputForward <-chan string) (bool, error) {
+	// TODO(Task 9): tea 模式下权限确认需弹层渲染（当前提示打到主屏，alt screen 下不可见，
+	// 功能可用但盲输）。
 	fmt.Printf("\n%s %s\n", styleThink.Render("⚠️  权限确认:"), tool)
 	fmt.Printf("  参数: %s\n", styleMuted.Render(args))
 	if reason != "" {
@@ -724,7 +622,7 @@ func (b *BubbleUI) Welcome(model string) {
 }
 
 // ──────────────────────────────────────────────────────────
-// 元数据设置
+// UI 接口实现：元数据设置
 // ──────────────────────────────────────────────────────────
 
 // SetSessionName 设置当前会话的显示名称。
@@ -770,6 +668,10 @@ func (b *BubbleUI) SetStatusBarVisible(visible bool) {
 	b.statusVisible = visible
 	b.uiMu.Unlock()
 }
+
+// ──────────────────────────────────────────────────────────
+// 状态栏（阶段 1 ANSI 路径）
+// ──────────────────────────────────────────────────────────
 
 // statusBarText 渲染状态栏单行文本（供测试与 renderStatusBar 共用）。
 // 复用 components.StatusModel 的渲染逻辑：同步 session/model/token/余额后调 View()。
@@ -876,6 +778,7 @@ func trimArgs(args string, maxLen int) string {
 }
 
 // boxWidth 计算框线宽度：取内容最长行的字符宽度，限制在 [minWidth, 80] 范围。
+// 阶段 1 的 ANSI 框线路径使用；tea 模式的框线生成见 box.go。
 func boxWidth(content string, minWidth int) int {
 	maxLen := minWidth
 	for _, line := range strings.Split(content, "\n") {
@@ -888,254 +791,4 @@ func boxWidth(content string, minWidth int) int {
 		maxLen = 80
 	}
 	return maxLen
-}
-
-// toolCallBox 生成工具调用框线文本（阶段 1 与 tea 模式共用）。
-// 参数 JSON 格式化缩进显示，单行参数用紧凑格式。
-func toolCallBox(name, args string) string {
-	displayArgs := args
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(args), &parsed); err == nil {
-		if formatted, err := json.MarshalIndent(parsed, "", "  "); err == nil {
-			displayArgs = string(formatted)
-		}
-	}
-	width := boxWidth(displayArgs, 60)
-	var sb strings.Builder
-	sb.WriteString("  ")
-	sb.WriteString(styleToolPrefix.Render("┌─ 🔧 " + name))
-	sb.WriteString(" ")
-	sb.WriteString(styleMuted.Render(strings.Repeat("─", max(0, width-len(name)-6))))
-	sb.WriteString("\n")
-	for _, line := range strings.Split(displayArgs, "\n") {
-		sb.WriteString("  ")
-		sb.WriteString(styleToolPrefix.Render("│"))
-		sb.WriteString(" ")
-		sb.WriteString(styleMuted.Render(line))
-		sb.WriteString("\n")
-	}
-	sb.WriteString("  ")
-	sb.WriteString(styleToolPrefix.Render("└" + strings.Repeat("─", width+1)))
-	return sb.String()
-}
-
-// toolResultBox 生成工具执行结果框线文本（阶段 1 与 tea 模式共用）。
-// 超过 15 行的输出会被截断。成功标题绿色 "✅ 结果"，失败红色 "❌ 错误"。
-func toolResultBox(name, result string, isError bool) string {
-	lines := strings.Split(result, "\n")
-	totalLines := len(lines)
-	if totalLines > 15 {
-		lines = lines[:15]
-	}
-	titleStyle := styleSuccess
-	titleText := "✅ 结果"
-	if isError {
-		titleStyle = styleError
-		titleText = "❌ 错误"
-	}
-	width := boxWidth(strings.Join(lines, "\n"), 60)
-	var sb strings.Builder
-	sb.WriteString("  ")
-	sb.WriteString(titleStyle.Render("┌─ " + titleText))
-	sb.WriteString(" ")
-	sb.WriteString(styleMuted.Render(strings.Repeat("─", max(0, width-len(titleText)+2))))
-	sb.WriteString("\n")
-	for _, line := range lines {
-		sb.WriteString("  ")
-		sb.WriteString(titleStyle.Render("│"))
-		sb.WriteString(" ")
-		sb.WriteString(line)
-		sb.WriteString("\n")
-	}
-	if totalLines > 15 {
-		sb.WriteString("  ")
-		sb.WriteString(titleStyle.Render("│"))
-		sb.WriteString(" ")
-		sb.WriteString(styleMuted.Render(fmt.Sprintf("... (共 %d 行，已截断)", totalLines)))
-		sb.WriteString("\n")
-	}
-	sb.WriteString("  ")
-	sb.WriteString(titleStyle.Render("└" + strings.Repeat("─", width+1)))
-	return sb.String()
-}
-
-// ──────────────────────────────────────────────────────────
-// 阶段 2：tea 渲染模型（常驻输入框 + 状态栏，对话区追加）
-// ──────────────────────────────────────────────────────────
-//
-// 阶段 1 结论：追加式输出 + ANSI 锚定底部状态栏在终端滚动后必然错位（pyte 模拟证实），
-// 无法可靠「常驻」。阶段 2 改为用 tea.Program 全屏渲染模型：
-//
-//	对话区（追加式累积）      ← teaUI.conversation
-//	──────────────────────  ← 分割线
-//	[状态栏]                 ← components.StatusModel
-//	> [输入框]               ← components.InputModel
-//
-// 对话区不再走外部 fmt.Println，而是作为 tea 模型的一部分（追加式增长的字符串），
-// 流式 delta / 最终回答通过 teaAppendMsg 消息更新对话区，由 tea 统一重绘。
-// 输入走 tea 消息（KeyMsg），Enter 提交后通过 submitInput 桥接给 Runner 的 inputChan
-// （复用现有 select 语义，Runner 循环不变）。
-//
-// 注意：阶段 2 只做「能跑通」的渲染骨架，queryEngine 事件流接入是 Task 6/7。
-
-// teaAppendMsg 对话内容追加消息（由 queryEngine 事件驱动，tea 模型内 accumulate）。
-type teaAppendMsg struct {
-	content string // 追加到对话区的内容（纯文本/增量）
-}
-
-// teaBalanceMsg 余额更新消息。
-type teaBalanceMsg struct {
-	balance string
-}
-
-// teaUI 是 BubbleUI 的 tea 渲染模型。
-//
-// View() 输出：对话区（追加式累积） + 分割线 + 状态栏 + 常驻输入框。
-// 内部持 *BubbleUI 引用读取字段（sessionName/model/token/余额），
-// 状态栏数据在 View 时从 b 同步（阶段 1 的字段保留，Task 6 决定去留）。
-type teaUI struct {
-	b *BubbleUI
-
-	conversation []string // 对话区累积行（追加式）
-	width        int      // 终端宽度
-	height       int      // 终端高度
-
-	input  components.InputModel  // textinput 输入框
-	status components.StatusModel // 状态栏
-}
-
-// _ 编译期断言：*teaUI 必须满足 tea.Model（tea.NewProgram 接收该接口）。
-// Update 返回 tea.Model（内部返回 *m 指针），动态类型始终为 *teaUI。
-var _ tea.Model = (*teaUI)(nil)
-
-// teaModel 构造 tea 渲染模型（供测试与 tea.NewProgram 使用）。
-func (b *BubbleUI) teaModel() *teaUI {
-	return &teaUI{
-		b:      b,
-		input:  components.NewInputModel(),
-		status: components.NewStatusModel(),
-	}
-}
-
-// Init 返回初始命令（启动输入框光标闪烁）。
-func (m *teaUI) Init() tea.Cmd {
-	return m.input.Init()
-}
-
-// Update 处理 tea 消息。
-//
-// 返回值类型说明：tea.Model 接口要求 Update 返回 tea.Model（运行时动态类型被赋回接口）。
-// 惯例做法是返回 teaUI 值，但 teaUI 的方法集由指针接收者实现（*teaUI 满足接口），
-// 值类型 teaUI 本身并不实现 tea.Model —— 若 Update 返回 teaUI，运行时被赋回接口后
-// 动态类型变为值类型 teaUI，下一次 model.Update 调用即编译不通过。
-// 故这里返回 tea.Model，内部返回 *m（指针）保证动态类型始终为 *teaUI。
-// 注意 m 是 *teaUI，直接修改其字段即更新共享状态；textinput 是值类型，
-// 其 Update 的返回值必须写回 m.input（值接收者方法集，丢弃返回值会丢失输入状态）。
-func (m *teaUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch v := msg.(type) {
-	case tea.KeyMsg:
-		// 输入框按键：Enter 提交，其他转发给 textinput。
-		if v.Type == tea.KeyEnter {
-			value := m.input.Value()
-			if value == "" {
-				return m, nil
-			}
-			m.input.SetValue("")
-			// 提交输入：通过 BubbleUI 的 inputChan 桥接给 Runner。
-			m.b.submitInput(value)
-			return m, nil
-		}
-		// 其他按键转发给 textinput，返回值写回（textinput 是值类型组件）。
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		return m, cmd
-
-	case tea.WindowSizeMsg:
-		m.width = v.Width
-		m.height = v.Height
-		m.setWidths()
-		return m, nil
-
-	case teaAppendMsg:
-		m.conversation = append(m.conversation, v.content)
-		return m, nil
-
-	case teaBalanceMsg:
-		// 走 SetBalanceText（持 uiMu 锁），避免与后台余额查询 goroutine 并发写 race。
-		m.b.SetBalanceText(v.balance)
-		return m, nil
-	}
-	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
-	return m, cmd
-}
-
-// setWidths 按终端宽度设置输入框与状态栏宽度。
-// 注意：InputModel.SetWidth 内部已减去提示符占位（> ），这里直接传 m.width，
-// 若再减 4 会双重减法（net width-8）且与分割线宽度（m.width）不一致。
-// textinput 对 Width <= 0 时不做截断（完整渲染占位符），窄终端可安全退化为不限制宽度。
-func (m *teaUI) setWidths() {
-	m.input.SetWidth(m.width)
-	m.status.SetWidth(m.width)
-}
-
-// statusSnapshot 一次性读取状态栏所需字段（持 uiMu 锁），供 tea 模型 View 使用。
-// View 在 tea 事件循环 goroutine 中执行，而 sessionName/model/token/balanceText
-// 由 Runner 主循环（SetSessionName 等）与后台余额 goroutine（ShowBalance）写入，
-// 必须加锁读，否则 go test -race 会检测到数据竞争。
-func (b *BubbleUI) statusSnapshot() (session, model string, in, out int, balance string) {
-	b.uiMu.Lock()
-	defer b.uiMu.Unlock()
-	return b.sessionName, b.model, b.inputTokens, b.outputTokens, b.balanceText
-}
-
-// View 渲染整屏：对话区 + 分割线 + 状态栏 + 输入框。
-func (m *teaUI) View() string {
-	// 同步状态栏数据（从 BubbleUI 字段，加锁读避免跨 goroutine 竞争）。
-	session, model, in, out, balance := m.b.statusSnapshot()
-	m.status.SetSession(session)
-	m.status.SetModel(model)
-	m.status.SetTokens(in, out)
-	if strings.Contains(balance, "\n") {
-		balance = strings.ReplaceAll(balance, "\n", "、")
-	}
-	m.status.SetBalance(balance)
-
-	m.setWidths()
-
-	// 对话区（追加式累积）+ 分割线 + 状态栏 + 输入框。
-	var sb strings.Builder
-	sb.WriteString(strings.Join(m.conversation, "\n"))
-	sb.WriteString("\n")
-	sep := strings.Repeat("─", m.width)
-	if sep == "" {
-		sep = "─"
-	}
-	sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(sep))
-	sb.WriteString("\n")
-	sb.WriteString(m.status.View())
-	sb.WriteString("\n")
-	sb.WriteString(m.input.View())
-
-	return sb.String()
-}
-
-// submitInput 把用户提交的输入桥接给 Runner（写入 tea 输入专用 channel）。
-//
-// 阶段 2 起输入由 tea 接管，tea 输入与 raw 路径完全隔离：
-//   - 写 b.teaInputCh（NewBubbleUI 创建，永不关闭），不经 ReadInputChan/rawInputLoop，
-//     避免 raw loop 在非 TTY 下 term.MakeRaw 失败退出 → defer close(inputChan) 与发送竞态
-//     （go test -race 曾检测到 send vs close 的 data race，且 raw loop 退出后发送会 panic）。
-//   - 缓冲满（Runner 未及时消费）时丢弃输入，避免阻塞 tea 事件循环。
-func (b *BubbleUI) submitInput(value string) {
-	select {
-	case b.teaInputCh <- value:
-	default:
-		// 缓冲满（Runner 未及时消费）时丢弃，避免阻塞 tea 事件循环。
-	}
-}
-
-// ReadTeaInputChan 返回 tea 输入桥接 channel（阶段 2 起 Runner 从此读用户输入）。
-func (b *BubbleUI) ReadTeaInputChan() <-chan string {
-	return b.teaInputCh
 }
