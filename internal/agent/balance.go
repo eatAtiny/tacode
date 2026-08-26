@@ -12,33 +12,39 @@ import (
 // showBalance 是否每轮结束展示余额（/balance 成功后开启）。
 // 字段加在 runner.go 的 Runner struct 中（messages 字段附近）。
 
+// currencySymbol 货币符号映射（未知货币回退到币种代码）。
+var currencySymbol = map[string]string{"CNY": "¥", "USD": "$"}
+
 // formatBalanceLine 格式化余额展示行。
 // 多货币逐行输出；货币符号: CNY→¥, USD→$，未知货币用币种代码。
 // 充值/赠金两段仅在对应余额非空时显示，用 " / " 连接，空段省略。
+// nil 返回空串（视为无响应）；is_available=false 与空 balance_infos 均显示"账户无可用余额"。
 func formatBalanceLine(resp *llm.BalanceResponse) string {
-	if resp == nil || !resp.IsAvailable {
+	if resp == nil {
 		return ""
 	}
 	lines := []string{}
-	for _, b := range resp.BalanceInfos {
-		symbol := map[string]string{"CNY": "¥", "USD": "$"}[b.Currency]
-		if symbol == "" {
-			symbol = b.Currency + " "
-		}
-		line := fmt.Sprintf("💰 余额: %s%s", symbol, b.TotalBalance)
+	if resp.IsAvailable {
+		for _, b := range resp.BalanceInfos {
+			symbol := currencySymbol[b.Currency]
+			if symbol == "" {
+				symbol = b.Currency + " "
+			}
+			line := fmt.Sprintf("💰 余额: %s%s", symbol, b.TotalBalance)
 
-		// 充值/赠金明细：仅展示非空字段，两段用 " / " 连接，空段省略。
-		segments := []string{}
-		if b.ToppedUpBalance != "" {
-			segments = append(segments, fmt.Sprintf("充值 %s%s", symbol, b.ToppedUpBalance))
+			// 充值/赠金明细：仅展示非空字段，两段用 " / " 连接，空段省略。
+			segments := []string{}
+			if b.ToppedUpBalance != "" {
+				segments = append(segments, fmt.Sprintf("充值 %s%s", symbol, b.ToppedUpBalance))
+			}
+			if b.GrantedBalance != "" {
+				segments = append(segments, fmt.Sprintf("赠金 %s%s", symbol, b.GrantedBalance))
+			}
+			if len(segments) > 0 {
+				line += "（" + strings.Join(segments, " / ") + "）"
+			}
+			lines = append(lines, line)
 		}
-		if b.GrantedBalance != "" {
-			segments = append(segments, fmt.Sprintf("赠金 %s%s", symbol, b.GrantedBalance))
-		}
-		if len(segments) > 0 {
-			line += "（" + strings.Join(segments, " / ") + "）"
-		}
-		lines = append(lines, line)
 	}
 	if len(lines) == 0 {
 		return "💰 余额: 账户无可用余额"

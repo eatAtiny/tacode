@@ -18,7 +18,7 @@
 2. `/balance` 命令手动查询余额。
 3. 余额查询默认关闭（避免所有用户每轮多一次 HTTP 请求），首次 `/balance` 查询成功后开启每轮展示。
 4. 每轮查询失败**静默**（不打扰）；`/balance` 手动查询失败**提示原因**。
-5. 兼容代理网关：复用 `OPENAI_BASE_URL` 推导 API host；仅当 host 为官方地址或含 `deepseek` 时自动查询。
+5. 兼容代理网关：复用 `OPENAI_BASE_URL` 推导 API host（剥离 `/v1`）；host 为任意网关地址时同样查询（网关透传 `/user/balance` 则可用，否则显示错误原因）。
 
 ## 非目标
 

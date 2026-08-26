@@ -35,11 +35,14 @@ func TestFormatBalanceLine_MultiCurrency(t *testing.T) {
 }
 
 func TestFormatBalanceLine_Unavailable(t *testing.T) {
-	if line := formatBalanceLine(&llm.BalanceResponse{IsAvailable: false}); line != "" {
-		t.Errorf("unavailable line = %q, want empty", line)
-	}
 	if line := formatBalanceLine(nil); line != "" {
 		t.Errorf("nil line = %q, want empty", line)
+	}
+	if line := formatBalanceLine(&llm.BalanceResponse{IsAvailable: false}); line != "💰 余额: 账户无可用余额" {
+		t.Errorf("unavailable line = %q, want 账户无可用余额", line)
+	}
+	if line := formatBalanceLine(&llm.BalanceResponse{IsAvailable: true}); line != "💰 余额: 账户无可用余额" {
+		t.Errorf("empty infos line = %q, want 账户无可用余额", line)
 	}
 }
 
