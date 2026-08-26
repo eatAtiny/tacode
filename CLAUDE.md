@@ -38,12 +38,13 @@ All library code is under `internal/` (unexportable). The dependency graph:
 ```
 main.go
   └─ internal/agent  (runner.go, query_engine.go, query_loop.go, types.go,
-  │                    permission.go, memory.go, session.go)
-       ├─ internal/llm        (openai.go) — Chat + ChatWithToolsStream
-       ├─ internal/memory     (6 files) — 3-tier storage + retrieval + extraction
+  │                    permission.go, memory.go, session.go, compactor.go,
+  │                    compact_tool.go, balance.go)
+       ├─ internal/llm        (openai.go, balance.go, retry.go) — Chat + ChatWithToolsStream + 余额查询 + 重试
+       ├─ internal/memory     (7 files) — 3-tier storage + retrieval + extraction
        ├─ internal/prompt     (prompt.go) — ReAct prompt builder
        ├─ internal/session    (session.go, picker.go) — session CRUD + picker
-       ├─ internal/tool       (7 files) — Tool interface + Registry
+       ├─ internal/tool       (8 files) — Tool interface + Registry
        └─ internal/ui         (ui.go) — UI interface
             ├─ ui/bubble/     — BubbleUI (terminal, lipgloss + glamour)
             ├─ ui/text/       — TextUI (headless, callback-based)
@@ -193,7 +194,7 @@ On each user input:
 
 ## File Map
 
-### `internal/agent/` (9 files)
+### `internal/agent/` (10 files)
 - `runner.go` — `Runner` struct, `Run()` REPL, async query dispatch, cross-round message accumulation
 - `query_engine.go` — message assembly (system + preamble + conversation + task), compactor prepare, event consumption
 - `query_loop.go` — core ReAct loop, streaming, tool execution, compaction wiring, reactive compact
@@ -203,8 +204,9 @@ On each user input:
 - `session.go` — session commands, `ensurePersisted()`, `cleanOrphanTempDirs()`
 - `compactor.go` — s08 4-step compaction pipeline (Go port, pairing protection)
 - `compact_tool.go` — model-initiated `compact` tool
+- `balance.go` — 余额查询辅助 + 格式化 + `/balance` 命令处理
 
-### `internal/memory/` (6 files)
+### `internal/memory/` (7 files)
 - `types.go` — `MemoryEntry`, `Summary`, `ExtractionResult`, `Record`, `MemoryAction`
 - `event.go` — `EventStore` (append-only JSONL, truth source)
 - `history.go` — `HistoryStore` (L1, max 50 records)

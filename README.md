@@ -28,8 +28,13 @@ agentic/
       permission.go                    # 工具权限检查（deny/allow/confirm）
       memory.go                        # 记忆提取和手动管理（/memory /compress）
       session.go                       # 会话命令处理 + 临时会话持久化
+      compactor.go                     # s08 四步压缩管线（Go 移植，配对保护）
+      compact_tool.go                  # 模型主动 compact 工具
+      balance.go                       # /balance 命令：余额查询辅助 + 格式化 + 每轮展示
     llm/
       openai.go                        # OpenAI 客户端封装（Chat + ChatWithToolsStream）
+      balance.go                       # DeepSeek 余额查询（/user/balance）
+      retry.go                         # LLM 请求重试（429/5xx/网络错误）
     memory/
       types.go                         # MemoryEntry / Summary / Record / Event 类型
       history.go                       # L1 HistoryStore：原始对话 JSONL 存储
@@ -116,9 +121,10 @@ go run . -env .env                    # 自定义 env 文件路径
 
 ```
 main.go
-  └─ internal/agent  (runner.go) — REPL 循环 + ReAct 编排
-       ├─ internal/llm        (openai.go) — OpenAI 客户端（流式 + 非流式）
-       ├─ internal/memory     (6 个文件) — 三层记忆存储 + 检索 + 提取
+  └─ internal/agent  (runner.go, query_engine.go, query_loop.go, types.go, permission.go,
+  │                    memory.go, session.go, compactor.go, compact_tool.go, balance.go) — REPL 循环 + ReAct 编排
+       ├─ internal/llm        (openai.go, balance.go, retry.go) — OpenAI 客户端（流式 + 非流式）+ 余额查询 + 重试
+       ├─ internal/memory     (7 个文件) — 三层记忆存储 + 检索 + 提取
        ├─ internal/prompt     (prompt.go) — ReAct 提示词模板
        ├─ internal/session    (session.go, picker.go) — 会话管理 + 选择器
        ├─ internal/tool       (tool.go, shell.go, file.go) — 工具注册 + 实现
