@@ -15,6 +15,7 @@ import (
 //   - 当前会话名（截断到 20 字符）
 //   - 模型名称
 //   - 本轮 token 用量（输入 ↑ 和输出 ↓）
+//   - 账户余额（可选，空则不显示）
 //
 // 样式：浅灰文字 + 深灰背景，分隔符使用竖线。
 //
@@ -29,6 +30,7 @@ type StatusModel struct {
 	inputTokens  int    // 本轮输入 token 数
 	outputTokens int    // 本轮输出 token 数
 	width        int    // 状态栏宽度（列数）
+	balance      string // 账户余额展示文本（空=不显示）
 }
 
 // NewStatusModel 创建状态栏组件。初始 session 为 "new"，model 为 "unknown"。
@@ -50,8 +52,8 @@ func (m StatusModel) Update(msg tea.Msg) (StatusModel, tea.Cmd) {
 }
 
 // View 渲染状态栏。
-// 格式：agentic │ session: <name> │ <model> │ ↑<N> ↓<N>
-// 宽度不足时右侧用空格填充。
+// 格式：agentic │ session: <name> │ <model> │ ↑<N> ↓<N>[ │ 余额]
+// 余额段仅在 balance 非空时渲染；宽度不足时右侧用空格填充。
 func (m StatusModel) View() string {
 	statusStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("252")).
@@ -80,7 +82,13 @@ func (m StatusModel) View() string {
 		sepStyle.Render(" │ "),
 	)
 
-	bar := statusStyle.Render(left + tokenText)
+	// 余额段：非空时追加。
+	right := tokenText
+	if m.balance != "" {
+		right += sepStyle.Render(" │ ") + m.balance
+	}
+
+	bar := statusStyle.Render(left + right)
 
 	// 填充到目标宽度（右侧补空格）。
 	barWidth := lipgloss.Width(bar)
@@ -105,6 +113,11 @@ func (m *StatusModel) SetModel(model string) {
 func (m *StatusModel) SetTokens(input, output int) {
 	m.inputTokens = input
 	m.outputTokens = output
+}
+
+// SetBalance 设置账户余额展示文本（空字符串表示不显示）。
+func (m *StatusModel) SetBalance(balance string) {
+	m.balance = balance
 }
 
 // SetWidth 设置状态栏宽度。
