@@ -434,9 +434,15 @@ func (b *BubbleUI) OnMessage(msg string) {
 	b.renderStatusBar()
 }
 
-// ShowBalance 展示账户余额（灰色浅显样式，与 token 统计一致，避免喧宾夺主）。
+// ShowBalance 展示账户余额（阶段 1：更新状态栏并重绘）。
+// line 是已格式化的余额文本，如 "💰 ¥110.00（充值 ¥100.00 / 赠金 ¥10.00）"。
+// 阶段 1 后余额进状态栏，不再单独打印一行。
 func (b *BubbleUI) ShowBalance(line string) {
-	fmt.Println(styleMuted.Render(line))
+	b.SetBalanceText(line)
+	if b.statusVisible {
+		b.clearStatusBar()
+		b.renderStatusBar()
+	}
 }
 
 // ConfirmPermission 显示权限确认提示，等待用户输入。
