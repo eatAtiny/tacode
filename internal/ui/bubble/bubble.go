@@ -65,6 +65,11 @@ type BubbleUI struct {
 	// outputTokens 本轮已累计的输出 token 数
 	outputTokens int
 
+	// balanceText 账户余额展示文本（/balance 成功后由 Runner 设置）
+	balanceText string
+	// statusVisible 状态栏是否启用（阶段 1：默认启用；可通过 SetStatusBarVisible 控制）
+	statusVisible bool
+
 	// hasDelta 本轮是否收到过 OnDelta（用于判断是否需要清除流式文本）
 	hasDelta bool
 	// cursorSaved 是否已保存光标位置（OnThink 时设为 true，OnFinal/OnToolCall 时清除）
@@ -101,11 +106,12 @@ func NewBubbleUI(_ ...tea.ProgramOption) *BubbleUI {
 		glamourRenderer = nil
 	}
 	return &BubbleUI{
-		conversation: components.NewConversationModel(),
-		input:        components.NewInputModel(),
-		status:       components.NewStatusModel(),
-		toolView:     components.NewToolViewModel(),
-		glamour:      glamourRenderer,
+		conversation:  components.NewConversationModel(),
+		input:         components.NewInputModel(),
+		status:        components.NewStatusModel(),
+		toolView:      components.NewToolViewModel(),
+		glamour:       glamourRenderer,
+		statusVisible: true,
 	}
 }
 
@@ -265,6 +271,7 @@ func (b *BubbleUI) rawInputLoop(fd int) {
 // 打印空行后保存光标位置（\033[s），然后显示 "⏳ 思考中..."。
 // cursorSaved 标记和 hasDelta 标记被设置，为后续可能的流式输出做准备。
 func (b *BubbleUI) OnThink(_ int) {
+	b.clearStatusBar()
 	fmt.Println()
 	// 保存光标位置：后续 OnDelta 的流式文本从此位置开始输出，
 	// OnFinal 或 OnToolCall 时从此位置恢复并清除。
@@ -410,16 +417,21 @@ func (b *BubbleUI) OnFinal(answer string, inputTokens, outputTokens, totalTokens
 		)))
 	}
 	fmt.Println(styleSeparator.Render(strings.Repeat("─", 60)))
+
+	// 输出完成后重绘状态栏（此时光标已回到输入提示符行首）。
+	b.renderStatusBar()
 }
 
 // OnError 打印错误信息（红色加粗）。
 func (b *BubbleUI) OnError(err error) {
 	fmt.Println(styleError.Render(fmt.Sprintf("❌ Error: %v", err)))
+	b.renderStatusBar()
 }
 
 // OnMessage 打印一般性消息（无额外样式）。
 func (b *BubbleUI) OnMessage(msg string) {
 	fmt.Println(msg)
+	b.renderStatusBar()
 }
 
 // ShowBalance 展示账户余额（灰色浅显样式，与 token 统计一致，避免喧宾夺主）。
@@ -509,6 +521,56 @@ func (b *BubbleUI) UpdateTokens(input, output int) {
 func (b *BubbleUI) ResetTokens() {
 	b.inputTokens = 0
 	b.outputTokens = 0
+}
+
+// SetBalanceText 设置账户余额展示文本（空=不显示余额段）。
+func (b *BubbleUI) SetBalanceText(text string) {
+	b.balanceText = text
+}
+
+// SetStatusBarVisible 控制状态栏是否渲染（阶段 3 全量模式接管后此开关用于过渡）。
+func (b *BubbleUI) SetStatusBarVisible(visible bool) {
+	b.statusVisible = visible
+}
+
+// statusBarText 渲染状态栏单行文本（供测试与 renderStatusBar 共用）。
+// 复用 components.StatusModel 的渲染逻辑：同步 session/model/token/余额后调 View()。
+func (b *BubbleUI) statusBarText() string {
+	if !b.statusVisible {
+		return ""
+	}
+	st := b.status
+	st.SetSession(b.sessionName)
+	st.SetModel(b.model)
+	st.SetTokens(b.inputTokens, b.outputTokens)
+	st.SetBalance(b.balanceText)
+	return st.View()
+}
+
+// clearStatusBar 清除状态栏所在行（将光标移到该行并清空）。
+// 状态栏渲染在输入提示符上方一行，追加输出前需先清除，输出完再重绘。
+func (b *BubbleUI) clearStatusBar() {
+	if !b.statusVisible {
+		return
+	}
+	// 状态栏行在最后一行上方：光标上移 1 行、清行、下移回来。
+	fmt.Print("\033[1A\033[2K\r")
+	os.Stdout.Sync()
+}
+
+// renderStatusBar 在输入提示符上方渲染状态栏。
+// 前提：调用时光标位于输入提示符行首。
+func (b *BubbleUI) renderStatusBar() {
+	if !b.statusVisible {
+		return
+	}
+	line := b.statusBarText()
+	if line == "" {
+		return
+	}
+	// 上移一行（输入提示符上一行）、输出状态栏、下移回输入行。
+	fmt.Printf("\033[1A%s\n", line)
+	os.Stdout.Sync()
 }
 
 // ──────────────────────────────────────────────────────────
