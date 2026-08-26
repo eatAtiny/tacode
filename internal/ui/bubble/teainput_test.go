@@ -1,6 +1,7 @@
 package bubble
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -106,6 +107,87 @@ func TestTeaUI_SubmitInputBridge(t *testing.T) {
 	if b.inputChan != nil {
 		t.Errorf("submitInput 不应初始化 raw inputChan，实际非 nil")
 	}
+}
+
+// Start 后 tea 程序启动，事件投递不阻塞（tea 未完全就绪时 Send 也安全）。
+// 测试环境非 TTY：Start 用 WithInput(nil)+WithoutRenderer()，tea.Run 不依赖
+// /dev/tty 与渲染器，事件循环正常运转；后续 Quit 优雅退出。
+func TestTeaUI_StartAndSend(t *testing.T) {
+	b := NewBubbleUI()
+	stop, err := b.Start()
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer stop()
+
+	// 事件投递（tea 未完全就绪时 Send 也安全——Program.Send 在 ctx 活跃前
+	// 写入消息 channel，未阻塞）。
+	b.sendToTea(teaAppendMsg{content: "hello"})
+	b.ShowBalance("💰 ¥1.00")
+
+	// 双 Start 幂等：再次 Start 返回空 cancel，不重复启动 tea 程序。
+	stop2, err2 := b.Start()
+	if err2 != nil {
+		t.Fatalf("第二次 Start failed: %v", err2)
+	}
+	stop2()
+
+	// 重复 cancel 安全：stop 已调用后再次调用不 panic。
+	stop()
+}
+
+// Start 后 IsTeaMode 为 true；cancel 后恢复 false（阶段 1 ANSI 路径恢复）。
+func TestTeaUI_StartThenStopMode(t *testing.T) {
+	b := NewBubbleUI()
+	if b.IsTeaMode() {
+		t.Error("未 Start 时不应处于 tea 模式")
+	}
+
+	stop, err := b.Start()
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	if !b.IsTeaMode() {
+		t.Error("Start 后应处于 tea 模式")
+	}
+
+	// tea 模式下阶段 1 的 ANSI 状态栏方法退位（不输出、不改状态位）。
+	b.renderStatusBar()
+	if b.statusBarShown {
+		t.Error("tea 模式下 renderStatusBar 不应置 statusBarShown")
+	}
+	b.clearStatusBar()
+
+	// 事件方法在 tea 模式下不 panic（sendToTea 走 Program.Send）。
+	b.OnThink(1)
+	b.OnDelta("增量")
+	b.OnToolCall("shell", `{"command":"ls"}`)
+	b.OnToolResult("shell", "file.txt\n", false)
+	b.OnContinue(2)
+	b.OnFinal("最终回答", 10, 5, 15)
+	b.OnMessage("一般消息")
+	b.OnError(fmt.Errorf("测试错误")) // 验证错误事件不 panic
+
+	stop()
+	if b.IsTeaMode() {
+		t.Error("cancel 后不应处于 tea 模式")
+	}
+}
+
+// tea 模式与阶段 1 模式对同一事件方法的输出一致性：
+// OnDelta 在两种模式下都追加内容到对话区（tea 模式经 sendToTea）。
+func TestTeaUI_EventForwarding(t *testing.T) {
+	b := NewBubbleUI()
+	stop, err := b.Start()
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	defer stop()
+
+	// 事件方法：tea 模式走 sendToTea，不 panic 即通过（内部不可直接断言对话区，
+	// 因为 tea 模型在独立 goroutine 中消费消息）。
+	b.OnDelta("你好")
+	b.OnFinal("回答", 1, 2, 3)
 }
 
 // teaUI 的 Update 返回 tea.Model（接口签名），动态类型保持 *teaUI。

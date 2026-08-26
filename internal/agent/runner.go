@@ -12,6 +12,7 @@ import (
 	"agentic/internal/session"
 	"agentic/internal/tool"
 	"agentic/internal/ui"
+	"agentic/internal/ui/bubble"
 )
 
 // ReAct 最大循环次数，防止无限循环。
@@ -210,9 +211,34 @@ func (r *Runner) Run(ctx context.Context) error {
 	// 显示欢迎信息。
 	r.ui.Welcome(r.llm.Model())
 
+	// ── 启动 tea 渲染程序（阶段 2：BubbleUI 全屏渲染） ──
+	// 类型断言而非接口方法：TextUI 等 headless UI 无 tea 程序，不受影响。
+	// 失败（如非 TTY 下 tea 初始化错误）仅告警，回退阶段 1 的 ANSI 渲染路径，
+	// 不阻断 REPL 启动（阶段 2 容错）。
+	var stopTea func()
+	if bui, ok := r.ui.(*bubble.BubbleUI); ok {
+		stop, err := bui.Start()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: tea 渲染启动失败，回退阶段 1 渲染: %v\n", err)
+		} else {
+			stopTea = stop
+			// tea 模式：状态栏/正文由 tea 模型渲染，阶段 1 的 ANSI 状态栏退位。
+			bui.SetStatusBarVisible(false)
+		}
+	}
+	if stopTea != nil {
+		defer stopTea()
+	}
+
 	// ── 启动异步输入读取 ──
-	// inputCh 是后台 goroutine 持续读取用户输入的 channel。
-	inputCh := r.ui.ReadInputChan()
+	// 阶段 2：BubbleUI 从 tea 输入桥接通道读取（tea 输入框 Enter → submitInput），
+	// 其余 UI（TextUI）走原 ReadInputChan。
+	var inputCh <-chan string
+	if bui, ok := r.ui.(*bubble.BubbleUI); ok {
+		inputCh = bui.ReadTeaInputChan()
+	} else {
+		inputCh = r.ui.ReadInputChan()
+	}
 
 	// ── 查询状态变量 ──
 	var queryResultCh <-chan queryResult // 查询结果 channel（nil 表示无运行中的查询）
@@ -483,7 +509,17 @@ func (r *Runner) runQueryAsync(ctx context.Context, round int, input string, inp
 
 // handleListCommand 处理 /list 命令，管理 Pause/Resume 生命周期。
 func (r *Runner) handleListCommand() (int, bool) {
-	// 运行选择器（独占终端输入，主 UI 不用 Bubble Tea 所以无需暂停）。
+	// tea 模式（阶段 2）：主 tea 程序占用终端，需先暂停释放，
+	// 让 RunSessionPicker 的独立 tea 程序前台渲染；选完恢复。
+	// 阶段 1 / TextUI：无 tea 主程序，PauseTea/ResumeTea 均安全 no-op。
+	if bui, ok := r.ui.(*bubble.BubbleUI); ok {
+		_ = bui.PauseTea()
+		defer func() {
+			_ = bui.ResumeTea()
+		}()
+	}
+
+	// 运行选择器（独占终端输入；tea 主程序已暂停释放终端，选择器正常渲染）。
 	selected, err := session.RunSessionPicker(r.sessions.List(), r.sessions.ActiveID())
 	if err != nil {
 		r.ui.OnError(fmt.Errorf("选择器错误: %v", err))
