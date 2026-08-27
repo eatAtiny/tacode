@@ -18,7 +18,7 @@ import (
 )
 
 // ──────────────────────────────────────────────────────────
-// Compactor — s08 四步上下文压缩管线（Go 移植）
+// Compactor — s08 五步上下文压缩管线（Go 移植；前 4 步无损 + 第 5 步 LLM 摘要）
 //
 // 移植自 learn-claude-code/s08_context_compact/code.py 的 ContextCompactor。
 // 每次调用模型前运行 Prepare()，按信息损失从低到高逐步压缩：
@@ -52,7 +52,15 @@ const (
 	microShortenCharLimit    = 120     // microCompact 缩短阈值（<=120 字符的结果不动）
 )
 
-// Compactor 实现 s08 四步压缩管线。
+// 包级正则（构造期编译一次，避免每次调用重复编译）。
+var (
+	// unsafeIDCharsRe 匹配工具调用 ID 中不适合做文件名的字符（saveOutput 转存命名用）。
+	unsafeIDCharsRe = regexp.MustCompile(`[^A-Za-z0-9._-]`)
+	// archiveMarkerRe 匹配 snipCompact 插入的归档标记消息（幂等检测用）。
+	archiveMarkerRe = regexp.MustCompile(`^\[\d+ messages archived at (.+)\]$`)
+)
+
+// Compactor 实现 s08 五步压缩管线（前 4 步无损 + 第 5 步 LLM 摘要）。
 type Compactor struct {
 	transcriptDir    string            // transcript 归档目录（<sessionDir>/transcripts）
 	toolResultsDir   string            // 大结果转存目录（<sessionDir>/tool-results）
@@ -112,13 +120,13 @@ func (c *Compactor) Prepare(messages []llm.ChatMessage, activeRequest string) []
 	}
 	messages = c.toolResultBudget(messages)
 	messages = c.snipCompact(messages)
-	if c.estimateMessagesChars(messages) > c.limit() {
+	if estimateChars(messages) > c.limit() {
 		target := int(float64(c.limit()) * 0.8)
 		messages = c.microCompact(messages, target)
-		if c.estimateMessagesChars(messages) > c.limit() {
+		if estimateChars(messages) > c.limit() {
 			messages = c.fitToolResults(messages, target)
 		}
-		if c.estimateMessagesChars(messages) > c.limit() {
+		if estimateChars(messages) > c.limit() {
 			messages = c.compactHistory(messages, activeRequest)
 		}
 	}
@@ -137,13 +145,8 @@ func (c *Compactor) limit() int {
 func (c *Compactor) Limit() int { return c.limit() }
 
 // EstimateMessagesChars 估算消息数组的字符数（UI 上下文占用显示用）。
-// 与压缩管线 estimateMessagesChars 同一口径（JSON 序列化长度）。
+// 与压缩管线内部 estimateChars 同一口径（JSON 序列化长度）。
 func (c *Compactor) EstimateMessagesChars(messages []llm.ChatMessage) int {
-	return estimateChars(messages)
-}
-
-// estimateMessagesChars 估算消息数组字符数（带 system 保护）。
-func (c *Compactor) estimateMessagesChars(messages []llm.ChatMessage) int {
 	return estimateChars(messages)
 }
 
@@ -161,15 +164,8 @@ func (c *Compactor) toolResultBudget(messages []llm.ChatMessage) []llm.ChatMessa
 	if len(messages) == 0 {
 		return messages
 	}
-	// 定位最后一个带 ToolCalls 的 assistant。
-	lastAssist := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "assistant" && len(messages[i].ToolCalls) > 0 {
-			lastAssist = i
-			break
-		}
-	}
-	batchStart := lastAssist + 1
+	// 定位最后一个带 ToolCalls 的 assistant（其后的 tool 消息即最新一批结果）。
+	batchStart := lastToolBatchAssistant(messages) + 1
 	if batchStart >= len(messages) {
 		return messages // 无工具结果
 	}
@@ -233,7 +229,7 @@ func (c *Compactor) saveOutput(toolCallID, output string) (string, error) {
 	if err := os.MkdirAll(c.toolResultsDir, 0o755); err != nil {
 		return "", err
 	}
-	safeID := regexp.MustCompile(`[^A-Za-z0-9._-]`).ReplaceAllString(toolCallID, "_")
+	safeID := unsafeIDCharsRe.ReplaceAllString(toolCallID, "_")
 	if safeID == "" || len(safeID) > 120 {
 		safeID = "unknown"
 	}
@@ -284,6 +280,42 @@ func hasToolCalls(msg llm.ChatMessage) bool {
 	return msg.Role == "assistant" && len(msg.ToolCalls) > 0
 }
 
+// lastToolBatchAssistant 返回最后一个带 ToolCalls 的 assistant 消息下标，
+// 不存在时返回 -1。toolResultBudget（定位最新工具批次）与
+// trailingUnseenToolIDs（划定未读结果边界）共享此扫描。
+func lastToolBatchAssistant(messages []llm.ChatMessage) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" && len(messages[i].ToolCalls) > 0 {
+			return i
+		}
+	}
+	return -1
+}
+
+// pullBackToPairStart 尾切点配对保护：tailStart 落在 tool 消息上时回退到
+// 该 tool 批次的起点并纳入其配对 assistant（否则 tail 以孤立 tool 开头，
+// OpenAI API 返回 400）。lowerBound 为回退扫描下界：snipCompact 传 headEnd
+// （不侵入 head 保留段），reactiveCompact 传 1（不侵入 system 消息）。
+// 返回修正后的切点；下界兜底（如 reactive 的 system 保护）由调用方负责。
+func pullBackToPairStart(messages []llm.ChatMessage, tailStart, lowerBound int) int {
+	if tailStart >= len(messages) || messages[tailStart].Role != "tool" {
+		return tailStart // 未落在 tool 批次上，无需回退
+	}
+	if tailStart > 0 && hasToolCalls(messages[tailStart-1]) {
+		// 把配对 assistant 一并纳入 tail。
+		return tailStart - 1
+	}
+	// tool 批次起点在更早位置：回退到该批次起点并纳入其 assistant。
+	j := tailStart
+	for j > lowerBound && messages[j-1].Role == "tool" {
+		j--
+	}
+	if j > 0 && hasToolCalls(messages[j-1]) {
+		j--
+	}
+	return j
+}
+
 // snipCompact 消息数 >50 时：保留头 3 条 + 尾 46 条，中间归档到 transcript，
 // 插入归档标记消息。切点保护 assistant(ToolCalls)↔tool 配对。
 func (c *Compactor) snipCompact(messages []llm.ChatMessage) []llm.ChatMessage {
@@ -313,22 +345,7 @@ func (c *Compactor) snipCompact(messages []llm.ChatMessage) []llm.ChatMessage {
 	}
 
 	// 尾切点保护：tailStart 不能切掉 tool 批次的开头。
-	if tailStart < len(messages) && messages[tailStart].Role == "tool" {
-		if tailStart > 0 && hasToolCalls(messages[tailStart-1]) {
-			// 把配对 assistant 一并纳入 tail。
-			tailStart--
-		} else {
-			// tool 批次起点在更早位置：回退到该批次起点并纳入其 assistant。
-			j := tailStart
-			for j > headEnd && messages[j-1].Role == "tool" {
-				j--
-			}
-			if j > 0 && hasToolCalls(messages[j-1]) {
-				j--
-			}
-			tailStart = j
-		}
-	}
+	tailStart = pullBackToPairStart(messages, tailStart, headEnd)
 
 	if headEnd >= tailStart {
 		return messages // 无可归档的中间段
@@ -389,8 +406,7 @@ func (c *Compactor) isArchiveMarker(msg llm.ChatMessage) bool {
 	if msg.Role != "user" {
 		return false
 	}
-	re := regexp.MustCompile(`^\[\d+ messages archived at (.+)\]$`)
-	m := re.FindStringSubmatch(msg.Content)
+	m := archiveMarkerRe.FindStringSubmatch(msg.Content)
 	if m == nil {
 		return false
 	}
@@ -406,13 +422,7 @@ func (c *Compactor) isArchiveMarker(msg llm.ChatMessage) bool {
 
 // trailingUnseenToolIDs 返回自最近一次 assistant 回复以来的工具结果 ID（未读结果）。
 func trailingUnseenToolIDs(messages []llm.ChatMessage) map[string]bool {
-	lastAssist := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "assistant" && len(messages[i].ToolCalls) > 0 {
-			lastAssist = i
-			break
-		}
-	}
+	lastAssist := lastToolBatchAssistant(messages)
 	unseen := make(map[string]bool)
 	for i := lastAssist + 1; i < len(messages); i++ {
 		if messages[i].Role == "tool" {
@@ -445,7 +455,7 @@ func (c *Compactor) microCompact(messages []llm.ChatMessage, targetChars int) []
 	}
 
 	for _, i := range shorten {
-		if c.estimateMessagesChars(messages) <= targetChars {
+		if estimateChars(messages) <= targetChars {
 			break
 		}
 		content := messages[i].Content
@@ -488,7 +498,7 @@ func (c *Compactor) fitToolResults(messages []llm.ChatMessage, targetChars int) 
 	})
 
 	for _, i := range toolIdx {
-		if c.estimateMessagesChars(messages) <= targetChars {
+		if estimateChars(messages) <= targetChars {
 			break
 		}
 		output := messages[i].Content
@@ -565,26 +575,10 @@ func (c *Compactor) reactiveCompact(messages []llm.ChatMessage, activeRequest st
 	if tailStart < 1 {
 		tailStart = 1 // 保留 system
 	}
-	// 配对保护：tailStart 不能落在 tool 批次开头。
-	if tailStart < len(messages) && messages[tailStart].Role == "tool" {
-		if tailStart > 0 && hasToolCalls(messages[tailStart-1]) {
-			tailStart--
-		} else {
-			j := tailStart
-			for j > 1 && messages[j-1].Role == "tool" {
-				j--
-			}
-			if j > 0 && hasToolCalls(messages[j-1]) {
-				j--
-			}
-			if j < 1 {
-				j = 1
-			}
-			tailStart = j
-		}
-	}
+	// 配对保护：tailStart 不能落在 tool 批次开头（下界 1 = 不侵入 system）。
+	tailStart = pullBackToPairStart(messages, tailStart, 1)
 	if tailStart < 1 {
-		tailStart = 1
+		tailStart = 1 // 保留 system（回退扫描可能压到 0）
 	}
 
 	old := messages[1:tailStart] // 摘要除 system 外的早期历史
