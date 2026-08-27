@@ -3,7 +3,7 @@
 // 现行消息组装（见 agent.queryEngine）：
 //
 //	messages[0]    = BuildReActSystemPrompt（静态 system，含工具指南）
-//	messages[1]    = BuildSystemReminder（记忆 preamble，仅首轮/切换注入）
+//	messages[1]    = BuildSystemReminder（记忆 preamble，仅首轮/切换重建，此后每轮注入）
 //	messages[末尾] = BuildUserTask（每轮变化的用户任务）
 package prompt
 
