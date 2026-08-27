@@ -19,9 +19,10 @@
 //     转发到 inputForward，ConfirmPermission 从该 channel 读取）
 //
 // 文件组织：
-//   - bubble.go  tea 包装器（事件方法 → Program.Send、输入桥接、生命周期）
-//   - chat.go    ChatModel（inline 聊天界面：活区渲染 + commit 定稿管线）
-//   - box.go     工具框线共享渲染
+//   - bubble.go   tea 包装器（事件方法 → Program.Send、输入桥接、生命周期）
+//   - chat.go     ChatModel（inline 聊天界面：活区渲染 + commit 定稿管线）
+//   - box.go      工具框线共享渲染
+//   - welcome.go  欢迎界面渲染（ASCII logo + 版本/模型/目录 + 使用提示）
 package bubble
 
 import (
@@ -41,9 +42,9 @@ import (
 // 职责边界：
 //   - BubbleUI：UI 接口适配层——事件方法收 agent 事件 → Program.Send 投递；
 //     不持有任何渲染状态（活区组件、转录、流式缓冲全在 ChatModel）
-//   - ChatModel：tea.Model 实现——持有活区组件（textarea/footer）与流式/
-//     转录状态（streamBuf/m.lines），View 渲染活区，Update 响应事件消息
-//     与按键
+//   - ChatModel：tea.Model 实现——持有活区组件（textarea）与流式/转录
+//     状态（streamBuf/m.lines），footer 由 renderFooter 即时渲染（无独立
+//     组件），View 渲染活区，Update 响应事件消息与按键
 //
 // 线程安全：事件方法可能被多个 goroutine 调用（queryLoop 事件推送、
 // 后台余额查询、后台记忆保存），send 用 uiMu 串行化 Program.Send 调用
@@ -212,7 +213,7 @@ func (b *BubbleUI) ShowBalance(line string) {
 // 投递 chatContextMsg，ChatModel 存字段并在 footer 状态栏显示（已用/总/百分比）。
 // usedChars 与 contextCharLimit 均为字符口径（与 Compactor 压缩界限一致）。
 func (b *BubbleUI) UpdateContext(usedChars, contextCharLimit int) {
-	b.send(chatContextMsg{usedTokens: usedChars, contextLimit: contextCharLimit})
+	b.send(chatContextMsg{usedChars: usedChars, contextLimit: contextCharLimit})
 }
 
 // RunSessionPicker 在聊天 TUI 内运行会话选择器（/list 融合，不另起 tea 程序）。
@@ -235,22 +236,22 @@ func (b *BubbleUI) RunSessionPicker(sessions []session.SessionMeta, activeID str
 // 把历史事件渲染为结构化对话行（用户消息/助手回答/工具框线），
 // 复用 ChatModel 的对话区渲染——历史与当前对话同风格，而非原始 JSON。
 func (b *BubbleUI) ShowHistory(events []memory.Event) {
-	var history []chatHistoryEvent
+	var history []string
 	for _, e := range events {
 		switch e.Type {
 		case memory.EventUser:
 			// 完整显示用户消息（不截断）。
-			history = append(history, chatHistoryEvent{text: b.chat.renderUser(e.Content)})
+			history = append(history, b.chat.renderUser(e.Content))
 		case memory.EventAssistant:
 			// 完整显示助手回答（agent 最终输出，不截断）。
-			history = append(history, chatHistoryEvent{text: b.chat.renderAssistant() + e.Content})
+			history = append(history, b.chat.renderAssistant()+e.Content)
 		case memory.EventToolUse:
 			for _, tc := range e.ToolCalls {
-				history = append(history, chatHistoryEvent{text: toolCallBox(tc.Name, tc.Arguments)})
+				history = append(history, toolCallBox(tc.Name, tc.Arguments))
 			}
 		case memory.EventToolResult:
 			// 工具结果用 toolResultBox（15 行截断——工具结果本就不该全量展示）。
-			history = append(history, chatHistoryEvent{text: toolResultBox(e.ToolName, e.ToolResult, e.IsError)})
+			history = append(history, toolResultBox(e.ToolName, e.ToolResult, e.IsError))
 		}
 	}
 	b.send(chatHistoryMsg{events: history})

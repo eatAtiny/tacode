@@ -33,6 +33,11 @@ var (
 	labelStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("252"))
 )
 
+// infoLine 生成单条信息行（2 空格缩进 + emoji 标签 + 值，含行尾换行）。
+func infoLine(emoji, value string) string {
+	return infoStyle.Render("  "+labelStyle.Render(emoji)+" "+value) + "\n"
+}
+
 // welcomeBanner 生成欢迎界面多行文本。
 // 结构：ASCII logo + 欢迎语 + 版本/模型/目录 + 使用提示。
 // model 是 LLM 模型名，ver 是版本号，cwd 是当前工作目录。
@@ -49,16 +54,13 @@ func welcomeBanner(model, ver, cwd string) string {
 
 	// 信息行：版本 / 模型 / 目录。
 	if ver != "" {
-		sb.WriteString(infoStyle.Render("  " + labelStyle.Render("📦") + " " + ver))
-		sb.WriteString("\n")
+		sb.WriteString(infoLine("📦", ver))
 	}
 	if model != "" {
-		sb.WriteString(infoStyle.Render("  " + labelStyle.Render("🧠") + " " + model))
-		sb.WriteString("\n")
+		sb.WriteString(infoLine("🧠", model))
 	}
 	if cwd != "" {
-		sb.WriteString(infoStyle.Render("  " + labelStyle.Render("📁") + " " + cwd))
-		sb.WriteString("\n")
+		sb.WriteString(infoLine("📁", cwd))
 	}
 
 	// 使用提示。

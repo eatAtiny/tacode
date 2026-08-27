@@ -7,7 +7,9 @@
 //
 // 接口方法按职责分为四组：
 //  1. 输入组：ReadInput / ReadInputChan — 读取用户输入
-//  2. 事件通知组：OnThink / OnDelta / OnToolCall / OnToolResult / OnContinue / OnFinal / OnError / OnMessage / ShowBalance
+//  2. 事件通知组：OnThink / OnDelta / OnToolCall / OnToolResult / OnContinue /
+//     OnFinal / OnError / OnMessage / ShowBalance / UpdateContext /
+//     RunSessionPicker / ShowHistory
 //  3. 交互组：ConfirmPermission — 权限确认
 //  4. 生命周期组：Welcome / Close
 package ui
@@ -34,14 +36,20 @@ type UI interface {
 	// ReadInput 读取用户输入，阻塞直到用户按下 Enter。
 	// 返回去除首尾空白的输入字符串，或在 EOF 时返回错误。
 	//
+	// 预留：生产主循环使用 ReadInputChan（select 多路复用输入与查询结果），
+	// 本方法仅为简单调用场景保留。
+	//
 	// 与 ReadInputChan 的区别：
 	//   - ReadInput：同步阻塞，适合简单的"一问一答"场景
 	//   - ReadInputChan：异步 channel，适合需要 select 多路复用的主循环
 	ReadInput() (string, error)
 
 	// ReadInputChan 返回一个只读 channel，后台持续读取用户输入。
-	// 首次调用启动后台 goroutine（通过 sync.Once 保证只启动一次），
-	// 后续调用返回同一个 channel。channel 在输入流结束时关闭（EOF）。
+	//
+	// 实现差异：
+	//   - BubbleUI：返回 ChatModel 的提交 channel（textarea Enter 提交写入），
+	//     channel 在 ChatModel 生命周期内保持打开（不关闭）
+	//   - TextUI：不支持交互输入，返回立即关闭的空 channel
 	//
 	// 使用场景：
 	//   - Runner 的主循环通过 select 同时监听输入 channel 和查询结果 channel
@@ -54,7 +62,7 @@ type UI interface {
 	// iteration 从 1 开始，表示当前是第几轮 ReAct 迭代。
 	//
 	// 典型实现：
-	//   - BubbleUI：打印 "⏳ 思考中..." 并保存光标位置，为后续流式输出做准备
+	//   - BubbleUI：投递消息更新活区状态行（"⏳ 思考中"）
 	//   - TextUI：通过 OnEvent 回调转发
 	OnThink(iteration int)
 
@@ -62,7 +70,8 @@ type UI interface {
 	// LLM 每次返回一个 token 时调用，content 是增量片段（可能只有几个字符）。
 	//
 	// 典型实现：
-	//   - BubbleUI：直接 fmt.Print 增量文本（不换行），配合 ANSI 光标控制
+	//   - BubbleUI：增量进 streamBuf，遇换行切段经 commit→tea.Println 定稿
+	//     （滚入终端原生 scrollback）
 	//   - TextUI：通过 OnEvent 回调转发
 	//
 	// 生命周期：OnThink → 多次 OnDelta → OnFinal（或 OnToolCall 中断流式输出）
@@ -100,8 +109,11 @@ type UI interface {
 	// 调用时机：queryLoop 完成，LLM 不再需要调用工具时。
 	// 这是每轮查询的终点，此后 Agent 回到空闲状态等待下一条用户输入。
 	//
-	// 典型实现：使用 Glamour 渲染 Markdown，添加分隔线标记本轮结束，
-	// 可选展示 token 统计。
+	// 典型实现：
+	//   - BubbleUI：冲刷流式残余后经 commit→tea.Println 定稿；本轮无流式
+	//     内容时用 Glamour 渲染 Markdown 全文后定稿，有 usage 时附 token
+	//     统计行
+	//   - TextUI：通过 OnEvent 回调转发
 	OnFinal(answer string, inputTokens, outputTokens, totalTokens int)
 
 	// OnError 通知错误。
@@ -125,9 +137,9 @@ type UI interface {
 	ShowBalance(line string)
 
 	// UpdateContext 更新上下文占用（每轮 Final 后 + 启动时触发，状态栏常驻展示）。
-	// usedChars 是当前消息数组估算字符数，contextCharLimit 是压缩触发的字符上限
-	// （与 Compactor 的 context_char_limit 同一口径）。contextCharLimit 为 0 时
-	// UI 应跳过展示（数据未就绪）。
+	// usedChars 是当前消息数组估算字符数（字符口径，非 token），contextCharLimit
+	// 是压缩触发的字符上限（与 Compactor 的 context_char_limit 同一口径）。
+	// contextCharLimit 为 0 时 UI 应跳过展示（数据未就绪）。
 	UpdateContext(usedChars, contextCharLimit int)
 
 	// RunSessionPicker 运行交互式会话选择器（/list 命令）。
@@ -137,7 +149,7 @@ type UI interface {
 
 	// ShowHistory 展示会话历史（切换会话后调用）。
 	// 实现差异：BubbleUI 渲染为结构化对话（用户消息/助手回答/工具框线）；
-	// TextUI 转文本行。
+	// TextUI 转发 OnEvent("history", events)。
 	ShowHistory(events []memory.Event)
 
 	// ── 交互组 ──────────────────────────────────────────
