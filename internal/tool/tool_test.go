@@ -591,6 +591,10 @@ func TestIsDangerousShellCommand(t *testing.T) {
 	}{
 		{`{"command": "ls -la"}`, false},
 		{`{"command": "cat file.txt"}`, false},
+		{`{"command": "rm /tmp/foo"}`, true},          // 普通 rm 删除 → 需确认（本次新增）
+		{`{"command": "rm -f /tmp/foo"}`, true},        // rm -f（无 -r）也需确认
+		{`{"command": "rmdir /tmp/foo"}`, false},       // rmdir 不含 "rm "，不误伤
+		{`{"command": "warmup --check"}`, false},       // warmup 等含 rm 子串的词不误伤
 		{`{"command": "rm -rf /tmp/foo"}`, true},
 		{`{"command": "sudo rm file"}`, true},
 		{`{"command": "chmod 777 script.sh"}`, true},

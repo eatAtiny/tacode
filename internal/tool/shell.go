@@ -173,6 +173,7 @@ func isDangerousShellCommand(args string) bool {
 
 	// 危险命令列表（归一化后子串匹配，大小写不敏感）。
 	dangerousCommands := []string{
+		"rm ", // 普通 rm 删除也需确认（如 "rm /tmp/foo"）；尾随空格避免子串误伤 rmdir/warmup/firmware 等
 		"rm -rf",
 		"rm -r",
 		"mkfs",
