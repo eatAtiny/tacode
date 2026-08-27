@@ -2,6 +2,7 @@ package bubble
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -207,14 +208,20 @@ func TestConfirmPermission_FallbackReadInputChan(t *testing.T) {
 }
 
 // ShowHistory 把历史事件渲染为结构化对话行（用户/助手/工具框线），非原始 JSON。
+// 且完整显示（不截断：工具结果 >15 行也全量渲染）。
 func TestShowHistory_RendersStructured(t *testing.T) {
 	b := startTest(t)
 
+	// 工具结果构造 20 行（超过 toolResultBox 的 15 行截断阈值）。
+	longResult := ""
+	for i := 0; i < 20; i++ {
+		longResult += fmt.Sprintf("第 %d 行内容\n", i)
+	}
 	events := []memory.Event{
 		{Type: memory.EventUser, Content: "你好"},
-		{Type: memory.EventAssistant, Content: "我是助手"},
+		{Type: memory.EventAssistant, Content: "第一行\n第二行\n第三行"},
 		{Type: memory.EventToolUse, ToolCalls: []memory.ToolCallEvent{{ID: "1", Name: "file", Arguments: `{"action":"read"}`}}},
-		{Type: memory.EventToolResult, ToolName: "file", ToolResult: "文件内容"},
+		{Type: memory.EventToolResult, ToolName: "file", ToolResult: longResult},
 	}
 	b.ShowHistory(events)
 
@@ -225,9 +232,13 @@ func TestShowHistory_RendersStructured(t *testing.T) {
 	for _, l := range b.chat.lines {
 		joined += l.text + "\n"
 	}
-	for _, want := range []string{"你好", "我是助手", "file", "文件内容"} {
+	for _, want := range []string{"你好", "第一行", "file", "第 19 行内容"} {
 		if !strings.Contains(joined, want) {
-			t.Errorf("历史对话区应含 %q，实际:\n%s", want, joined)
+			t.Errorf("历史对话区应完整含 %q，实际:\n%s", want, joined)
 		}
+	}
+	// 助手回答完整显示（含多行，非仅首行）。
+	if !strings.Contains(joined, "第二行") {
+		t.Errorf("助手回答应完整显示（多行），实际:\n%s", joined)
 	}
 }
