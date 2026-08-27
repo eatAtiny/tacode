@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"agentic/internal/session"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -285,4 +287,71 @@ func TestChatModel_ToolMessages(t *testing.T) {
 // Update 返回值满足 tea.Model 接口（签名约束）。
 func TestChatModel_ImplementsTeaModel(t *testing.T) {
 	var _ tea.Model = NewChatModel()
+}
+
+// 会话选择器融合：chatPickerMsg 进入选择模式，按键移动光标，Enter 选中。
+func TestChatModel_PickerIntegration(t *testing.T) {
+	m := NewChatModel()
+	m.pickerDone = make(chan string, 1) // 测试直接构造，确保 channel 就绪
+
+	sessions := []session.SessionMeta{
+		{ID: "a", Name: "会话A"},
+		{ID: "b", Name: "会话B"},
+		{ID: "c", Name: "会话C"},
+	}
+
+	// 进入选择模式。
+	m.Update(chatPickerMsg{sessions: sessions, activeID: "a"})
+	if !m.picking {
+		t.Fatal("chatPickerMsg 后应进入选择模式（picking=true）")
+	}
+	if m.picker == nil {
+		t.Fatal("picker 应为非 nil")
+	}
+	// View 渲染选择器。
+	if !strings.Contains(m.View(), "会话A") {
+		t.Errorf("选择模式 View 应含会话列表，实际:\n%s", m.View())
+	}
+
+	// 按下 ↓ 移动光标（应选中 会话B）。
+	upd, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_ = upd
+	if m.picker.Chosen() != "" {
+		t.Fatal("未按 Enter 不应有选择结果")
+	}
+
+	// 按 Enter 选中。
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.picking {
+		t.Fatal("Enter 后应退出选择模式")
+	}
+	select {
+	case got := <-m.pickerDone:
+		if got == "" {
+			t.Error("选中结果不应为空")
+		}
+	default:
+		t.Error("pickerDone 应收到选择结果")
+	}
+}
+
+// 会话选择器取消（Esc）：pickerDone 收到空串。
+func TestChatModel_PickerCancel(t *testing.T) {
+	m := NewChatModel()
+	m.pickerDone = make(chan string, 1)
+
+	m.Update(chatPickerMsg{sessions: []session.SessionMeta{{ID: "a", Name: "会话A"}}, activeID: "a"})
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+
+	if m.picking {
+		t.Fatal("Esc 后应退出选择模式")
+	}
+	select {
+	case got := <-m.pickerDone:
+		if got != "" {
+			t.Errorf("取消选择应返回空串，got %q", got)
+		}
+	default:
+		t.Error("pickerDone 应收到取消结果")
+	}
 }

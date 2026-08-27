@@ -20,6 +20,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+
+	"agentic/internal/session"
 )
 
 // ──────────────────────────────────────────────────────────
@@ -78,6 +80,13 @@ type (
 	chatBalanceMsg struct{ balance string }
 	// chatContextMsg 上下文窗口占用（UpdateContext）。
 	chatContextMsg struct{ usedTokens, contextLimit int }
+	// chatPickerMsg 启动会话选择器（/list）。
+	chatPickerMsg struct {
+		sessions []session.SessionMeta
+		activeID string
+	}
+	// chatPickerResultMsg 选择器结果（选中会话 ID 或空=取消）。
+	chatPickerResultMsg struct{ selected string }
 )
 
 // chatLine 对话区的一行（渲染后文本）。
@@ -115,6 +124,13 @@ type ChatModel struct {
 	contextUsedTokens int
 	// contextLimit 模型上下文窗口大小（footer 显示，0=未知）。
 	contextLimit int
+
+	// picking 是否处于会话选择模式（/list 时 true，选择器视图渲染）。
+	picking bool
+	// picker 会话选择器模型（picking 时按键转发给它）。
+	picker *session.SessionPickerModel
+	// pickerDone 选择器结果回传 channel（BubbleUI 从这读选择结果）。
+	pickerDone chan string
 }
 
 // NewChatModel 创建聊天模型。
@@ -132,10 +148,11 @@ func NewChatModel() *ChatModel {
 	renderer, _ := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(100))
 
 	return &ChatModel{
-		textarea: ta,
-		viewport: vp,
-		renderer: renderer,
-		submitCh: make(chan string, 8),
+		textarea:   ta,
+		viewport:   vp,
+		renderer:   renderer,
+		submitCh:   make(chan string, 8),
+		pickerDone: make(chan string, 1),
 	}
 }
 
@@ -150,6 +167,25 @@ func (m *ChatModel) Init() tea.Cmd {
 // Update 处理消息。签名满足 tea.Model 接口（返回 tea.Model）。
 func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+
+	// ── 选择器模式（/list 进行中） ──
+	// 所有按键转发给 SessionPickerModel，选择器完成（Enter/Esc）时捕获结果。
+	if m.picking {
+		if keyMsg, ok := msg.(tea.KeyMsg); ok {
+			updated, cmd := m.picker.Update(keyMsg)
+			cmds = append(cmds, cmd)
+			_ = updated
+			// 选择完成：捕获结果后切回对话模式（不让外层 tea 退出）。
+			if m.picker.IsDone() {
+				m.picking = false
+				m.pickerDone <- m.picker.Chosen()
+				m.picker = nil
+			}
+			return m, nil
+		}
+		// 非按键消息（如 WindowSize）不转发，直接忽略。
+		return m, nil
+	}
 
 	// textarea 按键：Enter 提交（Alt+Enter 不拦截，留给多行场景）。
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
@@ -250,6 +286,14 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 上下文占用进 footer（已用/总/百分比）。
 		m.contextUsedTokens = v.usedTokens
 		m.contextLimit = v.contextLimit
+	case chatPickerMsg:
+		// 启动会话选择器（/list）：创建 picker 模型，进入选择模式。
+		m.picker = session.NewSessionPickerModel(v.sessions, v.activeID)
+		m.picking = true
+	case chatPickerResultMsg:
+		// 选择结果（理论不经此消息，结果走 pickerDone channel；保留兜底）。
+		m.picking = false
+		m.picker = nil
 	}
 
 	return m, tea.Batch(cmds...)
@@ -315,8 +359,15 @@ func (m *ChatModel) refresh() {
 	m.viewport.SetContent(sb.String())
 }
 
-// View 渲染整屏（viewport 对话区 + textarea 输入 + footer 状态栏）。
+// View 渲染整屏。
+// 选择器模式（picking）时渲染会话选择器，否则渲染对话区 + 输入框 + footer。
 func (m *ChatModel) View() string {
+	if m.picking && m.picker != nil {
+		return lipgloss.JoinVertical(lipgloss.Left,
+			m.picker.View(),
+			lipgloss.NewStyle().Height(1).Faint(true).Render("↑↓ 移动 · Enter 切换 · Esc 取消"),
+		)
+	}
 	return lipgloss.JoinVertical(lipgloss.Left,
 		m.viewport.View(),
 		m.textarea.View(),

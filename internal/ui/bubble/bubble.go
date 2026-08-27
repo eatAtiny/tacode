@@ -34,6 +34,8 @@ import (
 	"strings"
 	"sync"
 
+	"agentic/internal/session"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -212,6 +214,22 @@ func (b *BubbleUI) ShowBalance(line string) {
 // usedChars 与 contextCharLimit 均为字符口径（与 Compactor 压缩界限一致）。
 func (b *BubbleUI) UpdateContext(usedChars, contextCharLimit int) {
 	b.send(chatContextMsg{usedTokens: usedChars, contextLimit: contextCharLimit})
+}
+
+// RunSessionPicker 在聊天 TUI 内运行会话选择器（/list 融合，不另起 tea 程序）。
+// 发 chatPickerMsg 让 ChatModel 切到选择模式，阻塞等待用户选择结果。
+// 返回选中会话 ID（空串=取消）。与 TextUI 的独立程序模式接口一致。
+func (b *BubbleUI) RunSessionPicker(sessions []session.SessionMeta, activeID string) (string, error) {
+	if len(sessions) == 0 {
+		return "", fmt.Errorf("没有可用的会话")
+	}
+	if b.program == nil {
+		// tea 未启动（异常）：回退独立程序模式。
+		return session.RunSessionPicker(sessions, activeID)
+	}
+	b.send(chatPickerMsg{sessions: sessions, activeID: activeID})
+	selected := <-b.chat.pickerDone
+	return selected, nil
 }
 
 // ConfirmPermission 显示权限确认提示，等待用户输入。

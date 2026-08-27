@@ -15,7 +15,11 @@
 //   - API 模式：将事件转换为 HTTP SSE 或 WebSocket 消息
 package text
 
-import "fmt"
+import (
+	"fmt"
+
+	"agentic/internal/session"
+)
 
 // TextUI 是 UI 接口的 headless 实现。
 //
@@ -129,6 +133,14 @@ func (t *TextUI) UpdateContext(usedChars, contextCharLimit int) {
 	if t.OnEvent != nil {
 		t.OnEvent("context", map[string]int{"used_chars": usedChars, "context_char_limit": contextCharLimit})
 	}
+}
+
+// RunSessionPicker 运行会话选择器（headless 模式：独立 tea 程序前台运行）。
+func (t *TextUI) RunSessionPicker(sessions []session.SessionMeta, activeID string) (string, error) {
+	if t.OnEvent != nil {
+		t.OnEvent("session_picker", map[string]any{"sessions": sessions, "active_id": activeID})
+	}
+	return session.RunSessionPicker(sessions, activeID)
 }
 
 // OnError 转发错误事件。data 为 err（error）。

@@ -12,6 +12,8 @@
 //  4. 生命周期组：Welcome / Close
 package ui
 
+import "agentic/internal/session"
+
 // UI 定义了 Agent 与用户交互的接口。
 // 所有 UI 操作都通过此接口完成，Agent 核心不直接操作终端或 Web。
 //
@@ -124,6 +126,11 @@ type UI interface {
 	// （与 Compactor 的 context_char_limit 同一口径）。contextCharLimit 为 0 时
 	// UI 应跳过展示（数据未就绪）。
 	UpdateContext(usedChars, contextCharLimit int)
+
+	// RunSessionPicker 运行交互式会话选择器（/list 命令）。
+	// 返回用户选中的会话 ID；空串表示取消。
+	// 实现差异：BubbleUI 融合进聊天 TUI 内渲染（不另起程序）；TextUI 独立程序。
+	RunSessionPicker(sessions []session.SessionMeta, activeID string) (string, error)
 
 	// ── 交互组 ──────────────────────────────────────────
 

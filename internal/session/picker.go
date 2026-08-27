@@ -52,26 +52,53 @@ var (
 	pickerMutedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 )
 
-// sessionPicker 是交互式会话选择器的 Bubble Tea Model。
-type sessionPicker struct {
+// SessionPickerModel 是交互式会话选择器的 Bubble Tea Model（可嵌入外层模型渲染）。
+type SessionPickerModel struct {
 	sessions []SessionMeta
 	cursor   int
 	activeID string
 	chosen   string // 用户选中的会话 ID；空串表示取消
+	done     bool   // 选择是否完成（Enter 选中 / Esc 取消）
 }
 
+// NewSessionPickerModel 创建会话选择器模型（供 UI 嵌入渲染，如聊天 TUI）。
+// 不启动独立 tea 程序——由外层模型的 Update/View 转发按键和渲染。
+// 光标初始定位在当前活跃会话。
+func NewSessionPickerModel(sessions []SessionMeta, activeID string) *SessionPickerModel {
+	cursor := 0
+	for i, s := range sessions {
+		if s.ID == activeID {
+			cursor = i
+			break
+		}
+	}
+	return &SessionPickerModel{
+		sessions: sessions,
+		cursor:   cursor,
+		activeID: activeID,
+	}
+}
+
+// Chosen 返回用户选中的会话 ID；空串表示取消。仅在选择完成后（IsDone）读取。
+func (m *SessionPickerModel) Chosen() string { return m.chosen }
+
+// IsDone 返回选择是否已完成（Enter 选中 / Esc 取消）。
+// 嵌入外层模型（如聊天 TUI）时用此判断，而非比较 cmd == tea.Quit。
+func (m *SessionPickerModel) IsDone() bool { return m.done }
+
 // Init 启动时不执行任何命令。
-func (m sessionPicker) Init() tea.Cmd {
+func (m *SessionPickerModel) Init() tea.Cmd {
 	return nil
 }
 
 // Update 处理键盘事件。
-func (m sessionPicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *SessionPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc", "q":
 			m.chosen = ""
+			m.done = true
 			return m, tea.Quit
 
 		case "up", "k":
@@ -88,6 +115,7 @@ func (m sessionPicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.sessions) > 0 {
 				m.chosen = m.sessions[m.cursor].ID
 			}
+			m.done = true
 			return m, tea.Quit
 		}
 	}
@@ -95,7 +123,7 @@ func (m sessionPicker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View 渲染选择器界面。
-func (m sessionPicker) View() string {
+func (m *SessionPickerModel) View() string {
 	var b strings.Builder
 
 	b.WriteString(pickerTitleStyle.Render("📋 会话列表"))
@@ -135,25 +163,13 @@ func (m sessionPicker) View() string {
 
 // RunSessionPicker 启动交互式会话选择器，返回用户选中的会话 ID。
 // 空串表示用户取消了选择。
+// 独立运行模式（TextUI/headless）：启动自己的 tea 程序前台运行。
 func RunSessionPicker(sessions []SessionMeta, activeID string) (string, error) {
 	if len(sessions) == 0 {
 		return "", fmt.Errorf("没有可用的会话")
 	}
 
-	// 将光标初始位置设为当前活跃会话
-	cursor := 0
-	for i, s := range sessions {
-		if s.ID == activeID {
-			cursor = i
-			break
-		}
-	}
-
-	m := sessionPicker{
-		sessions: sessions,
-		cursor:   cursor,
-		activeID: activeID,
-	}
+	m := NewSessionPickerModel(sessions, activeID)
 
 	p := tea.NewProgram(m)
 	result, err := p.Run()
@@ -161,6 +177,6 @@ func RunSessionPicker(sessions []SessionMeta, activeID string) (string, error) {
 		return "", fmt.Errorf("运行选择器失败: %w", err)
 	}
 
-	picker := result.(sessionPicker)
+	picker := result.(*SessionPickerModel)
 	return picker.chosen, nil
 }

@@ -588,11 +588,11 @@ func (r *Runner) runQueryAsync(ctx context.Context, round int, input string, inp
 }
 
 // handleListCommand 处理 /list 命令。
-// 会话选择器是独立 Bubble Tea 全屏程序，追加式主屏无 tea 程序占用终端，
-// 直接前台运行即可（阶段 1 行为）。
+// 聊天 TUI（BubbleUI）下选择器融合进主渲染循环（不另起 tea 程序）；
+// TextUI/headless 下用独立 tea 程序前台运行。
 func (r *Runner) handleListCommand() (int, bool) {
-	// 运行选择器（独占终端输入）。
-	selected, err := session.RunSessionPicker(r.sessions.List(), r.sessions.ActiveID())
+	// 运行选择器（UI 接口统一入口，实现差异在各 UI）。
+	selected, err := r.ui.RunSessionPicker(r.sessions.List(), r.sessions.ActiveID())
 	if err != nil {
 		r.ui.OnError(fmt.Errorf("选择器错误: %v", err))
 		return 0, true
