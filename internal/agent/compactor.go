@@ -272,7 +272,7 @@ func (c *Compactor) persistedOutputPath(content string) string {
 }
 
 // ──────────────────────────────────────────────────────────
-// 步骤 2: snipCompact — 消息数归档
+// 共享扫描 helper — 配对定位与切点保护（步骤 1/2/3 与 reactiveCompact 共用）
 // ──────────────────────────────────────────────────────────
 
 // hasToolCalls 判断消息是否为带工具调用的 assistant 消息（tool 批次的起点）。
@@ -281,11 +281,11 @@ func hasToolCalls(msg llm.ChatMessage) bool {
 }
 
 // lastToolBatchAssistant 返回最后一个带 ToolCalls 的 assistant 消息下标，
-// 不存在时返回 -1。toolResultBudget（定位最新工具批次）与
-// trailingUnseenToolIDs（划定未读结果边界）共享此扫描。
+// 不存在时返回 -1。toolResultBudget（步骤 1，定位最新工具批次）与
+// trailingUnseenToolIDs（步骤 3，划定未读结果边界）共享此扫描。
 func lastToolBatchAssistant(messages []llm.ChatMessage) int {
 	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "assistant" && len(messages[i].ToolCalls) > 0 {
+		if hasToolCalls(messages[i]) {
 			return i
 		}
 	}
@@ -315,6 +315,10 @@ func pullBackToPairStart(messages []llm.ChatMessage, tailStart, lowerBound int) 
 	}
 	return j
 }
+
+// ──────────────────────────────────────────────────────────
+// 步骤 2: snipCompact — 消息数归档
+// ──────────────────────────────────────────────────────────
 
 // snipCompact 消息数 >50 时：保留头 3 条 + 尾 46 条，中间归档到 transcript，
 // 插入归档标记消息。切点保护 assistant(ToolCalls)↔tool 配对。

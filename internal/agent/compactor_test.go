@@ -339,6 +339,67 @@ func TestIsToolPairBoundaryHelpers(t *testing.T) {
 	}
 }
 
+// TestPullBackToPairStart 直测尾切点配对保护的各分支（纯函数，输入输出断言）。
+// 构造复用 PairingProtection 的双 tool 批次形态：
+//
+//	[0]=system, [1]=assistant(2 tool_calls), [2]=tool, [3]=tool, [4]=user
+func TestPullBackToPairStart(t *testing.T) {
+	msgs := []llm.ChatMessage{
+		msg("system", "s"),
+		assistantWithTools("batch-x", "file", "grep"),
+		toolResult("batch-x", "第一个结果"),
+		toolResult("batch-x", "第二个结果"),
+		msg("user", "任务"),
+	}
+
+	t.Run("批次中段tool触发扫描回退", func(t *testing.T) {
+		// tailStart=3 指向第二个 tool：前一条是 tool（非配对 assistant），走扫描
+		// 回退分支——j 回退到批次起点 2，再纳入配对 assistant → 1。
+		if got := pullBackToPairStart(msgs, 3, 1); got != 1 {
+			t.Fatalf("pullBackToPairStart(msgs, 3, 1) = %d, want 1（批次起点 + 配对 assistant）", got)
+		}
+		// snip 式下界（不侵入 head）：扫描在 j=2 处停在界上，仍纳入 assistant → 1。
+		if got := pullBackToPairStart(msgs, 3, 2); got != 1 {
+			t.Fatalf("pullBackToPairStart(msgs, 3, 2) = %d, want 1", got)
+		}
+	})
+
+	t.Run("批次首个tool直接纳入配对assistant", func(t *testing.T) {
+		// tailStart=2 指向首个 tool，前一条正是配对 assistant → 直接回退一步。
+		if got := pullBackToPairStart(msgs, 2, 1); got != 1 {
+			t.Fatalf("pullBackToPairStart(msgs, 2, 1) = %d, want 1", got)
+		}
+	})
+
+	t.Run("非tool消息原样返回", func(t *testing.T) {
+		if got := pullBackToPairStart(msgs, 4, 1); got != 4 {
+			t.Fatalf("pullBackToPairStart(msgs, 4, 1) = %d, want 4（user 消息，无需回退）", got)
+		}
+		if got := pullBackToPairStart(msgs, 1, 1); got != 1 {
+			t.Fatalf("pullBackToPairStart(msgs, 1, 1) = %d, want 1（assistant 消息，无需回退）", got)
+		}
+		// 越界下标：守卫短路，不索引 messages[tailStart]。
+		if got := pullBackToPairStart(msgs, len(msgs), 1); got != len(msgs) {
+			t.Fatalf("pullBackToPairStart(msgs, len(msgs), 1) = %d, want %d", got, len(msgs))
+		}
+	})
+
+	t.Run("病态构造回退扫描压到0", func(t *testing.T) {
+		// messages[0] 为带 ToolCalls 的 assistant（无 system 前置）：
+		// 扫描下探到下界 1 后，条件回退仍纳入其 assistant → 返回 0。
+		// helper 契约：下界兜底由调用方负责（reactiveCompact 随后 clamp 到 1）。
+		odd := []llm.ChatMessage{
+			assistantWithTools("a0", "file"),
+			toolResult("a0", "r1"),
+			toolResult("a0", "r2"),
+			msg("user", "任务"),
+		}
+		if got := pullBackToPairStart(odd, 2, 1); got != 0 {
+			t.Fatalf("pullBackToPairStart(odd, 2, 1) = %d, want 0（压到 0，由调用方 clamp）", got)
+		}
+	})
+}
+
 func TestIsTooLongError(t *testing.T) {
 	if !isTooLongError(os.ErrNotExist) {
 		// 普通错误不是 too long
