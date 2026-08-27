@@ -26,7 +26,7 @@ import (
 )
 
 // ──────────────────────────────────────────────────────────
-// 样式定义（bubble.go 追加式样式迁移：全 tea 渲染下由 ChatModel/box.go 使用）
+// 样式定义（ChatModel/box.go 共享样式（inline 活区渲染 + 框线/错误等着色））
 // ──────────────────────────────────────────────────────────
 
 var (
@@ -218,7 +218,11 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.submitCh <- value
 				m.textarea.Reset()
 				// 新一轮提交：重置状态行（上一轮残留的思考/输出状态清除）。
-				m.status = ""
+				// 权限确认进行中不清状态行（y/N 提交后到工具结果到达前保持 🔧 状态，
+				// 避免空窗；chatPermissionDoneMsg 只清弹层）。
+				if m.permLayer == nil {
+					m.status = ""
+				}
 				// 用户消息经 commit 定稿（打印于活区上方入 scrollback）。
 				cmds = append(cmds, m.commit(m.renderUser(value)))
 			}

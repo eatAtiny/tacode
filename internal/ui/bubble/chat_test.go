@@ -530,6 +530,29 @@ func TestChatModel_StatusHiddenDuringPermission(t *testing.T) {
 	}
 }
 
+// 权限确认期间的提交不清状态行（避免批准后到工具结果前的空窗）。
+func TestChatModel_StatusKeptDuringPermissionSubmit(t *testing.T) {
+	m := NewChatModel()
+	m.Update(chatThinkMsg{iteration: 1})
+	m.Update(chatToolCallMsg{name: "shell", args: "{}"})
+	m.Update(chatPermissionMsg{tool: "shell", args: "{}", reason: "高危"})
+	if m.status == "" {
+		t.Fatal("前置失败：工具调用后状态行应非空")
+	}
+
+	m.textarea.SetValue("y")
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.status == "" {
+		t.Error("权限确认中的提交不应清空状态行，实际已清空")
+	}
+	// 确认完成清弹层后状态仍在，直到下一事件。
+	m.Update(chatPermissionDoneMsg{})
+	if m.status == "" {
+		t.Error("确认完成后状态行应保留（等 final/error 清空）")
+	}
+}
+
 // 错误中断冲刷：流式残余随错误行定稿，不泄漏到下一轮（不重复注入助手前缀）。
 func TestChatModel_ErrorFlushesStream(t *testing.T) {
 	m := NewChatModel()

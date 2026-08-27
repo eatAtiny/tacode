@@ -153,7 +153,7 @@ func (b *BubbleUI) OnThink(iteration int) {
 }
 
 // OnDelta 输出流式增量文本。
-// 投递 chatDeltaMsg，ChatModel 把增量追加到对话区。
+// 投递 chatDeltaMsg，ChatModel 把增量累积进流式缓冲，遇换行切段定稿（tea.Println）。
 func (b *BubbleUI) OnDelta(content string) {
 	b.send(chatDeltaMsg{content: content})
 }

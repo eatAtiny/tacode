@@ -99,7 +99,7 @@ footer。picker 模式保持现状（选择器替换活区渲染）。
 | chatToolResultMsg | Println 结果框线（现有渲染不变） |
 | chatContinueMsg | status="🔄 继续推理 (iter N)"；不打印 |
 | chatErrorMsg / chatMessageMsg / chatWelcomeMsg | Println（现有渲染不变）；同时清空 status |
-| chatHistoryMsg | m.lines 清空重建；逐条 Println（切换会话后旧内容已在 scrollback，无需清除） |
+| chatHistoryMsg | m.lines 清空重建；全部历史事件合并为**单次** Println 定稿（tea.Batch 内 Cmd 并发不保序，合并打印保序） |
 | chatBalanceMsg / chatContextMsg | 进 footer 字段（现状不变） |
 | chatPickerMsg / chatPermissionMsg / chatPermissionDoneMsg | 活区渲染（现状不变） |
 
@@ -128,8 +128,9 @@ onFinal:
 
 ### WindowSizeMsg
 
-textarea.SetWidth(v.Width)；记录 width/height。glamour wordwrap 保持初始 100 不随
-resize 重建（YAGNI：无流式 final 才走 glamour，收益边际；验收发现换行难看再补）。
+textarea.SetWidth(v.Width)；不记录 width/height（无生产读者，已按 YAGNI 删除）；
+glamour wordwrap 保持初始 100 不随 resize 重建（YAGNI：无流式 final 才走 glamour，
+收益边际；验收发现换行难看再补）。
 
 ## 不变的部分
 
