@@ -301,7 +301,7 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lines = append(m.lines, chatLine{text: e.text, streaming: e.streaming})
 		}
 		m.refresh()
-		m.viewport.GotoTop() // 历史从顶部开始看
+		m.viewport.GotoBottom() // 历史滚到底部：展示最近一轮结果（而非最上面）
 	case chatPickerMsg:
 		// 启动会话选择器（/list）：创建 picker 模型，进入选择模式。
 		m.picker = session.NewSessionPickerModel(v.sessions, v.activeID)

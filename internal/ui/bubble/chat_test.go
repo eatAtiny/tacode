@@ -2,6 +2,7 @@ package bubble
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -228,6 +229,26 @@ func TestChatModel_ContextNoLimitHidden(t *testing.T) {
 
 	if strings.Contains(m.renderFooter(), "上下文") {
 		t.Errorf("limit=0 时不应显示上下文段，实际:\n%s", m.renderFooter())
+	}
+}
+
+// 历史加载（chatHistoryMsg）后应滚到底部（展示最近一轮结果），而非顶部。
+func TestChatModel_HistoryGotoBottom(t *testing.T) {
+	m := NewChatModel()
+	// 构造足够多的历史行（超过默认 viewport 高度 10），验证滚动到底部。
+	var evts []chatHistoryEvent
+	for i := 0; i < 30; i++ {
+		evts = append(evts, chatHistoryEvent{text: fmt.Sprintf("历史第 %d 行", i)})
+	}
+	m.Update(chatHistoryMsg{events: evts})
+
+	// 滚到底部：YOffset 应接近最大值（最后一行可见），而非 0（顶部）。
+	if m.viewport.YOffset == 0 {
+		t.Error("历史加载后应滚到底部（YOffset > 0），而非顶部")
+	}
+	content := m.viewport.View()
+	if !strings.Contains(content, "历史第 29 行") {
+		t.Errorf("底部应显示最后一行历史，实际:\n%s", content)
 	}
 }
 
