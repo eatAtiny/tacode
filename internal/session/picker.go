@@ -13,7 +13,7 @@ import (
 // ──────────────────────────────────────────────────────────
 
 var (
-	// pickerActiveStyle 高亮当前光标所在的行。
+	// pickerActiveStyle 高亮当前光标所在的行（无论该行是否为活跃会话）。
 	pickerActiveStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("15")).
 				Background(lipgloss.Color("57")).
@@ -29,13 +29,6 @@ var (
 	pickerCurrentStyle = lipgloss.NewStyle().
 				Foreground(lipgloss.Color("10")).
 				Padding(0, 1)
-
-	// pickerActiveCurrentStyle 同时是光标行又是活跃会话。
-	pickerActiveCurrentStyle = lipgloss.NewStyle().
-					Foreground(lipgloss.Color("15")).
-					Background(lipgloss.Color("57")).
-					Bold(true).
-					Padding(0, 1)
 
 	// pickerHelpStyle 底部帮助提示。
 	pickerHelpStyle = lipgloss.NewStyle().
@@ -143,11 +136,7 @@ func (m *SessionPickerModel) View() string {
 
 		// 选中行高亮
 		if isCursor {
-			if isActive {
-				b.WriteString(pickerActiveCurrentStyle.Render(line))
-			} else {
-				b.WriteString(pickerActiveStyle.Render(line))
-			}
+			b.WriteString(pickerActiveStyle.Render(line))
 		} else if isActive {
 			b.WriteString(pickerCurrentStyle.Render(line))
 		} else {
