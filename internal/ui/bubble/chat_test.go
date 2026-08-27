@@ -207,6 +207,28 @@ func TestChatModel_WelcomeGotoTop(t *testing.T) {
 	}
 }
 
+// 启动时 UpdateContext(0, limit)：limit 已知即显示初始上下文（0/50.0k (0%)）。
+// Bug 回归：旧条件 used>0 才显示，启动时 used=0 导致上下文要等一轮对话后才出现。
+func TestChatModel_ContextStartupShown(t *testing.T) {
+	m := NewChatModel()
+	m.Update(chatContextMsg{usedTokens: 0, contextLimit: 50_000})
+
+	footer := m.renderFooter()
+	if !strings.Contains(footer, "上下文 0/50.0k (0%)") {
+		t.Errorf("footer 应显示初始上下文 0/50.0k (0%%)，实际:\n%s", footer)
+	}
+}
+
+// limit=0（数据未就绪）时不显示上下文段。
+func TestChatModel_ContextNoLimitHidden(t *testing.T) {
+	m := NewChatModel()
+	m.Update(chatContextMsg{usedTokens: 0, contextLimit: 0})
+
+	if strings.Contains(m.renderFooter(), "上下文") {
+		t.Errorf("limit=0 时不应显示上下文段，实际:\n%s", m.renderFooter())
+	}
+}
+
 // 流式 delta 合并到最后一行（不逐条 append）。
 func TestChatModel_StreamingMerge(t *testing.T) {
 	m := NewChatModel()

@@ -329,8 +329,8 @@ func (m *ChatModel) View() string {
 func (m *ChatModel) renderFooter() string {
 	var parts []string
 
-	// 上下文窗口占用（used>0 且 limit>0 时显示）。
-	if m.contextUsedTokens > 0 && m.contextLimit > 0 {
+	// 上下文占用（limit>0 时显示；used 可为 0——启动时初始显示 0/50.0k (0%)）。
+	if m.contextLimit > 0 {
 		parts = append(parts, fmt.Sprintf("上下文 %s/%s (%d%%)",
 			formatToken(m.contextUsedTokens), formatToken(m.contextLimit),
 			m.contextUsedTokens*100/m.contextLimit))
