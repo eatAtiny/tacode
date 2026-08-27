@@ -140,6 +140,7 @@ Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncat
 - `ToolPermissionChecker` interface — `CheckPermission(toolName, args) PermissionResult`
 - `DefaultPermissionChecker`: `shell` and `file` marked dangerous (need confirm). High-risk operations (`rm -rf`, `sudo`, `chmod 777`, file writes, etc.) trigger confirmation.
 - Confirm flows through `UI.ConfirmPermission()` → `PermissionCh` channel → back to queryLoop (blocking).
+- BubbleUI 下权限确认显示为输入框上方的弹层（黄色警告框，含工具/参数/原因），用户在 textarea 输入 y/N。
 - Replace via `SetPermissionChecker()` to inject custom policy.
 
 ### Session Management
