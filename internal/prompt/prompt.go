@@ -1,30 +1,16 @@
-// Package prompt 提供 ReAct Agent 的提示词模板。
+// Package prompt 构建 ReAct 提示词。
 //
-// 调用链中的角色：
-//   QueryEngine（步骤 3）
-//     → BuildReActSystemPrompt(toolDescriptions, guides)  ← 构建 System Prompt
-//     → BuildReActUserPrompt(round, context, input) ← 构建 User Prompt
-//     → 组合为 messages[0] = system, messages[1] = user
-//     → 传入 queryLoop()
+// 现行消息组装（见 agent.queryEngine）：
+//
+//	messages[0]    = BuildReActSystemPrompt（静态 system，含工具指南）
+//	messages[1]    = BuildSystemReminder（记忆 preamble，仅首轮/切换注入）
+//	messages[末尾] = BuildUserTask（每轮变化的用户任务）
 package prompt
 
 import (
 	"fmt"
 	"strings"
 )
-
-// RoundPrompt 表示单轮请求发给模型的提示词结构。
-type RoundPrompt struct {
-	System string
-	User   string
-}
-
-// BuildRoundPrompt 组装每轮提示词（普通对话模式，已较少使用）。
-func BuildRoundPrompt(round int, contextDigest, userInput string) RoundPrompt {
-	system := "你是一个有帮助的 AI 助手。请用简洁自然的中文回答用户的问题。"
-	user := fmt.Sprintf("轮次: %d\n记忆上下文:\n%s\n\n用户输入:\n%s", round, contextDigest, userInput)
-	return RoundPrompt{System: system, User: user}
-}
 
 // ──────────────────────────────────────────────────────────
 // ToolGuide — 工具 Prompt 自引导
@@ -108,24 +94,10 @@ func BuildReActSystemPrompt(toolDescriptions string, guides []ToolGuide) string 
   "完整结果已保存到: <路径>" 时，可使用 file read 读取完整内容。`, toolDescriptions, guideSection)
 }
 
-// BuildReActUserPrompt 构建 ReAct 模式的 user prompt。
-//
-// 这是 queryLoop 收到的第二条消息（messages[1]）。
-// 包含：
-//   - round: 当前轮次号
-//   - contextDigest: 由 Retriever.BuildContext() 构建的三层记忆上下文
-//   - userInput: 用户原始输入
-//
-// 已废弃：跨轮累积架构下每轮只追加用户任务（BuildUserTask），
-// 记忆上下文改为经 BuildSystemReminder 注入且只在会话切换时重建。
-// 此函数仅保留向后兼容（master 分支当前未使用）。
-func BuildReActUserPrompt(round int, contextDigest, userInput string) string {
-	return fmt.Sprintf("轮次: %d\n记忆上下文:\n%s\n\n用户任务:\n%s", round, contextDigest, userInput)
-}
-
 // BuildSystemReminder 将记忆/参考上下文包装为系统注入的参考消息。
 //
-// 跨轮累积架构下，此消息位于 messages[1]（system 之后、累积对话之前），
+// 跨轮累积架构下，注入时此消息位于 messages[1]（system 之后、累积对话之前）；
+// preamble 为空（首轮无可注入的记忆上下文）时无此消息。
 // 作为稳定前缀的一部分：内容只在会话切换/首次查询时重建并缓存，
 // 同一会话内字节稳定，前缀缓存可命中。
 //
