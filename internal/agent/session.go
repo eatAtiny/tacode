@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"agentic/internal/llm"
 	"agentic/internal/memory"
 	"agentic/internal/session"
 )
@@ -82,16 +83,46 @@ func (r *Runner) syncCompactorPaths(dir string) {
 	}
 }
 
-// printSessionHistory 读取并展示指定会话的历史记录。
-// 统一走 UI.ShowHistory：BubbleUI 渲染为结构化对话（用户/助手/工具框线），
-// TextUI 转发事件由上层处理。
+// printSessionHistory 读取并展示指定会话的历史记录，并把历史加载进跨轮上下文。
+//
+// 流程：
+//  1. 历史事件 → llm.ChatMessage 数组（只保留 user/assistant，跳过 tool——
+//     tool 消息缺 ToolCallID 会触发 API 400，且工具结果对上下文价值有限）
+//  2. 赋值 r.messages：切换会话后 LLM 上下文包含历史（延续对话）
+//  3. 更新 footer 上下文占用（反映加载历史后的真实占比）
+//  4. UI 展示历史：BubbleUI 渲染结构化对话，TextUI 转发事件
 func (r *Runner) printSessionHistory() {
 	events, err := r.events.ReadAll()
 	if err != nil || len(events) == 0 {
 		r.ui.OnMessage("  (无历史记录)")
 		return
 	}
+
+	// 历史加载进跨轮上下文（LLM 延续对话）。
+	r.messages = historyToMessages(events)
+	// 更新 footer 上下文占用（加载历史后立即反映，不必等一轮对话）。
+	if r.compactor != nil {
+		r.ui.UpdateContext(r.compactor.EstimateMessagesChars(r.messages), r.compactor.Limit())
+	}
+
 	r.ui.ShowHistory(events)
+}
+
+// historyToMessages 把历史事件转为跨轮累积的对话消息。
+// 只保留 user/assistant（跳过 tool 事件）：tool 消息依赖 ToolCallID 配对，
+// 历史事件未保存该字段，直接转会导致 OpenAI API 400（tool 消息必须被带
+// 匹配 tool_calls 的 assistant 前置）。
+func historyToMessages(events []memory.Event) []llm.ChatMessage {
+	var msgs []llm.ChatMessage
+	for _, e := range events {
+		switch e.Type {
+		case memory.EventUser:
+			msgs = append(msgs, llm.ChatMessage{Role: "user", Content: e.Content})
+		case memory.EventAssistant:
+			msgs = append(msgs, llm.ChatMessage{Role: "assistant", Content: e.Content})
+		}
+	}
+	return msgs
 }
 
 // handleSessionCommand 处理 / 开头的会话管理命令。

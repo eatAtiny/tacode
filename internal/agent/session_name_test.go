@@ -59,13 +59,13 @@ func TestEnsurePersisted_NamesFromFirstInput(t *testing.T) {
 	events := memory.NewEventStore(tempDir)
 
 	r := &Runner{
-		history:  history,
-		summary:  summary,
-		memStore: memStore,
-		events:   events,
-		sessions: sessions,
+		history:     history,
+		summary:     summary,
+		memStore:    memStore,
+		events:      events,
+		sessions:    sessions,
 		isTemporary: true,
-		tempID:   tempID,
+		tempID:      tempID,
 	}
 
 	// 首条输入：多行 + 长内容，应被清洗并截断。
@@ -92,5 +92,34 @@ func TestEnsurePersisted_NamesFromFirstInput(t *testing.T) {
 	// 换行应被压缩为空格。
 	if strings.Contains(meta.Name, "\n") {
 		t.Errorf("session name should not contain newline, got %q", meta.Name)
+	}
+}
+
+// historyToMessages 把历史事件转为跨轮消息：保留 user/assistant，跳过 tool。
+func TestHistoryToMessages_SkipsTool(t *testing.T) {
+	events := []memory.Event{
+		{Type: memory.EventUser, Content: "你好"},
+		{Type: memory.EventToolUse, ToolCalls: []memory.ToolCallEvent{{ID: "1", Name: "file"}}},
+		{Type: memory.EventToolResult, ToolName: "file", ToolResult: "文件内容"},
+		{Type: memory.EventAssistant, Content: "已读取"},
+	}
+	msgs := historyToMessages(events)
+
+	if len(msgs) != 2 {
+		t.Fatalf("msgs len = %d, want 2（user+assistant，tool 跳过）", len(msgs))
+	}
+	if msgs[0].Role != "user" || msgs[0].Content != "你好" {
+		t.Errorf("msgs[0] = %+v, want user/你好", msgs[0])
+	}
+	if msgs[1].Role != "assistant" || msgs[1].Content != "已读取" {
+		t.Errorf("msgs[1] = %+v, want assistant/已读取", msgs[1])
+	}
+}
+
+// historyToMessages 空历史返回空（切换会话到新会话时安全）。
+func TestHistoryToMessages_Empty(t *testing.T) {
+	msgs := historyToMessages(nil)
+	if len(msgs) != 0 {
+		t.Errorf("空历史 msgs = %d, want 0", len(msgs))
 	}
 }

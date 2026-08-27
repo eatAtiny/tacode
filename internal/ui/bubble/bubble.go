@@ -244,47 +244,18 @@ func (b *BubbleUI) ShowHistory(events []memory.Event) {
 			// 完整显示用户消息（不截断）。
 			history = append(history, chatHistoryEvent{text: b.chat.renderUser(e.Content)})
 		case memory.EventAssistant:
-			// 完整显示助手回答（不截断首行/长度）。
+			// 完整显示助手回答（agent 最终输出，不截断）。
 			history = append(history, chatHistoryEvent{text: b.chat.renderAssistant() + e.Content})
 		case memory.EventToolUse:
 			for _, tc := range e.ToolCalls {
 				history = append(history, chatHistoryEvent{text: toolCallBox(tc.Name, tc.Arguments)})
 			}
 		case memory.EventToolResult:
-			// 工具结果完整显示（不走 toolResultBox 的 15 行截断）。
-			history = append(history, chatHistoryEvent{text: renderToolResultFull(e.ToolName, e.ToolResult, e.IsError)})
+			// 工具结果用 toolResultBox（15 行截断——工具结果本就不该全量展示）。
+			history = append(history, chatHistoryEvent{text: toolResultBox(e.ToolName, e.ToolResult, e.IsError)})
 		}
 	}
 	b.send(chatHistoryMsg{events: history})
-}
-
-// renderToolResultFull 渲染完整工具结果（无行数截断，历史展示用）。
-// 与 toolResultBox 同风格（框线 + 成功/失败标题），但内容全量。
-func renderToolResultFull(name, result string, isError bool) string {
-	titleStyle := styleSuccess
-	titleText := "✅ 结果"
-	if isError {
-		titleStyle = styleError
-		titleText = "❌ 错误"
-	}
-	width := boxWidth(result, 60)
-	var sb strings.Builder
-	sb.WriteString("  ")
-	sb.WriteString(titleStyle.Render("┌─ " + titleText))
-	sb.WriteString(" ")
-	sb.WriteString(styleMuted.Render(strings.Repeat("─", max(0, width-len(titleText)+2))))
-	sb.WriteString("\n")
-	for _, line := range strings.Split(result, "\n") {
-		sb.WriteString("  ")
-		sb.WriteString(titleStyle.Render("│"))
-		sb.WriteString(" ")
-		sb.WriteString(line)
-		sb.WriteString("\n")
-	}
-	sb.WriteString("  ")
-	sb.WriteString(titleStyle.Render("└" + strings.Repeat("─", width+1)))
-	sb.WriteString("\n")
-	return sb.String()
 }
 
 // ConfirmPermission 显示权限确认提示，等待用户输入。

@@ -208,7 +208,7 @@ func TestConfirmPermission_FallbackReadInputChan(t *testing.T) {
 }
 
 // ShowHistory 把历史事件渲染为结构化对话行（用户/助手/工具框线），非原始 JSON。
-// 且完整显示（不截断：工具结果 >15 行也全量渲染）。
+// 助手回答完整显示；工具结果用 toolResultBox（15 行截断，工具结果不该全量）。
 func TestShowHistory_RendersStructured(t *testing.T) {
 	b := startTest(t)
 
@@ -232,13 +232,20 @@ func TestShowHistory_RendersStructured(t *testing.T) {
 	for _, l := range b.chat.lines {
 		joined += l.text + "\n"
 	}
-	for _, want := range []string{"你好", "第一行", "file", "第 19 行内容"} {
+	// 助手回答完整显示（多行，非仅首行）。
+	for _, want := range []string{"你好", "第一行", "第二行", "file"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("历史对话区应完整含 %q，实际:\n%s", want, joined)
 		}
 	}
-	// 助手回答完整显示（含多行，非仅首行）。
-	if !strings.Contains(joined, "第二行") {
-		t.Errorf("助手回答应完整显示（多行），实际:\n%s", joined)
+	// 工具结果截断：前 15 行在内，第 19 行被截断，显示截断标记。
+	if !strings.Contains(joined, "第 0 行内容") {
+		t.Errorf("工具结果前 15 行应显示，实际:\n%s", joined)
+	}
+	if strings.Contains(joined, "第 19 行内容") {
+		t.Errorf("工具结果第 19 行应被截断（不该显示），实际:\n%s", joined)
+	}
+	if !strings.Contains(joined, "已截断") {
+		t.Errorf("工具结果应显示截断标记，实际:\n%s", joined)
 	}
 }
