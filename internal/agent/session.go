@@ -83,61 +83,30 @@ func (r *Runner) syncCompactorPaths(dir string) {
 }
 
 // printSessionHistory 读取并展示指定会话的历史记录。
-//
-// 按轮次分组展示：
-//   - EventUser: "You> ..."（截断到 60 runes）
-//   - EventAssistant: "Agent> ..."（取首行，截断到 80 runes）
-//   - EventToolUse: "🔧 tool(args)"（参数截断到 60 字符）
+// 统一走 UI.ShowHistory：BubbleUI 渲染为结构化对话（用户/助手/工具框线），
+// TextUI 转发事件由上层处理。
 func (r *Runner) printSessionHistory() {
 	events, err := r.events.ReadAll()
 	if err != nil || len(events) == 0 {
 		r.ui.OnMessage("  (无历史记录)")
 		return
 	}
-
-	r.ui.OnMessage(fmt.Sprintf("  📜 共 %d 条事件:", len(events)))
-	currentRound := 0
-	for _, e := range events {
-		switch e.Type {
-		case memory.EventUser:
-			if e.Round != currentRound {
-				currentRound = e.Round
-				r.ui.OnMessage(fmt.Sprintf("  Round %d:", e.Round))
-			}
-			userLine := e.Content
-			if len([]rune(userLine)) > 60 {
-				userLine = string([]rune(userLine)[:60]) + "..."
-			}
-			r.ui.OnMessage(fmt.Sprintf("    You> %s", userLine))
-		case memory.EventAssistant:
-			assistantLine := e.Content
-			if idx := strings.IndexByte(assistantLine, '\n'); idx >= 0 {
-				assistantLine = assistantLine[:idx]
-			}
-			if len([]rune(assistantLine)) > 80 {
-				assistantLine = string([]rune(assistantLine)[:80]) + "..."
-			}
-			r.ui.OnMessage(fmt.Sprintf("    Agent> %s", assistantLine))
-		case memory.EventToolUse:
-			for _, tc := range e.ToolCalls {
-				r.ui.OnMessage(fmt.Sprintf("    🔧 %s(%s)", tc.Name, trimArgs(tc.Arguments)))
-			}
-		}
-	}
+	r.ui.ShowHistory(events)
 }
 
 // handleSessionCommand 处理 / 开头的会话管理命令。
 //
 // 命令路由：
-//   /new [name]    → 创建新会话（临时模式：重置临时状态；持久化模式：Create + Switch）
-//   /list          → 交互式会话选择器（Bubble Tea）
-//   /switch <id>   → 切换到指定会话
-//   /delete <id>   → 删除会话（不能删除当前活跃的）
-//   /rename <name> → 重命名当前会话
-//   /current       → 显示当前会话信息
-//   /compress      → 手动压缩 L2 摘要
-//   /reload        → 重新加载项目指令（AGENTS.md）
-//   /memory [...]  → L3 记忆管理（list/add/rm）
+//
+//	/new [name]    → 创建新会话（临时模式：重置临时状态；持久化模式：Create + Switch）
+//	/list          → 交互式会话选择器（Bubble Tea）
+//	/switch <id>   → 切换到指定会话
+//	/delete <id>   → 删除会话（不能删除当前活跃的）
+//	/rename <name> → 重命名当前会话
+//	/current       → 显示当前会话信息
+//	/compress      → 手动压缩 L2 摘要
+//	/reload        → 重新加载项目指令（AGENTS.md）
+//	/memory [...]  → L3 记忆管理（list/add/rm）
 //
 // 返回值：新的轮次号（切换会话时重置为 1），是否已处理。
 func (r *Runner) handleSessionCommand(input string) (int, bool) {
@@ -312,18 +281,18 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 // ensurePersisted 将临时会话持久化到 manifest。
 //
 // 流程（首次对话完成后调用）：
-//   1. 记录临时目录路径
-//   2. 调用 sessions.Create() 创建正式会话（加入 manifest + 设为 Active）
-//      会话名：用户通过 /new <name> 指定的名字优先；
-//      否则用首条用户输入（firstInput）自动生成；再否则兜底 "新会话"。
-//   3. 将临时目录下的文件移动到正式目录：
-//      - events.jsonl（全量事件日志）
-//      - history.jsonl（L1 原始对话）
-//      - summaries.jsonl（L2 摘要）
-//      - memory/ 目录（L3 结构化记忆）
-//   4. 清理临时目录
-//   5. 更新所有 store 的路径指向正式目录
-//   6. 设置 isTemporary = false
+//  1. 记录临时目录路径
+//  2. 调用 sessions.Create() 创建正式会话（加入 manifest + 设为 Active）
+//     会话名：用户通过 /new <name> 指定的名字优先；
+//     否则用首条用户输入（firstInput）自动生成；再否则兜底 "新会话"。
+//  3. 将临时目录下的文件移动到正式目录：
+//     - events.jsonl（全量事件日志）
+//     - history.jsonl（L1 原始对话）
+//     - summaries.jsonl（L2 摘要）
+//     - memory/ 目录（L3 结构化记忆）
+//  4. 清理临时目录
+//  5. 更新所有 store 的路径指向正式目录
+//  6. 设置 isTemporary = false
 //
 // 错误处理：单个文件移动失败不中断（仅输出警告），尽量迁移所有文件。
 func (r *Runner) ensurePersisted(firstInput string) error {

@@ -12,7 +12,10 @@
 //  4. 生命周期组：Welcome / Close
 package ui
 
-import "agentic/internal/session"
+import (
+	"agentic/internal/memory"
+	"agentic/internal/session"
+)
 
 // UI 定义了 Agent 与用户交互的接口。
 // 所有 UI 操作都通过此接口完成，Agent 核心不直接操作终端或 Web。
@@ -131,6 +134,11 @@ type UI interface {
 	// 返回用户选中的会话 ID；空串表示取消。
 	// 实现差异：BubbleUI 融合进聊天 TUI 内渲染（不另起程序）；TextUI 独立程序。
 	RunSessionPicker(sessions []session.SessionMeta, activeID string) (string, error)
+
+	// ShowHistory 展示会话历史（切换会话后调用）。
+	// 实现差异：BubbleUI 渲染为结构化对话（用户消息/助手回答/工具框线）；
+	// TextUI 转文本行。
+	ShowHistory(events []memory.Event)
 
 	// ── 交互组 ──────────────────────────────────────────
 

@@ -80,6 +80,13 @@ type (
 	chatBalanceMsg struct{ balance string }
 	// chatContextMsg 上下文窗口占用（UpdateContext）。
 	chatContextMsg struct{ usedTokens, contextLimit int }
+	// chatHistoryMsg 会话历史（ShowHistory，切换会话后加载）。
+	chatHistoryMsg struct{ events []chatHistoryEvent }
+	// chatHistoryEvent 历史中的一条记录（已渲染文本）。
+	chatHistoryEvent struct {
+		text      string // 渲染后的对话行（用户消息/助手回答/工具框线）
+		streaming bool   // 是否流式（历史加载恒 false）
+	}
 	// chatPickerMsg 启动会话选择器（/list）。
 	chatPickerMsg struct {
 		sessions []session.SessionMeta
@@ -286,6 +293,15 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 上下文占用进 footer（已用/总/百分比）。
 		m.contextUsedTokens = v.usedTokens
 		m.contextLimit = v.contextLimit
+	case chatHistoryMsg:
+		// 切换会话后加载历史：先清空对话区，再追加历史事件行。
+		m.lines = nil
+		m.closeStreaming()
+		for _, e := range v.events {
+			m.lines = append(m.lines, chatLine{text: e.text, streaming: e.streaming})
+		}
+		m.refresh()
+		m.viewport.GotoTop() // 历史从顶部开始看
 	case chatPickerMsg:
 		// 启动会话选择器（/list）：创建 picker 模型，进入选择模式。
 		m.picker = session.NewSessionPickerModel(v.sessions, v.activeID)

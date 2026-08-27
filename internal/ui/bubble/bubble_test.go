@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"agentic/internal/memory"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -201,5 +203,31 @@ func TestConfirmPermission_FallbackReadInputChan(t *testing.T) {
 	}
 	if !approved {
 		t.Error("输入 yes 应允许")
+	}
+}
+
+// ShowHistory 把历史事件渲染为结构化对话行（用户/助手/工具框线），非原始 JSON。
+func TestShowHistory_RendersStructured(t *testing.T) {
+	b := startTest(t)
+
+	events := []memory.Event{
+		{Type: memory.EventUser, Content: "你好"},
+		{Type: memory.EventAssistant, Content: "我是助手"},
+		{Type: memory.EventToolUse, ToolCalls: []memory.ToolCallEvent{{ID: "1", Name: "file", Arguments: `{"action":"read"}`}}},
+		{Type: memory.EventToolResult, ToolName: "file", ToolResult: "文件内容"},
+	}
+	b.ShowHistory(events)
+
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+	joined := ""
+	for _, l := range b.chat.lines {
+		joined += l.text + "\n"
+	}
+	for _, want := range []string{"你好", "我是助手", "file", "文件内容"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("历史对话区应含 %q，实际:\n%s", want, joined)
+		}
 	}
 }

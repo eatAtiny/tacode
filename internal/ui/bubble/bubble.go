@@ -34,6 +34,7 @@ import (
 	"strings"
 	"sync"
 
+	"agentic/internal/memory"
 	"agentic/internal/session"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -230,6 +231,40 @@ func (b *BubbleUI) RunSessionPicker(sessions []session.SessionMeta, activeID str
 	b.send(chatPickerMsg{sessions: sessions, activeID: activeID})
 	selected := <-b.chat.pickerDone
 	return selected, nil
+}
+
+// ShowHistory 展示会话历史（切换会话后调用）。
+// 把历史事件渲染为结构化对话行（用户消息/助手回答/工具框线），
+// 复用 ChatModel 的对话区渲染——历史与当前对话同风格，而非原始 JSON。
+func (b *BubbleUI) ShowHistory(events []memory.Event) {
+	var history []chatHistoryEvent
+	for _, e := range events {
+		switch e.Type {
+		case memory.EventUser:
+			line := e.Content
+			if len([]rune(line)) > 200 {
+				line = string([]rune(line)[:200]) + "..."
+			}
+			history = append(history, chatHistoryEvent{text: b.chat.renderUser(line)})
+		case memory.EventAssistant:
+			line := e.Content
+			// 助手回答截断到首行 + 200 字符（历史只做概要展示，完整内容在 events.jsonl）。
+			if idx := strings.IndexByte(line, '\n'); idx >= 0 {
+				line = line[:idx]
+			}
+			if len([]rune(line)) > 200 {
+				line = string([]rune(line)[:200]) + "..."
+			}
+			history = append(history, chatHistoryEvent{text: b.chat.renderAssistant() + line})
+		case memory.EventToolUse:
+			for _, tc := range e.ToolCalls {
+				history = append(history, chatHistoryEvent{text: toolCallBox(tc.Name, tc.Arguments)})
+			}
+		case memory.EventToolResult:
+			history = append(history, chatHistoryEvent{text: toolResultBox(e.ToolName, e.ToolResult, e.IsError)})
+		}
+	}
+	b.send(chatHistoryMsg{events: history})
 }
 
 // ConfirmPermission 显示权限确认提示，等待用户输入。

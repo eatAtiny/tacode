@@ -18,6 +18,7 @@ package text
 import (
 	"fmt"
 
+	"agentic/internal/memory"
 	"agentic/internal/session"
 )
 
@@ -141,6 +142,13 @@ func (t *TextUI) RunSessionPicker(sessions []session.SessionMeta, activeID strin
 		t.OnEvent("session_picker", map[string]any{"sessions": sessions, "active_id": activeID})
 	}
 	return session.RunSessionPicker(sessions, activeID)
+}
+
+// ShowHistory 转发会话历史事件。data 为 events（[]memory.Event）。
+func (t *TextUI) ShowHistory(events []memory.Event) {
+	if t.OnEvent != nil {
+		t.OnEvent("history", events)
+	}
 }
 
 // OnError 转发错误事件。data 为 err（error）。
