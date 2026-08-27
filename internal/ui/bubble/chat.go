@@ -193,18 +193,18 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// 所有按键转发给 SessionPickerModel，选择器完成（Enter/Esc）时捕获结果。
 	if m.picking {
 		if keyMsg, ok := msg.(tea.KeyMsg); ok {
-			updated, cmd := m.picker.Update(keyMsg)
-			cmds = append(cmds, cmd)
-			_ = updated
+			// SessionPickerModel 在完成按键（Enter/Esc/ctrl+c/q）上返回 tea.Quit
+			// ——那是它独立运行（自起 tea 程序）时的退出信号；嵌入聊天 TUI 时
+			// 必须吞掉（picker.go 的 Update 契约），传播出去会退出整个聊天程序：
+			// /list 选中瞬间 TUI 死亡、切换后的历史加载消息全部丢失。
+			_, _ = m.picker.Update(keyMsg)
 			// 选择完成：捕获结果后切回对话模式（不让外层 tea 退出）。
 			if m.picker.IsDone() {
 				m.picking = false
 				m.pickerDone <- m.picker.Chosen()
 				m.picker = nil
 			}
-			// picker 的 cmd 已收进 cmds，一并返回（SessionPickerModel 的
-			// cmd 通常为 nil，tea.Batch(nil) 安全）。
-			return m, tea.Batch(cmds...)
+			return m, nil
 		}
 		// 非按键消息（如 WindowSize）不转发，直接忽略。
 		return m, nil
