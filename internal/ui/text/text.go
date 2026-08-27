@@ -124,10 +124,10 @@ func (t *TextUI) ShowBalance(line string) {
 	}
 }
 
-// UpdateContext 转发上下文占用事件。data 为 map{"used_tokens", "context_limit"}。
-func (t *TextUI) UpdateContext(usedTokens, contextLimit int) {
+// UpdateContext 转发上下文占用事件。data 为 map{"used_chars", "context_char_limit"}。
+func (t *TextUI) UpdateContext(usedChars, contextCharLimit int) {
 	if t.OnEvent != nil {
-		t.OnEvent("context", map[string]int{"used_tokens": usedTokens, "context_limit": contextLimit})
+		t.OnEvent("context", map[string]int{"used_chars": usedChars, "context_char_limit": contextCharLimit})
 	}
 }
 

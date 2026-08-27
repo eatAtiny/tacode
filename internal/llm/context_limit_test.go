@@ -18,6 +18,9 @@ func TestInferContextLimit_KnownModels(t *testing.T) {
 		{"claude-opus-4", 200_000},
 		{"mimo-v2.5-pro", 1_000_000},
 		{"mimo-v2-omni", 256_000},
+		{"deepseek-v4-flash", 1_000_000},
+		{"deepseek-chat", 128_000},
+		{"deepseek-reasoner", 128_000},
 	}
 	for _, tt := range tests {
 		t.Run(tt.model, func(t *testing.T) {

@@ -362,3 +362,36 @@ func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
+
+// ── Limit / EstimateMessagesChars（UI 上下文占用显示） ──
+
+// Limit 默认返回 50000（context_char_limit 默认值）。
+func TestCompactorLimit_Default(t *testing.T) {
+	c := newTestCompactor(t)
+	if got := c.Limit(); got != 50_000 {
+		t.Errorf("Limit() = %d, want 50000", got)
+	}
+}
+
+// Limit 受 SetContextCharLimit 覆盖。
+func TestCompactorLimit_Override(t *testing.T) {
+	c := newTestCompactor(t)
+	c.SetContextCharLimit(100_000)
+	if got := c.Limit(); got != 100_000 {
+		t.Errorf("Limit() = %d, want 100000", got)
+	}
+}
+
+// EstimateMessagesChars 返回 JSON 序列化长度（与压缩管线同口径）。
+func TestCompactorEstimateMessagesChars(t *testing.T) {
+	c := newTestCompactor(t)
+	msgs := []llm.ChatMessage{msg("system", "你好"), msg("user", "任务")}
+	got := c.EstimateMessagesChars(msgs)
+	if got <= 0 {
+		t.Errorf("EstimateMessagesChars = %d, want > 0", got)
+	}
+	// 直接调用 estimateChars 应一致。
+	if want := estimateChars(msgs); got != want {
+		t.Errorf("EstimateMessagesChars = %d, estimateChars = %d（应一致）", got, want)
+	}
+}

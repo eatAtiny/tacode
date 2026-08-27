@@ -253,6 +253,15 @@ func (r *Runner) Run(ctx context.Context) error {
 	// 显示欢迎信息。
 	r.ui.Welcome(r.llm.Model())
 
+	// ── 启动状态初始化（footer 状态栏立即有数据） ──
+	// 1. 上下文占用：初始为空（0 字符），显示 "上下文 0/50K (0%)"。
+	// 2. 余额：自动查询一次（无需手动 /balance），成功显示在 footer；
+	//    失败静默（启动不打扰，后续 /balance 可手动查询）。
+	if r.compactor != nil {
+		r.ui.UpdateContext(0, r.compactor.Limit())
+	}
+	go r.queryBalance()
+
 	// ── 启动异步输入读取 ──
 	// 追加式模型：统一走 UI 的 raw 输入通道（ReadInputChan），
 	// 输入即流末尾的提示符行，无 tea 输入桥接。

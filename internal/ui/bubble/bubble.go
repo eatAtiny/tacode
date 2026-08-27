@@ -207,10 +207,11 @@ func (b *BubbleUI) ShowBalance(line string) {
 	b.send(chatBalanceMsg{balance: line})
 }
 
-// UpdateContext 更新上下文窗口占用。
+// UpdateContext 更新上下文占用。
 // 投递 chatContextMsg，ChatModel 存字段并在 footer 状态栏显示（已用/总/百分比）。
-func (b *BubbleUI) UpdateContext(usedTokens, contextLimit int) {
-	b.send(chatContextMsg{usedTokens: usedTokens, contextLimit: contextLimit})
+// usedChars 与 contextCharLimit 均为字符口径（与 Compactor 压缩界限一致）。
+func (b *BubbleUI) UpdateContext(usedChars, contextCharLimit int) {
+	b.send(chatContextMsg{usedTokens: usedChars, contextLimit: contextCharLimit})
 }
 
 // ConfirmPermission 显示权限确认提示，等待用户输入。
