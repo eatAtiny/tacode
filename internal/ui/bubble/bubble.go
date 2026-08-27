@@ -258,7 +258,7 @@ func (b *BubbleUI) ShowHistory(events []memory.Event) {
 	b.send(chatHistoryMsg{events: history})
 }
 
-// ConfirmPermission 显示权限确认提示，等待用户输入。
+// ConfirmPermission 显示权限确认弹层，等待用户输入。
 //
 // 聊天界面下的确认输入流转（链路）：
 //
@@ -266,15 +266,12 @@ func (b *BubbleUI) ShowHistory(events []memory.Event) {
 //	  → queryRunning 分支转发到 inputForward（查询运行中非 nil）
 //	  → ConfirmPermission 从 inputForward 读取
 //
-// 提示先发进对话区（chatMessageMsg），用户据此在 textarea 输入 y/N 回车。
+// 提示经 chatPermissionMsg 显示为输入框上方的弹层（比追加对话行更醒目），
+// 用户输入 y/N 后发 chatPermissionDoneMsg 清除弹层。
 // inputForward 为 nil（无运行中查询，理论不发生）时回退 ReadInputChan。
 func (b *BubbleUI) ConfirmPermission(tool, args, reason string, inputForward <-chan string) (bool, error) {
-	// 提示进对话区（用户需在 textarea 输入确认，不提示会丢失上下文）。
-	msg := fmt.Sprintf("⚠️ 权限确认: %s（参数: %s）允许? y/N", tool, args)
-	if reason != "" {
-		msg = fmt.Sprintf("%s\n原因: %s", msg, reason)
-	}
-	b.send(chatMessageMsg{content: msg})
+	// 弹层显示在输入框上方（用户据此在 textarea 输入 y/N 回车）。
+	b.send(chatPermissionMsg{tool: tool, args: args, reason: reason})
 
 	var input string
 	var ok bool
@@ -283,6 +280,9 @@ func (b *BubbleUI) ConfirmPermission(tool, args, reason string, inputForward <-c
 	} else {
 		input, ok = <-b.ReadInputChan()
 	}
+	// 清除弹层（无论用户是否输入有效值）。
+	b.send(chatPermissionDoneMsg{})
+
 	if !ok {
 		return false, fmt.Errorf("EOF")
 	}

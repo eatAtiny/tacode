@@ -154,15 +154,19 @@ func TestConfirmPermission_InputForward(t *testing.T) {
 		t.Error("输入 y 应允许")
 	}
 
-	// 提示应进对话区（Close 同步等待事件循环处理完消息后读取，避免竞争）。
+	// 提示应显示为弹层（Close 同步等待事件循环处理完消息后读取，避免竞争）。
 	if err := b.Close(); err != nil {
 		t.Fatalf("Close error: %v", err)
 	}
-	if len(b.chat.lines) < 1 {
-		t.Fatalf("lines = %d, want >= 1（权限确认提示应进对话区）", len(b.chat.lines))
-	}
-	if !strings.Contains(b.chat.lines[0].text, "权限确认") {
-		t.Errorf("对话区首行应为权限确认提示，实际: %q", b.chat.lines[0].text)
+	// 确认完成后弹层应清除；确认前应显示（此处已完成，验证流程无 panic）。
+	// 弹层内容由 View 渲染，直接验证 renderPermissionLayer 输出。
+	m := NewChatModel()
+	m.permLayer = &permissionLayer{tool: "shell", args: `{"command":"rm -rf /"}`, reason: "高风险操作"}
+	layer := m.renderPermissionLayer()
+	for _, want := range []string{"权限确认", "shell", "rm -rf", "高风险操作", "y 允许"} {
+		if !strings.Contains(layer, want) {
+			t.Errorf("权限弹层应含 %q，实际:\n%s", want, layer)
+		}
 	}
 }
 

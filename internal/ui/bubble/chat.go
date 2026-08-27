@@ -94,6 +94,10 @@ type (
 	}
 	// chatPickerResultMsg 选择器结果（选中会话 ID 或空=取消）。
 	chatPickerResultMsg struct{ selected string }
+	// chatPermissionMsg 权限确认弹层（ConfirmPermission 触发，工具执行前）。
+	chatPermissionMsg struct{ tool, args, reason string }
+	// chatPermissionDoneMsg 权限确认完成（用户已输入 y/N，清除弹层）。
+	chatPermissionDoneMsg struct{}
 )
 
 // chatLine 对话区的一行（渲染后文本）。
@@ -138,6 +142,16 @@ type ChatModel struct {
 	picker *session.SessionPickerModel
 	// pickerDone 选择器结果回传 channel（BubbleUI 从这读选择结果）。
 	pickerDone chan string
+
+	// permLayer 权限确认弹层（非 nil = 有权限确认在等，View 渲染弹层）。
+	permLayer *permissionLayer
+}
+
+// permissionLayer 权限确认弹层状态。
+type permissionLayer struct {
+	tool   string // 需要确认的工具名
+	args   string // 工具参数
+	reason string // 确认原因
 }
 
 // NewChatModel 创建聊天模型。
@@ -310,6 +324,12 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 选择结果（理论不经此消息，结果走 pickerDone channel；保留兜底）。
 		m.picking = false
 		m.picker = nil
+	case chatPermissionMsg:
+		// 权限确认弹层：工具执行前显示（覆盖在输入框上方）。
+		m.permLayer = &permissionLayer{tool: v.tool, args: v.args, reason: v.reason}
+	case chatPermissionDoneMsg:
+		// 权限确认完成：清除弹层。
+		m.permLayer = nil
 	}
 
 	return m, tea.Batch(cmds...)
@@ -376,7 +396,8 @@ func (m *ChatModel) refresh() {
 }
 
 // View 渲染整屏。
-// 选择器模式（picking）时渲染会话选择器，否则渲染对话区 + 输入框 + footer。
+// 选择器模式（picking）时渲染会话选择器；权限确认（permLayer）时在输入框上方
+// 渲染弹层；否则渲染对话区 + 输入框 + footer。
 func (m *ChatModel) View() string {
 	if m.picking && m.picker != nil {
 		return lipgloss.JoinVertical(lipgloss.Left,
@@ -384,11 +405,34 @@ func (m *ChatModel) View() string {
 			lipgloss.NewStyle().Height(1).Faint(true).Render("↑↓ 移动 · Enter 切换 · Esc 取消"),
 		)
 	}
-	return lipgloss.JoinVertical(lipgloss.Left,
-		m.viewport.View(),
-		m.textarea.View(),
-		m.renderFooter(),
-	)
+	parts := []string{m.viewport.View()}
+	if m.permLayer != nil {
+		parts = append(parts, m.renderPermissionLayer())
+	}
+	parts = append(parts, m.textarea.View(), m.renderFooter())
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// renderPermissionLayer 渲染权限确认弹层。
+// 显示在输入框上方，黄色警告框，提示工具/参数/原因 + 输入方式。
+func (m *ChatModel) renderPermissionLayer() string {
+	style := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("11")). // 黄色
+		Bold(true).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("11")).
+		Padding(0, 1)
+
+	content := fmt.Sprintf("⚠️ 权限确认: %s", m.permLayer.tool)
+	if m.permLayer.args != "" {
+		content += "\n  参数: " + m.permLayer.args
+	}
+	if m.permLayer.reason != "" {
+		content += "\n  原因: " + m.permLayer.reason
+	}
+	content += "\n  输入 y 允许 / n 拒绝"
+
+	return style.Render(content)
 }
 
 // renderFooter 底部状态栏。
