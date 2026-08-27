@@ -157,20 +157,18 @@ func TestChatModel_StreamingMerge(t *testing.T) {
 		t.Errorf("流式行应带 ▌ 光标标记，实际:\n%s", v)
 	}
 
-	// final 关闭流式行，追加最终回答。
+	// final 用渲染后的最终回答原地替换流式行（增量与最终回答同源，避免双份显示），
+	// streaming 标记关闭。
 	m.Update(chatFinalMsg{content: "回答", totalTokens: 0})
 	if m.lines[0].streaming {
 		t.Error("final 后流式行 streaming 标记应关闭")
 	}
-	if len(m.lines) != 2 {
-		t.Fatalf("lines = %d, want 2（流式行 + 最终回答）", len(m.lines))
+	if len(m.lines) != 1 {
+		t.Fatalf("lines = %d, want 1（final 应替换流式行而非追加）", len(m.lines))
 	}
-	// 对话区同时含流式文本与最终回答。
-	if !strings.Contains(m.lines[0].text, "你好，世界！") {
-		t.Errorf("流式行应保留流式文本，实际: %q", m.lines[0].text)
-	}
-	if !strings.Contains(m.lines[1].text, "回答") {
-		t.Errorf("最终回答行应含回答，实际: %q", m.lines[1].text)
+	// 流式文本已被最终回答替换（不再双份显示）。
+	if !strings.Contains(m.lines[0].text, "回答") {
+		t.Errorf("流式行应被最终回答替换，实际: %q", m.lines[0].text)
 	}
 }
 

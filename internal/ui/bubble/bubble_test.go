@@ -129,3 +129,77 @@ func TestStart_Idempotent(t *testing.T) {
 		t.Fatalf("Close error: %v", err)
 	}
 }
+
+// 权限确认：提示进对话区 + 输入从 inputForward 读取（查询运行中链路）。
+// 注：textarea 提交 → submitCh → Runner → inputForward 的转发由 Runner 主循环
+// 负责（已有 TestReadInputChan_BridgesSubmitCh 覆盖桥接），此处直接写入
+// inputForward 模拟已转发的确认输入；提示经 Program.Send 进对话区。
+func TestConfirmPermission_InputForward(t *testing.T) {
+	b := startTest(t)
+
+	// 模拟查询运行中：Runner 主循环已把 textarea 提交转发到 inputForward。
+	inputForward := make(chan string, 1)
+	go func() {
+		inputForward <- "y"
+	}()
+
+	approved, err := b.ConfirmPermission("shell", `{"command":"rm -rf /"}`, "高风险操作", inputForward)
+	if err != nil {
+		t.Fatalf("ConfirmPermission error: %v", err)
+	}
+	if !approved {
+		t.Error("输入 y 应允许")
+	}
+
+	// 提示应进对话区（Close 同步等待事件循环处理完消息后读取，避免竞争）。
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+	if len(b.chat.lines) < 1 {
+		t.Fatalf("lines = %d, want >= 1（权限确认提示应进对话区）", len(b.chat.lines))
+	}
+	if !strings.Contains(b.chat.lines[0].text, "权限确认") {
+		t.Errorf("对话区首行应为权限确认提示，实际: %q", b.chat.lines[0].text)
+	}
+}
+
+// 权限确认：输入 n / 其他内容应拒绝。
+func TestConfirmPermission_Reject(t *testing.T) {
+	b := NewBubbleUI()
+	if err := b.Start(testStartOpts()...); err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+	defer b.Close()
+
+	inputForward := make(chan string, 1)
+	go func() {
+		inputForward <- "n"
+	}()
+
+	approved, err := b.ConfirmPermission("shell", `{"command":"rm -rf /"}`, "", inputForward)
+	if err != nil {
+		t.Fatalf("ConfirmPermission error: %v", err)
+	}
+	if approved {
+		t.Error("输入 n 应拒绝")
+	}
+}
+
+// 权限确认：inputForward 为 nil 时回退 ReadInputChan（textarea 提交 channel）。
+// 不 Start（无 tea 程序，send 丢弃消息，直接 Update ChatModel 无并发写者）。
+func TestConfirmPermission_FallbackReadInputChan(t *testing.T) {
+	b := NewBubbleUI()
+
+	go func() {
+		b.chat.textarea.SetValue("yes")
+		b.chat.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	}()
+
+	approved, err := b.ConfirmPermission("shell", `{"command":"ls"}`, "", nil)
+	if err != nil {
+		t.Fatalf("ConfirmPermission error: %v", err)
+	}
+	if !approved {
+		t.Error("输入 yes 应允许")
+	}
+}

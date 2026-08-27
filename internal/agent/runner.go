@@ -12,6 +12,7 @@ import (
 	"agentic/internal/session"
 	"agentic/internal/tool"
 	"agentic/internal/ui"
+	"agentic/internal/ui/bubble"
 )
 
 // ReAct 最大循环次数，防止无限循环。
@@ -66,6 +67,7 @@ type Runner struct {
 	tools      *tool.Registry          // 工具注册表
 	sessions   *session.SessionManager // 会话管理器
 	ui         ui.UI                   // UI 接口
+	chatUI     *bubble.BubbleUI        // 聊天 TUI 实现（非 nil = 聊天界面模式，tea 程序由 Run 启动）
 	config     *config.Config          // 运行时配置（nil = 全部默认）
 
 	isTemporary        bool   // 临时会话：启动时创建，有对话后才落盘
@@ -94,6 +96,8 @@ type Runner struct {
 //   - tools: 工具注册表
 //   - sessions: 会话管理器
 //   - uiInstance: UI 接口
+//     （聊天 TUI：BubbleUI 传入后由 Run() 启动 tea 程序，Runner 主循环不阻塞；
+//     one-shot/子 agent：TextUI 无 Start，RunOnce 走原路径）
 func NewRunner(
 	client *llm.OpenAIClient,
 	history *memory.HistoryStore,
@@ -106,7 +110,7 @@ func NewRunner(
 	sessions *session.SessionManager,
 	uiInstance ui.UI,
 ) *Runner {
-	return &Runner{
+	r := &Runner{
 		llm:       client,
 		history:   history,
 		summary:   summary,
@@ -118,6 +122,12 @@ func NewRunner(
 		sessions:  sessions,
 		ui:        uiInstance,
 	}
+	// 聊天 TUI 接线：UI 为 BubbleUI 时记录类型断言，
+	// Run() 用它启动 tea 程序（TextUI 等 headless 实现此字段为 nil，不受影响）。
+	if bui, ok := uiInstance.(*bubble.BubbleUI); ok {
+		r.chatUI = bui
+	}
+	return r
 }
 
 // SetConfig 注入运行时配置。
@@ -147,8 +157,16 @@ func (r *Runner) SetCompactor(c *Compactor) {
 	r.compactor = c
 }
 
+// isChatUI 判断是否聊天 TUI 模式（BubbleUI 全 tea 界面）。
+// 聊天界面下 tea 程序独占终端渲染，直接写 os.Stdout 会污染界面，相关输出一律跳过。
+func (r *Runner) isChatUI() bool { return r.chatUI != nil }
+
 // printPrompt 打印主屏输入提示符 "> "（追加式模型：输入框即流末尾的提示符）。
+// 聊天 TUI 模式：提示符由 textarea 渲染，跳过（写 os.Stdout 会污染 alt screen）。
 func (r *Runner) printPrompt() {
+	if r.isChatUI() {
+		return
+	}
 	fmt.Print("> ")
 	os.Stdout.Sync()
 }
@@ -203,6 +221,21 @@ func (r *Runner) compressThreshold() float64 {
 //
 // 启动时创建临时会话，只有真正对话后才落盘到 manifest。
 func (r *Runner) Run(ctx context.Context) error {
+	// ── 启动聊天 TUI（tea 程序） ──
+	// 聊天界面（BubbleUI）后台启动 tea.Program，Runner 主循环不阻塞：
+	//   - 事件方法（OnThink/OnDelta/...）→ Program.Send → ChatModel 渲染对话区
+	//   - 输入从 ChatModel 的 textarea 提交 channel（ReadInputChan）读取
+	// 必须在 Welcome 之前启动：send 在 program 为 nil 时丢弃消息，未启动就
+	// 调事件方法会丢欢迎信息。
+	// one-shot / 子 agent 模式（TextUI 等）类型断言失败，走原路径不受影响。
+	if bui, ok := r.ui.(*bubble.BubbleUI); ok {
+		if err := bui.Start(); err != nil {
+			r.ui.OnError(fmt.Errorf("聊天界面启动失败: %v", err))
+			return err
+		}
+		defer bui.Close()
+	}
+
 	// ── 启动临时会话 ──
 	// 临时会话不在 manifest 中，首次对话后通过 ensurePersisted 落盘。
 	if err := r.initTempSession(); err != nil {

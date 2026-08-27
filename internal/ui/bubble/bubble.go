@@ -13,7 +13,8 @@
 //   - 流式文本：delta 经 chatDeltaMsg 追加对话区（逐 token 增量显示）
 //   - Markdown 渲染：最终回答经 Glamour 渲染为终端友好的格式
 //   - 框线输出：工具调用和结果用 box.go 的 Unicode 框线字符绘制
-//   - 权限确认：暂从 ReadInputChan 读取（Task 3 处理聊天界面下的确认输入）
+//   - 权限确认：提示进对话区 + 输入经 textarea 提交流转（Runner 查询运行时
+//     转发到 inputForward，ConfirmPermission 从该 channel 读取）
 //
 // 架构调整背景（2026-08）：追加式主屏（rawInputLoop 逐 rune 输入 + ANSI 光标
 // 控制）实测体验不佳，方案确定为全 tea 渲染聊天界面（参照 j178/chatgpt），
@@ -206,9 +207,21 @@ func (b *BubbleUI) ShowBalance(line string) {
 }
 
 // ConfirmPermission 显示权限确认提示，等待用户输入。
-// 聊天界面下确认输入从 ReadInputChan 读取（Task 3 处理聊天界面下的
-// 确认输入流转，本任务保持与追加式一致的语义：inputForward 优先）。
+//
+// 聊天界面下的确认输入流转（链路）：
+//   textarea 提交 → ChatModel.submitCh → Runner.Run() 主循环
+//     → queryRunning 分支转发到 inputForward（查询运行中非 nil）
+//     → ConfirmPermission 从 inputForward 读取
+// 提示先发进对话区（chatMessageMsg），用户据此在 textarea 输入 y/N 回车。
+// inputForward 为 nil（无运行中查询，理论不发生）时回退 ReadInputChan。
 func (b *BubbleUI) ConfirmPermission(tool, args, reason string, inputForward <-chan string) (bool, error) {
+	// 提示进对话区（用户需在 textarea 输入确认，不提示会丢失上下文）。
+	msg := fmt.Sprintf("⚠️ 权限确认: %s（参数: %s）允许? y/N", tool, args)
+	if reason != "" {
+		msg = fmt.Sprintf("%s\n原因: %s", msg, reason)
+	}
+	b.send(chatMessageMsg{content: msg})
+
 	var input string
 	var ok bool
 	if inputForward != nil {

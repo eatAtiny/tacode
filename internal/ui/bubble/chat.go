@@ -173,11 +173,24 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatDeltaMsg:
 		m.appendStreaming(v.content)
 	case chatFinalMsg:
-		// 关闭进行中的流式增量行（若有）。
-		m.closeStreaming()
-		// Markdown 渲染最终回答，带助手前缀与 2 空格缩进（复用 box.go 的 finalAnswerText）。
-		rendered := finalAnswerText(m, v.content)
-		m.lines = append(m.lines, chatLine{text: m.renderAssistant() + rendered})
+		// 最终回答：渲染 Markdown 追加对话区。
+		// 无工具调用的直接回答：流式增量已逐 token 累积到最后一条流式行
+		// （appendStreaming 合并），用渲染后的完整回答原地替换该行——
+		// 增量内容与最终回答同源，否则同一答案会在对话区显示两遍。
+		if len(m.lines) > 0 && m.lines[len(m.lines)-1].streaming {
+			last := &m.lines[len(m.lines)-1]
+			if v.content != "" {
+				last.text = m.renderAssistant() + finalAnswerText(m, v.content)
+			}
+			last.streaming = false
+		} else {
+			// 无进行中的流式行（工具调用/空增量场景）：直接追加渲染版。
+			m.closeStreaming()
+			if v.content != "" {
+				rendered := finalAnswerText(m, v.content)
+				m.lines = append(m.lines, chatLine{text: m.renderAssistant() + rendered})
+			}
+		}
 		m.scrollBottom()
 		// 本轮 token 统计（精确值，来自 API usage；totalTokens 为 0 时跳过，
 		// 避免误导——API 未返回 usage）。
@@ -243,8 +256,9 @@ func (m *ChatModel) appendStreaming(content string) {
 	m.scrollBottom()
 }
 
-// closeStreaming 关闭进行中的流式行（OnFinal/OnToolCall/OnToolResult 前调用）。
+// closeStreaming 关闭进行中的流式行（chatToolCall/chatToolResult 前调用）。
 // 流式行仍是对话区的一部分（内容保留），只是停止累积增量。
+// 注意：chatFinalMsg 不再走此路径——它用渲染后的最终回答原地替换流式行（防双份显示）。
 func (m *ChatModel) closeStreaming() {
 	if len(m.lines) > 0 {
 		m.lines[len(m.lines)-1].streaming = false
