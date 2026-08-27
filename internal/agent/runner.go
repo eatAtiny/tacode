@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 
 	"agentic/internal/config"
 	"agentic/internal/llm"
@@ -12,6 +13,7 @@ import (
 	"agentic/internal/session"
 	"agentic/internal/tool"
 	"agentic/internal/ui"
+	"agentic/internal/ui/bubble"
 )
 
 // ReAct 最大循环次数，防止无限循环。
@@ -66,6 +68,7 @@ type Runner struct {
 	tools      *tool.Registry          // 工具注册表
 	sessions   *session.SessionManager // 会话管理器
 	ui         ui.UI                   // UI 接口
+	chatUI     *bubble.BubbleUI        // 聊天 TUI 实现（非 nil = 聊天界面模式，tea 程序由 Run 启动）
 	config     *config.Config          // 运行时配置（nil = 全部默认）
 
 	isTemporary        bool   // 临时会话：启动时创建，有对话后才落盘
@@ -77,8 +80,14 @@ type Runner struct {
 	memoryPreamble string     // 记忆 preamble 缓存（<system-reminder> 内容，会话内字节稳定，仅切换/首轮重建）
 	compactor      *Compactor // s08 四步压缩管线（nil = 禁用）
 
-	showBalance      bool // 每轮结束是否展示余额（/balance 成功后开启）
-	balanceFailCount int  // 连续余额查询失败次数（达到阈值时提示一次，防止静默失效）
+	balanceFailCount atomic.Int32 // 连续余额查询失败次数（达到阈值时提示一次，防止静默失效）
+
+	// pendingInputs 查询运行中排队的用户输入（查询结束后自动作为下一轮处理）。
+	// 仅 Run() 主循环 goroutine 访问，无需锁。
+	pendingInputs []string
+	// permWaiting 是否有权限确认正在等待输入（queryEngine 设置，主循环读取）。
+	// 用 atomic 跨 goroutine 同步：queryEngine 在 ConfirmPermission 前后翻转。
+	permWaiting atomic.Bool
 }
 
 // NewRunner 构造 Agent 执行器。
@@ -94,6 +103,8 @@ type Runner struct {
 //   - tools: 工具注册表
 //   - sessions: 会话管理器
 //   - uiInstance: UI 接口
+//     （聊天 TUI：BubbleUI 传入后由 Run() 启动 tea 程序，Runner 主循环不阻塞；
+//     one-shot/子 agent：TextUI 无 Start，RunOnce 走原路径）
 func NewRunner(
 	client *llm.OpenAIClient,
 	history *memory.HistoryStore,
@@ -106,7 +117,7 @@ func NewRunner(
 	sessions *session.SessionManager,
 	uiInstance ui.UI,
 ) *Runner {
-	return &Runner{
+	r := &Runner{
 		llm:       client,
 		history:   history,
 		summary:   summary,
@@ -118,6 +129,12 @@ func NewRunner(
 		sessions:  sessions,
 		ui:        uiInstance,
 	}
+	// 聊天 TUI 接线：UI 为 BubbleUI 时记录类型断言，
+	// Run() 用它启动 tea 程序（TextUI 等 headless 实现此字段为 nil，不受影响）。
+	if bui, ok := uiInstance.(*bubble.BubbleUI); ok {
+		r.chatUI = bui
+	}
+	return r
 }
 
 // SetConfig 注入运行时配置。
@@ -145,6 +162,20 @@ func (r *Runner) SetMemoryStores(globalStore, projectStore *memory.MemoryStore) 
 // nil = 禁用压缩（保持旧行为）。在 Run/RunOnce 之前调用。
 func (r *Runner) SetCompactor(c *Compactor) {
 	r.compactor = c
+}
+
+// isChatUI 判断是否聊天 TUI 模式（BubbleUI 全 tea 界面）。
+// 聊天界面下 tea 程序独占终端渲染，直接写 os.Stdout 会污染界面，相关输出一律跳过。
+func (r *Runner) isChatUI() bool { return r.chatUI != nil }
+
+// printPrompt 打印主屏输入提示符 "> "（追加式模型：输入框即流末尾的提示符）。
+// 聊天 TUI 模式：提示符由 textarea 渲染，跳过（写 os.Stdout 会污染 alt screen）。
+func (r *Runner) printPrompt() {
+	if r.isChatUI() {
+		return
+	}
+	fmt.Print("> ")
+	os.Stdout.Sync()
 }
 
 // maxIter 返回 ReAct 最大循环次数。
@@ -197,22 +228,44 @@ func (r *Runner) compressThreshold() float64 {
 //
 // 启动时创建临时会话，只有真正对话后才落盘到 manifest。
 func (r *Runner) Run(ctx context.Context) error {
+	// ── 启动聊天 TUI（tea 程序） ──
+	// 聊天界面（BubbleUI）后台启动 tea.Program，Runner 主循环不阻塞：
+	//   - 事件方法（OnThink/OnDelta/...）→ Program.Send → ChatModel 渲染对话区
+	//   - 输入从 ChatModel 的 textarea 提交 channel（ReadInputChan）读取
+	// 必须在 Welcome 之前启动：send 在 program 为 nil 时丢弃消息，未启动就
+	// 调事件方法会丢欢迎信息。
+	// one-shot / 子 agent 模式（TextUI 等）类型断言失败，走原路径不受影响。
+	if bui, ok := r.ui.(*bubble.BubbleUI); ok {
+		if err := bui.Start(); err != nil {
+			r.ui.OnError(fmt.Errorf("聊天界面启动失败: %v", err))
+			return err
+		}
+		defer bui.Close()
+	}
+
 	// ── 启动临时会话 ──
 	// 临时会话不在 manifest 中，首次对话后通过 ensurePersisted 落盘。
 	if err := r.initTempSession(); err != nil {
 		return err
 	}
 
-	// 设置 UI 初始状态。
-	r.ui.SetSessionName("new")
-	r.ui.SetModel(r.llm.Model())
-
 	// 显示欢迎信息。
 	r.ui.Welcome(r.llm.Model())
 
+	// ── 启动状态初始化（footer 状态栏立即有数据） ──
+	// 1. 上下文占用：初始为空（0 字符），显示 "上下文 0/50K (0%)"。
+	// 2. 余额：自动查询一次（无需手动 /balance），成功显示在 footer；
+	//    失败静默（启动不打扰，后续 /balance 可手动查询）。
+	if r.compactor != nil {
+		r.ui.UpdateContext(0, r.compactor.Limit())
+	}
+	go r.queryBalance()
+
 	// ── 启动异步输入读取 ──
-	// inputCh 是后台 goroutine 持续读取用户输入的 channel。
-	inputCh := r.ui.ReadInputChan()
+	// 追加式模型：统一走 UI 的 raw 输入通道（ReadInputChan），
+	// 输入即流末尾的提示符行，无 tea 输入桥接。
+	var inputCh <-chan string
+	inputCh = r.ui.ReadInputChan()
 
 	// ── 查询状态变量 ──
 	var queryResultCh <-chan queryResult // 查询结果 channel（nil 表示无运行中的查询）
@@ -222,14 +275,17 @@ func (r *Runner) Run(ctx context.Context) error {
 	var currentInput string              // 当前查询的用户输入，用于保存记忆
 	var inputForward chan string         // 查询期间转发输入到此 channel（权限确认等）
 
+	// 排队输入重放 channel：查询结束时把 pendingInputs 弹出一条投递到此，
+	// 与 inputCh 走同一套分支 A 处理逻辑（空输入/exit/命令/查询）。
+	pendingReplayCh := make(chan string, 4)
+
 	// 显示初始提示符（立即 flush 确保在用户输入前显示）。
-	fmt.Print("> ")
-	os.Stdout.Sync()
+	r.printPrompt()
 
 	for {
 		select {
 		// ──────────────────────────────────────────
-		// 分支 A: 收到用户输入
+		// 分支 A: 收到用户输入（主输入通道 或 排队重放）
 		// ──────────────────────────────────────────
 		case input, ok := <-inputCh:
 			if !ok {
@@ -239,79 +295,16 @@ func (r *Runner) Run(ctx context.Context) error {
 				}
 				return nil
 			}
-
-			if input == "" {
-				if !queryRunning {
-					fmt.Print("> ")
-					os.Stdout.Sync()
-				}
-				continue
-			}
-
-			// "exit" 退出程序。
-			if strings.EqualFold(input, "exit") {
-				if queryRunning {
-					queryCancel()
-				}
+			// 排队输入重放与主输入走同一处理逻辑。
+			if exit := r.handleInput(input, ctx, &queryResultCh, &queryCancel, &queryRunning, &round, &currentInput, &inputForward, &r.pendingInputs); exit {
 				return nil
 			}
 
-			// ── 子分支 A1: 查询运行中 ──
-			// 输入转发给查询侧（/stop 优先）。
-			if queryRunning {
-				if input == "/stop" {
-					queryCancel()
-					queryRunning = false
-					inputForward = nil
-					r.ui.OnMessage("⏹️  已停止")
-					round++
-					fmt.Print("> ")
-					os.Stdout.Sync()
-				} else if inputForward != nil {
-					// 转发给 query 侧（权限确认等场景）。
-					inputForward <- input
-				}
-				continue
+		// 分支 A2: 排队输入重放（查询结束后自动处理用户查询中输入的下一条）。
+		case input := <-pendingReplayCh:
+			if exit := r.handleInput(input, ctx, &queryResultCh, &queryCancel, &queryRunning, &round, &currentInput, &inputForward, &r.pendingInputs); exit {
+				return nil
 			}
-
-			// ── 子分支 A2: 空闲状态，处理输入 ──
-			if strings.HasPrefix(input, "/") {
-				// 处理会话管理命令。
-				newRound, handled := r.handleSessionCommand(input)
-				if handled {
-					if newRound > 0 {
-						round = newRound - 1
-					}
-				} else {
-					r.ui.OnError(fmt.Errorf("未知命令，可用: /new, /list, /switch, /delete, /rename, /current, /compress, /memory, /reload, /balance"))
-				}
-				round++
-				fmt.Print("> ")
-				os.Stdout.Sync()
-				continue
-			}
-
-			// ── 子分支 A3: 普通输入，启动异步查询 ──
-			round++
-			r.ui.ResetTokens()
-
-			// 记录用户输入事件。
-			r.events.Append(memory.Event{
-				Type:    memory.EventUser,
-				Round:   round,
-				Content: input,
-			})
-
-			// 创建可取消的 context（用于 /stop）。
-			queryCtx, cancel := context.WithCancel(ctx)
-			queryCancel = cancel
-			queryRunning = true
-			currentInput = input
-			inputForward = make(chan string, 1)
-
-			// 启动后台 goroutine 执行查询。
-			// queryResultCh 收到结果后触发下面的分支 B。
-			queryResultCh = r.runQueryAsync(queryCtx, round, input, inputForward)
 
 		// ──────────────────────────────────────────
 		// 分支 B: 收到查询结果
@@ -363,10 +356,126 @@ func (r *Runner) Run(ctx context.Context) error {
 				}(round, currentInput, result.answer)
 			}
 
-			fmt.Print("> ")
-			os.Stdout.Sync()
+			r.printPrompt()
+
+			// 查询结束：自动处理查询期间排队的输入（Bug 2 修复——用户查询中
+			// 输入的下一条消息在回答完成后自动作为下一轮输入发送）。
+			// 只重放第一条，剩余继续排队（每轮查询结束处理一条，保持顺序）。
+			if len(r.pendingInputs) > 0 {
+				next := r.pendingInputs[0]
+				r.pendingInputs = r.pendingInputs[1:]
+				pendingReplayCh <- next
+			}
 		}
 	}
+}
+
+// handleInput 处理一条用户输入（主输入通道与排队重放共用）。
+//
+// 参数（指针，runInput 状态由 Run() 主循环持有，本方法修改后由主循环继续使用）：
+//   - queryResultCh: 查询结果 channel（启动查询时写入，nil 表示无运行中的查询）
+//   - queryCancel:   取消函数（/stop 用）
+//   - queryRunning:  是否有查询正在运行
+//   - round:         当前轮次号
+//   - currentInput:  当前查询的用户输入（保存记忆用）
+//   - inputForward:  权限确认转发 channel
+//   - pendingInputs: 查询运行中排队的输入
+//
+// 返回 true 表示退出（exit 命令或 EOF）。
+func (r *Runner) handleInput(
+	input string,
+	ctx context.Context,
+	queryResultCh *<-chan queryResult,
+	queryCancel *context.CancelFunc,
+	queryRunning *bool,
+	round *int,
+	currentInput *string,
+	inputForward *chan string,
+	pendingInputs *[]string,
+) bool {
+	if input == "" {
+		if !*queryRunning {
+			r.printPrompt()
+		}
+		return false
+	}
+
+	// "exit" 退出程序。
+	if strings.EqualFold(input, "exit") {
+		if *queryRunning {
+			(*queryCancel)()
+		}
+		return true
+	}
+
+	// ── 查询运行中 ──
+	// 输入处理策略：
+	//   - /stop        → 取消当前查询
+	//   - 权限确认在等 → 转发给 query 侧（ConfirmPermission 阻塞读 inputForward）
+	//   - 其他          → 排队（pendingInputs），查询结束后自动作为下一轮输入
+	// 旧实现无条件 `inputForward <- input`：无权限确认时 channel 无人读，
+	// 第 2 条输入即阻塞冻结主循环（Bug 2 根因）。
+	if *queryRunning {
+		if input == "/stop" {
+			(*queryCancel)()
+			*queryRunning = false
+			*inputForward = nil
+			r.ui.OnMessage("⏹️  已停止")
+			*round++
+			r.printPrompt()
+		} else if r.permWaiting.Load() {
+			// 权限确认：转发给 ConfirmPermission（阻塞读 inputForward）。
+			// 非阻塞发送避免 channel 满时冻结主循环；缓冲 1 一般有空位。
+			select {
+			case *inputForward <- input:
+			default:
+				// 缓冲满（异常）：丢弃，避免阻塞。
+			}
+		} else {
+			// 普通查询运行中：排队，查询结束后自动处理。
+			*pendingInputs = append(*pendingInputs, input)
+			r.ui.OnMessage("💬 输入已排队，当前查询结束后自动发送")
+		}
+		return false
+	}
+
+	// ── 空闲状态，处理输入 ──
+	if strings.HasPrefix(input, "/") {
+		// 处理会话管理命令。
+		newRound, handled := r.handleSessionCommand(input)
+		if handled {
+			if newRound > 0 {
+				*round = newRound - 1
+			}
+		} else {
+			r.ui.OnError(fmt.Errorf("未知命令，可用: /new, /list, /switch, /delete, /rename, /current, /compress, /memory, /reload, /balance"))
+		}
+		*round++
+		r.printPrompt()
+		return false
+	}
+
+	// ── 普通输入，启动异步查询 ──
+	*round++
+
+	// 记录用户输入事件。
+	r.events.Append(memory.Event{
+		Type:    memory.EventUser,
+		Round:   *round,
+		Content: input,
+	})
+
+	// 创建可取消的 context（用于 /stop）。
+	queryCtx, cancel := context.WithCancel(ctx)
+	*queryCancel = cancel
+	*queryRunning = true
+	*currentInput = input
+	*inputForward = make(chan string, 1)
+
+	// 启动后台 goroutine 执行查询。
+	// queryResultCh 收到结果后触发分支 B。
+	*queryResultCh = r.runQueryAsync(queryCtx, *round, input, *inputForward)
+	return false
 }
 
 // initTempSession 启动临时会话：分配 ID、将各 store 指向临时目录。
@@ -420,10 +529,6 @@ func (r *Runner) RunOnce(ctx context.Context, input string) (string, error) {
 	if err := r.initTempSession(); err != nil {
 		return "", err
 	}
-
-	// 设置 UI 初始状态（TextUI 中为空操作，保持调用统一）。
-	r.ui.SetSessionName("new")
-	r.ui.SetModel(r.llm.Model())
 
 	// ── 记录用户输入事件（与 Run() 一致） ──
 	r.events.Append(memory.Event{
@@ -481,10 +586,12 @@ func (r *Runner) runQueryAsync(ctx context.Context, round int, input string, inp
 	return ch
 }
 
-// handleListCommand 处理 /list 命令，管理 Pause/Resume 生命周期。
+// handleListCommand 处理 /list 命令。
+// 聊天 TUI（BubbleUI）下选择器融合进主渲染循环（不另起 tea 程序）；
+// TextUI/headless 下用独立 tea 程序前台运行。
 func (r *Runner) handleListCommand() (int, bool) {
-	// 运行选择器（独占终端输入，主 UI 不用 Bubble Tea 所以无需暂停）。
-	selected, err := session.RunSessionPicker(r.sessions.List(), r.sessions.ActiveID())
+	// 运行选择器（UI 接口统一入口，实现差异在各 UI）。
+	selected, err := r.ui.RunSessionPicker(r.sessions.List(), r.sessions.ActiveID())
 	if err != nil {
 		r.ui.OnError(fmt.Errorf("选择器错误: %v", err))
 		return 0, true

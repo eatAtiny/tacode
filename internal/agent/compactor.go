@@ -41,23 +41,23 @@ import (
 
 // 常量（镜像 s08）。
 const (
-	contextCharLimit         = 50_000   // 上下文字符上限（触发 micro/fit/compact）
-	toolResultBatchCharLimit = 200_000  // 单批工具结果总量上限（触发转存）
-	largeResultCharLimit     = 30_000   // 单条结果大结果阈值（超过才转存）
-	summaryInputCharLimit    = 80_000   // 摘要输入字符上限（超出 head+tail 截断）
-	keepRecentResults        = 3        // microCompact 保留的最近已消费结果数
-	keepRecentMessages       = 5        // reactiveCompact 保留的最近消息数
-	maxReactiveRetries       = 1        // prompt_too_long 补救重试上限
-	snipMaxMessages          = 50       // 消息数上限（超过触发归档）
-	microShortenCharLimit    = 120      // microCompact 缩短阈值（<=120 字符的结果不动）
+	contextCharLimit         = 50_000  // 上下文字符上限（触发 micro/fit/compact）
+	toolResultBatchCharLimit = 200_000 // 单批工具结果总量上限（触发转存）
+	largeResultCharLimit     = 30_000  // 单条结果大结果阈值（超过才转存）
+	summaryInputCharLimit    = 80_000  // 摘要输入字符上限（超出 head+tail 截断）
+	keepRecentResults        = 3       // microCompact 保留的最近已消费结果数
+	keepRecentMessages       = 5       // reactiveCompact 保留的最近消息数
+	maxReactiveRetries       = 1       // prompt_too_long 补救重试上限
+	snipMaxMessages          = 50      // 消息数上限（超过触发归档）
+	microShortenCharLimit    = 120     // microCompact 缩短阈值（<=120 字符的结果不动）
 )
 
 // Compactor 实现 s08 四步压缩管线。
 type Compactor struct {
-	transcriptDir    string // transcript 归档目录（<sessionDir>/transcripts）
-	toolResultsDir   string // 大结果转存目录（<sessionDir>/tool-results）
+	transcriptDir    string            // transcript 归档目录（<sessionDir>/transcripts）
+	toolResultsDir   string            // 大结果转存目录（<sessionDir>/tool-results）
 	llmClient        *llm.OpenAIClient // LLM 客户端（compactHistory/reactiveCompact 摘要用），nil = 跳过摘要
-	contextCharLimit int    // 上下文字符上限（默认 contextCharLimit）
+	contextCharLimit int               // 上下文字符上限（默认 contextCharLimit）
 }
 
 // NewCompactor 构造 Compactor。
@@ -131,6 +131,15 @@ func (c *Compactor) limit() int {
 		return c.contextCharLimit
 	}
 	return contextCharLimit
+}
+
+// Limit 返回上下文字符上限（UI 上下文占用显示用）。
+func (c *Compactor) Limit() int { return c.limit() }
+
+// EstimateMessagesChars 估算消息数组的字符数（UI 上下文占用显示用）。
+// 与压缩管线 estimateMessagesChars 同一口径（JSON 序列化长度）。
+func (c *Compactor) EstimateMessagesChars(messages []llm.ChatMessage) int {
+	return estimateChars(messages)
 }
 
 // estimateMessagesChars 估算消息数组字符数（带 system 保护）。

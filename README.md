@@ -55,15 +55,13 @@ agentic/
     ui/
       ui.go                            # UI 接口定义（ReadInput / OnThink / OnDelta / OnToolCall ...）
       bubble/
-        bubble.go                      # BubbleUI：终端美化 UI（Lip Gloss + Glamour 渲染）
+        bubble.go                      # BubbleUI：全 tea 聊天界面包装器（事件→Program.Send、输入桥接）
+        chat.go                        # ChatModel：全 tea 聊天界面（viewport 对话区 + textarea 输入 + footer）
+        box.go                         # 工具调用/结果框线渲染
+        welcome.go                     # Claude Code 风格欢迎界面
         bubble_test.go                 # BubbleUI 测试
       text/
         text.go                        # TextUI：headless 模式（OnEvent 回调转发）
-      components/
-        conversation.go                # 对话历史组件（滚动、Markdown 渲染）
-        input.go                       # 输入组件
-        status.go                      # 状态栏组件
-        toolview.go                    # 工具调用视图组件
       integration_test.go              # UI 集成测试
 ```
 
@@ -129,9 +127,8 @@ main.go
        ├─ internal/session    (session.go, picker.go) — 会话管理 + 选择器
        ├─ internal/tool       (tool.go, shell.go, file.go) — 工具注册 + 实现
        └─ internal/ui         (ui.go) — UI 接口
-            ├─ ui/bubble/     — BubbleUI 终端实现
-            ├─ ui/text/       — TextUI headless 实现
-            └─ ui/components/ — 可复用 UI 组件
+            ├─ ui/bubble/     — BubbleUI 全 tea 聊天界面（chat.go + bubble.go + box.go）
+            └─ ui/text/       — TextUI headless 实现
 ```
 
 ### 两层查询架构
@@ -243,9 +240,8 @@ data/sessions/
 
 项目定义了 `ui.UI` 接口，所有 UI 操作都通过此接口完成，实现可插拔：
 
-- **BubbleUI** (`ui/bubble/`)：终端美化 UI，使用 Lip Gloss 样式 + Glamour Markdown 渲染，支持流式文本、工具调用框线、权限确认
+- **BubbleUI** (`ui/bubble/`)：全 tea 渲染聊天界面（参照 j178/chatgpt 模式）。`chat.go` 的 `ChatModel` 用 `bubbles.Viewport`（对话区滚动）+ `bubbles.Textarea`（输入）+ `glamour`（Markdown 渲染）全屏渲染；`bubble.go` 是 tea 包装器——UI 事件（OnThink/OnDelta/OnFinal 等）经 `Program.Send` 投递，输入由 textarea 接管；`box.go` 提供工具调用/结果框线
 - **TextUI** (`ui/text/`)：headless 模式，通过 `OnEvent` 回调将事件转发给上层，适用于子 agent 场景
-- **Components** (`ui/components/`)：可复用的 Bubble Tea 组件（对话历史、输入栏、状态栏、工具视图）
 
 ## 权限系统
 

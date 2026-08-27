@@ -9,8 +9,13 @@
 //  1. 输入组：ReadInput / ReadInputChan — 读取用户输入
 //  2. 事件通知组：OnThink / OnDelta / OnToolCall / OnToolResult / OnContinue / OnFinal / OnError / OnMessage / ShowBalance
 //  3. 交互组：ConfirmPermission — 权限确认
-//  4. 生命周期组：Welcome / Close / SetSessionName / SetModel / UpdateTokens / ResetTokens
+//  4. 生命周期组：Welcome / Close
 package ui
+
+import (
+	"agentic/internal/memory"
+	"agentic/internal/session"
+)
 
 // UI 定义了 Agent 与用户交互的接口。
 // 所有 UI 操作都通过此接口完成，Agent 核心不直接操作终端或 Web。
@@ -119,6 +124,22 @@ type UI interface {
 	// line 是已格式化的单行文本，如 "💰 余额: ¥110.00（充值 ¥100.00 / 赠金 ¥10.00）"。
 	ShowBalance(line string)
 
+	// UpdateContext 更新上下文占用（每轮 Final 后 + 启动时触发，状态栏常驻展示）。
+	// usedChars 是当前消息数组估算字符数，contextCharLimit 是压缩触发的字符上限
+	// （与 Compactor 的 context_char_limit 同一口径）。contextCharLimit 为 0 时
+	// UI 应跳过展示（数据未就绪）。
+	UpdateContext(usedChars, contextCharLimit int)
+
+	// RunSessionPicker 运行交互式会话选择器（/list 命令）。
+	// 返回用户选中的会话 ID；空串表示取消。
+	// 实现差异：BubbleUI 融合进聊天 TUI 内渲染（不另起程序）；TextUI 独立程序。
+	RunSessionPicker(sessions []session.SessionMeta, activeID string) (string, error)
+
+	// ShowHistory 展示会话历史（切换会话后调用）。
+	// 实现差异：BubbleUI 渲染为结构化对话（用户消息/助手回答/工具框线）；
+	// TextUI 转文本行。
+	ShowHistory(events []memory.Event)
+
 	// ── 交互组 ──────────────────────────────────────────
 
 	// ConfirmPermission 请求用户确认权限。
@@ -149,23 +170,4 @@ type UI interface {
 	// 调用时机：Runner.Run() 退出时（正常退出或错误退出）。
 	// 典型实现：恢复终端状态（raw mode → cooked mode）、关闭文件句柄。
 	Close() error
-
-	// SetSessionName 设置当前会话的显示名称。
-	// 调用时机：会话创建/切换时，Runner 更新 UI 显示的会话名。
-	SetSessionName(name string)
-
-	// SetModel 设置当前使用的模型名称。
-	// 调用时机：初始化时设置一次，后续模型不变（目前不支持运行时切换模型）。
-	SetModel(model string)
-
-	// UpdateTokens 累计本轮 token 用量。
-	// input 是输入 token 增量，output 是输出 token 增量。
-	//
-	// 调用时机：每次 LLM 调用完成后（在 queryEngine 消费事件时）。
-	// 配合 ResetTokens 使用，每轮查询开始时重置，结束时显示总用量。
-	UpdateTokens(input, output int)
-
-	// ResetTokens 重置本轮 token 计数。
-	// 调用时机：每轮新查询开始前。
-	ResetTokens()
 }

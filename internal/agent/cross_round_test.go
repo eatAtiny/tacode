@@ -162,6 +162,13 @@ type captureHandler struct {
 }
 
 func (h *captureHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 余额查询请求（每轮自动更新触发的 /user/balance）：
+	// 返回 500 让余额查询失败静默，不捕获进 bodies（避免污染 LLM 请求断言）。
+	if r.URL.Path == "/user/balance" {
+		http.Error(w, `{"error":"mock balance unavailable"}`, http.StatusInternalServerError)
+		return
+	}
+
 	body, _ := io.ReadAll(r.Body)
 	var parsed map[string]any
 	_ = json.Unmarshal(body, &parsed)
@@ -172,4 +179,36 @@ func (h *captureHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, stopResponseSSE())
+}
+
+// /stop 主动取消后，queryEngine 收到的流式错误（receive stream failed）应静默：
+// 不 OnError、不返回 error（取消的预期副作用，非真实失败）。
+func TestQueryEngine_CancelledSilencesError(t *testing.T) {
+	handler := &captureHandler{}
+	srv := newTestSSEServer(t, handler)
+	defer srv.Close()
+	client := newLLMClientViaEnv(t, srv.URL)
+
+	dir := t.TempDir()
+	history, _ := memory.NewHistoryStore(dir)
+	summary, _ := memory.NewSummaryStore(dir)
+	memStore, _ := memory.NewMemoryStore(dir)
+	events := memory.NewEventStore(dir)
+	extractor := memory.NewExtractor(client)
+	retriever := memory.NewRetriever(history, summary, memStore, events)
+	tools := tool.NewRegistry()
+	tools.Register(tool.NewListTool())
+
+	runner := NewRunner(client, history, summary, memStore, events, extractor, retriever, tools, nil, text.NewTextUI())
+	compactor := NewCompactor(client, dir+"/transcripts", dir+"/tool-results")
+	runner.SetCompactor(compactor)
+
+	// 取消的 context（模拟 /stop）。
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := runner.queryEngine(ctx, 1, "任务", nil, nil)
+	if err != nil {
+		t.Errorf("取消后 queryEngine 不应返回 error（静默），got: %v", err)
+	}
 }

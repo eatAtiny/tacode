@@ -179,7 +179,11 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 		case QueryEventPermission:
 			// 权限确认：调用 UI 获取用户决策，结果写回 channel。
 			// queryLoop 内部阻塞等待此 channel，实现同步确认。
+			// 设置 permWaiting：主循环据此把输入转发给 ConfirmPermission
+			// （而非排队），确认完成后清除。
+			r.permWaiting.Store(true)
 			approved, _ := r.ui.ConfirmPermission(event.PermissionTool, event.PermissionArgs, event.PermissionReason, inputForward)
+			r.permWaiting.Store(false)
 			if event.PermissionCh != nil {
 				event.PermissionCh <- approved
 			}
@@ -193,17 +197,33 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 			finalAnswer = event.Content
 			finalIteration = event.Iteration
 			finalMessages = event.Messages
+
+			// OnFinal 的 token 行直接读取 Final 事件携带的精确累计值
+			// （queryLoop 内部多次 LLM 调用已累加，Final 是最终值）。
 			r.ui.OnFinal(finalAnswer, event.InputTokens, event.OutputTokens, event.TotalTokens)
 
-			// 每轮结束展示余额（/balance 开启后生效，失败静默；连续失败达到阈值时提示一次）。
-			if r.showBalance {
-				go func() {
-					r.queryBalanceWith(r.queryBalance)
-				}()
+			// 上下文占用更新（footer 状态栏常驻显示）。
+			// used = 当前消息数组估算字符数，limit = 压缩触发的字符上限
+			// （与 Compactor 的 context_char_limit 同一口径，避免 token/字符口径不一致）。
+			if r.compactor != nil {
+				r.ui.UpdateContext(r.compactor.EstimateMessagesChars(finalMessages), r.compactor.Limit())
 			}
 
+			// 每轮结束更新余额（每轮自动查询，失败静默；连续失败达到阈值时提示一次）。
+			go func() {
+				r.queryBalanceWith(r.queryBalance)
+			}()
+
 		case QueryEventError:
-			// 错误：通知 UI 并返回错误信息。
+			// 错误处理：区分「主动取消」与「真实错误」。
+			// /stop（或 /interrupt）主动取消时 ctx 已取消，queryLoop 的流式
+			// 读取会因连接中断返回错误（receive stream failed 等）——
+			// 这是取消的预期副作用，静默处理（不显示错误、不返回 error），
+			// 由 Runner 的 /stop 分支已给出「⏹️ 已停止」反馈。
+			if ctx.Err() != nil {
+				return "", nil, nil
+			}
+			// 真实错误：通知 UI 并返回错误信息。
 			r.ui.OnError(event.Error)
 			return "", nil, fmt.Errorf("query loop error: %w", event.Error)
 		}

@@ -15,7 +15,12 @@
 //   - API 模式：将事件转换为 HTTP SSE 或 WebSocket 消息
 package text
 
-import "fmt"
+import (
+	"fmt"
+
+	"agentic/internal/memory"
+	"agentic/internal/session"
+)
 
 // TextUI 是 UI 接口的 headless 实现。
 //
@@ -124,6 +129,28 @@ func (t *TextUI) ShowBalance(line string) {
 	}
 }
 
+// UpdateContext 转发上下文占用事件。data 为 map{"used_chars", "context_char_limit"}。
+func (t *TextUI) UpdateContext(usedChars, contextCharLimit int) {
+	if t.OnEvent != nil {
+		t.OnEvent("context", map[string]int{"used_chars": usedChars, "context_char_limit": contextCharLimit})
+	}
+}
+
+// RunSessionPicker 运行会话选择器（headless 模式：独立 tea 程序前台运行）。
+func (t *TextUI) RunSessionPicker(sessions []session.SessionMeta, activeID string) (string, error) {
+	if t.OnEvent != nil {
+		t.OnEvent("session_picker", map[string]any{"sessions": sessions, "active_id": activeID})
+	}
+	return session.RunSessionPicker(sessions, activeID)
+}
+
+// ShowHistory 转发会话历史事件。data 为 events（[]memory.Event）。
+func (t *TextUI) ShowHistory(events []memory.Event) {
+	if t.OnEvent != nil {
+		t.OnEvent("history", events)
+	}
+}
+
 // OnError 转发错误事件。data 为 err（error）。
 func (t *TextUI) OnError(err error) {
 	if t.OnEvent != nil {
@@ -155,15 +182,3 @@ func (t *TextUI) ConfirmPermission(tool, args, reason string, inputForward <-cha
 
 // Close 无资源需释放，返回 nil。
 func (t *TextUI) Close() error { return nil }
-
-// SetSessionName 是 headless 模式下的空操作。
-func (t *TextUI) SetSessionName(name string) {}
-
-// SetModel 是 headless 模式下的空操作。
-func (t *TextUI) SetModel(model string) {}
-
-// UpdateTokens 是 headless 模式下的空操作。
-func (t *TextUI) UpdateTokens(input, output int) {}
-
-// ResetTokens 是 headless 模式下的空操作。
-func (t *TextUI) ResetTokens() {}

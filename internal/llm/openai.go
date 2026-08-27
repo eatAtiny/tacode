@@ -127,8 +127,8 @@ func (c *OpenAIClient) Chat(ctx context.Context, systemPrompt, userPrompt string
 
 // ChatMessage 表示一条对话消息，用于 ReAct 多轮交互。
 type ChatMessage struct {
-	Role       string     `json:"role"`       // "system" | "user" | "assistant" | "tool"
-	Content    string     `json:"content"`    // 消息文本内容
+	Role       string     `json:"role"`                   // "system" | "user" | "assistant" | "tool"
+	Content    string     `json:"content"`                // 消息文本内容
 	ToolCallID string     `json:"tool_call_id,omitempty"` // tool 消息对应哪个 tool_call（仅 Role="tool" 时使用）
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // assistant 消息关联的工具调用列表
 }
@@ -526,6 +526,12 @@ func inferContextLimit(model string) int {
 		return 200_000
 	case strings.Contains(model, "claude"):
 		return 200_000
+
+	// DeepSeek 模型。
+	case strings.Contains(model, "deepseek-v4-flash"):
+		return 1_000_000 // v4-flash 上下文窗口 1M
+	case strings.Contains(model, "deepseek"):
+		return 128_000
 
 	default:
 		return unknownModelContextLimit
