@@ -24,7 +24,8 @@ const (
 // Retriever — 三层记忆检索器
 //
 // 调用链中的角色：
-//   生产路径仅使用 BuildContextFallback（queryEngine 首轮/切换时调用）；
+//   查询链路仅使用 BuildContextFallback（queryEngine 首轮/切换时调用；
+//   /compress、/memory 等命令路径另走 CompressSummaries/Count）；
 //   BuildContext 与 CheckAndCompress 为预留路径，当前无生产调用。
 //
 // 检索顺序（优先级从高到低）：
