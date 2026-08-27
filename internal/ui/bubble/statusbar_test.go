@@ -1,31 +1,24 @@
 package bubble
 
 import (
+	"strings"
 	"testing"
 )
 
-// TestShowBalance_StoresText 验证 ShowBalance 直接打印余额行（追加式）并缓存文本。
-// 说明：改造 B（状态栏简化）删除常驻状态栏后，ShowBalance 不再走状态栏更新，
-// 而是直接追加打印一行。这里不捕获 stdout（ANSI 输出与测试隔离），
-// 仅验证缓存行为 + 打印本身不 panic（fmt.Println 并发安全）。
-func TestShowBalance_StoresText(t *testing.T) {
-	b := NewBubbleUI()
+// ShowBalance 应把余额行投递到对话区（chatBalanceMsg 渲染）。
+// 后台 goroutine 调用（query_engine 每轮余额查询）→ Program.Send → 对话区。
+func TestShowBalance_ReachesChatModel(t *testing.T) {
+	b := startTest(t)
 
 	b.ShowBalance("💰 ¥110.00")
-	if b.balanceText != "💰 ¥110.00" {
-		t.Errorf("balanceText = %q, want 已设置", b.balanceText)
-	}
-}
 
-// balance() 应返回最近一次 ShowBalance 缓存的文本。
-func TestBalance_Getter(t *testing.T) {
-	b := NewBubbleUI()
-	if got := b.balance(); got != "" {
-		t.Fatalf("初始 balance() = %q, want 空串", got)
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
 	}
-
-	b.setBalance("💰 ¥110.00")
-	if got := b.balance(); got != "💰 ¥110.00" {
-		t.Fatalf("balance() = %q, want '💰 ¥110.00'", got)
+	if len(b.chat.lines) == 0 {
+		t.Fatal("对话区无余额行")
+	}
+	if !strings.Contains(b.chat.lines[0].text, "¥110.00") {
+		t.Errorf("对话区应含余额文本，实际: %q", b.chat.lines[0].text)
 	}
 }

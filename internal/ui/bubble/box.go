@@ -1,18 +1,35 @@
-// 框线渲染辅助：追加式输出（bubble.go OnToolCall/OnToolResult/OnFinal）共用的
-// 文本生成函数。框线统一在此生成，bubble.go 不再内联绘制（消除双份逻辑）。
-// boxWidth 定义在 bubble.go（bubble.go 与 box.go 共用）。
+// 框线渲染辅助：chat.go（ChatModel）的工具消息渲染共用文本生成函数。
+// 框线统一在此生成，chat.go 不再内联绘制（消除双份逻辑）。
 package bubble
 
 import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/charmbracelet/glamour"
 )
 
-// toolCallBox 生成工具调用框线文本（bubble.go OnToolCall 使用）。
+// boxWidth 计算框线宽度：取内容最长行的字符宽度，限制在 [minWidth, 80] 范围。
+// toolCallBox/toolResultBox 共用。
+func boxWidth(content string, minWidth int) int {
+	maxLen := minWidth
+	for _, line := range strings.Split(content, "\n") {
+		w := len([]rune(line))
+		if w > maxLen {
+			maxLen = w
+		}
+	}
+	if maxLen > 80 {
+		maxLen = 80
+	}
+	return maxLen
+}
+
+// toolCallBox 生成工具调用框线文本（chat.go chatToolCallMsg 使用）。
 // 参数 JSON 格式化缩进显示，单行参数用紧凑格式。
 //
-// 结尾带 \n：追加式模型下直接 fmt.Print，尾换行保证框线闭合后另起一行。
+// 结尾带 \n：框线文本作为 chatLine 渲染，尾换行保证框线闭合后另起一行。
 func toolCallBox(name, args string) string {
 	displayArgs := args
 	var parsed map[string]any
@@ -41,7 +58,7 @@ func toolCallBox(name, args string) string {
 	return sb.String()
 }
 
-// toolResultBox 生成工具执行结果框线文本（bubble.go OnToolResult 使用）。
+// toolResultBox 生成工具执行结果框线文本（chat.go chatToolResultMsg 使用）。
 // 超过 15 行的输出会被截断。成功标题绿色 "✅ 结果"，失败红色 "❌ 错误"。
 // 结尾带 \n：语义同 toolCallBox。
 func toolResultBox(name, result string, isError bool) string {
@@ -83,12 +100,16 @@ func toolResultBox(name, result string, isError bool) string {
 	return sb.String()
 }
 
-// finalAnswerText 渲染最终回答文本（bubble.go OnFinal 使用）：Glamour Markdown 渲染，
-// 失败回退纯文本，带 2 空格缩进，每行结尾带 \n。
-// 不直接使用 b.glamour 字段读——渲染器初始化后只读，无并发写，直接读安全。
-func finalAnswerText(b *BubbleUI, answer string) string {
-	if b.glamour != nil {
-		rendered, err := b.glamour.Render(answer)
+// finalAnswerText 渲染最终回答文本（chat.go chatFinalMsg 使用）：Glamour Markdown
+// 渲染，失败回退纯文本，每行带 2 空格缩进。
+// 渲染器由 ChatModel 持有（m.renderer，NewChatModel 初始化后只读，无并发写）。
+func finalAnswerText(m *ChatModel, answer string) string {
+	renderer := (*glamour.TermRenderer)(nil)
+	if m != nil {
+		renderer = m.renderer
+	}
+	if renderer != nil {
+		rendered, err := renderer.Render(answer)
 		if err == nil {
 			var sb strings.Builder
 			for _, line := range strings.Split(strings.TrimRight(rendered, "\n"), "\n") {

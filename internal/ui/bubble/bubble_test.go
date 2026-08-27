@@ -1,40 +1,131 @@
 package bubble
 
 import (
+	"bytes"
+	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
+
+// testStartOpts 测试用 tea 程序选项：无渲染（避免终端初始化）+ 空输入
+// （非 TTY stdin 下 Program.Run 尝试打开 /dev/tty，测试环境不可用）。
+func testStartOpts() []tea.ProgramOption {
+	return []tea.ProgramOption{
+		tea.WithoutRenderer(),
+		tea.WithInput(bytes.NewReader(nil)),
+	}
+}
+
+// startTest 创建 BubbleUI 并以测试选项启动。
+func startTest(t *testing.T) *BubbleUI {
+	t.Helper()
+	b := NewBubbleUI()
+	if err := b.Start(testStartOpts()...); err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	return b
+}
 
 func TestNewBubbleUI(t *testing.T) {
 	b := NewBubbleUI()
 	if b == nil {
 		t.Fatal("NewBubbleUI returned nil")
 	}
-	if b.conversation == nil {
-		t.Fatal("conversation should not be nil")
+	if b.chat == nil {
+		t.Fatal("chat should not be nil")
+	}
+	if b.submitCh == nil {
+		t.Fatal("submitCh should not be nil")
+	}
+	// Start 前 program 应为 nil（Start 时才创建）。
+	if b.program != nil {
+		t.Fatal("program should be nil before Start")
+	}
+}
+
+// ReadInputChan 应返回 chat 的提交 channel（textarea Enter → submitCh）。
+func TestReadInputChan_BridgesSubmitCh(t *testing.T) {
+	b := NewBubbleUI()
+	ch := b.ReadInputChan()
+	if ch == nil {
+		t.Fatal("ReadInputChan returned nil")
+	}
+	// 向 chat 的 textarea 注入输入并提交，验证能从 ReadInputChan 读到。
+	b.chat.textarea.SetValue("hello")
+	b.chat.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	select {
+	case got := <-ch:
+		if got != "hello" {
+			t.Errorf("ReadInputChan = %q, want hello", got)
+		}
+	default:
+		t.Error("ReadInputChan 无消息（提交应桥接到 input channel）")
+	}
+}
+
+// 事件方法投递消息：Start 后 send 应更新 ChatModel 的对话区。
+// Close 同步等待 tea 事件循环退出（QuitMsg 前的消息已全部处理），
+// 之后读对话区无数据竞争（-race 验证）。
+func TestEvents_ReachChatModel(t *testing.T) {
+	b := startTest(t)
+
+	// 事件方法 → Program.Send → ChatModel.Update → lines 追加。
+	b.OnThink(1)
+	b.OnMessage("状态更新")
+	b.OnFinal("最终回答", 100, 50, 150)
+
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+	if len(b.chat.lines) < 3 {
+		t.Fatalf("lines = %d, want >= 3（事件应送达 ChatModel）", len(b.chat.lines))
+	}
+	var joined string
+	for _, l := range b.chat.lines {
+		joined += l.text + "\n"
+	}
+	if !strings.Contains(joined, "思考中") {
+		t.Errorf("对话区应含思考行，实际:\n%s", joined)
+	}
+	if !strings.Contains(joined, "最终回答") {
+		t.Errorf("对话区应含最终回答，实际:\n%s", joined)
+	}
+	if !strings.Contains(joined, "150 tokens") {
+		t.Errorf("对话区应含 token 统计行，实际:\n%s", joined)
 	}
 }
 
 func TestBubbleUIClose(t *testing.T) {
 	b := NewBubbleUI()
 	if err := b.Close(); err != nil {
-		t.Fatalf("Close error: %v", err)
+		t.Fatalf("Close error (未 Start): %v", err)
+	}
+	// Start 后 Close 应正常退出 tea 程序。
+	if err := b.Start(testStartOpts()...); err != nil {
+		t.Fatalf("Start error: %v", err)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close error (已 Start): %v", err)
 	}
 }
 
-func TestTrimArgs(t *testing.T) {
-	tests := []struct {
-		input  string
-		maxLen int
-		want   string
-	}{
-		{"short", 10, "short"},
-		{"hello world", 5, "hello..."},
-		{"你好世界测试", 3, "你好世..."},
+// Start 幂等：重复调用不创建新程序。
+func TestStart_Idempotent(t *testing.T) {
+	b := NewBubbleUI()
+	if err := b.Start(testStartOpts()...); err != nil {
+		t.Fatalf("Start error: %v", err)
 	}
-	for _, tt := range tests {
-		got := trimArgs(tt.input, tt.maxLen)
-		if got != tt.want {
-			t.Errorf("trimArgs(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
-		}
+	first := b.program
+	if err := b.Start(); err != nil {
+		t.Fatalf("重复 Start error: %v", err)
+	}
+	if b.program != first {
+		t.Error("重复 Start 不应替换 tea.Program")
+	}
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
 	}
 }
