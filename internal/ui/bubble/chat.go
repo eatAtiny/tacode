@@ -211,8 +211,8 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if value != "" {
 				m.submitCh <- value
 				m.textarea.Reset()
-				// 用户消息进对话区。
-				m.lines = append(m.lines, chatLine{text: m.renderUser(value)})
+				// 用户消息经 commit 定稿（打印于活区上方入 scrollback）。
+				cmds = append(cmds, m.commit(m.renderUser(value)))
 			}
 			// 消费掉 Enter，避免 textarea 内插入换行。
 			return m, tea.Batch(cmds...)
@@ -233,49 +233,45 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatDeltaMsg:
 		m.appendStreaming(v.content)
 	case chatFinalMsg:
-		// 最终回答：渲染 Markdown 追加对话区。
-		// 无工具调用的直接回答：流式增量已逐 token 累积到最后一条流式行
-		// （appendStreaming 合并），用渲染后的完整回答原地替换该行——
-		// 增量内容与最终回答同源，否则同一答案会在对话区显示两遍。
-		if len(m.lines) > 0 && m.lines[len(m.lines)-1].streaming {
-			last := &m.lines[len(m.lines)-1]
-			if v.content != "" {
-				last.text = m.renderAssistant() + finalAnswerText(m, v.content)
-			}
-			last.streaming = false
-		} else {
-			// 无进行中的流式行（工具调用/空增量场景）：直接追加渲染版。
-			m.closeStreaming()
-			if v.content != "" {
-				rendered := finalAnswerText(m, v.content)
-				m.lines = append(m.lines, chatLine{text: m.renderAssistant() + rendered})
-			}
+		// 过渡实现：保留「final 原地替换流式行」语义（Task 4 重构为冲刷模型）。
+		// 被替换的流式行不能用 commit——commit 会再追加一条转录导致双份，
+		// 替换用直接赋值，打印用裸 tea.Println。
+		var text string
+		if v.content != "" {
+			text = m.renderAssistant() + finalAnswerText(m, v.content)
+		}
+		if len(m.lines) > 0 && m.lines[len(m.lines)-1].streaming && text != "" {
+			m.lines[len(m.lines)-1] = chatLine{text: text}
+		} else if text != "" {
+			m.lines = append(m.lines, chatLine{text: text})
+		}
+		if text != "" {
+			cmds = append(cmds, tea.Println(text))
 		}
 		// 本轮 token 统计（精确值，来自 API usage；totalTokens 为 0 时跳过，
 		// 避免误导——API 未返回 usage）。
 		if v.totalTokens > 0 {
-			line := fmt.Sprintf(
+			cmds = append(cmds, m.commit(styleMuted.Render(fmt.Sprintf(
 				"  ⚡ 本轮 %d tokens（输入 %d / 输出 %d）",
 				v.totalTokens, v.inputTokens, v.outputTokens,
-			)
-			m.lines = append(m.lines, chatLine{text: styleMuted.Render(line)})
+			))))
 		}
 	case chatToolCallMsg:
 		m.closeStreaming()
 		// 复用 box.go 的 toolCallBox 生成框线文本（尾 \n 由 multi-line 渲染处理）。
-		m.lines = append(m.lines, chatLine{text: toolCallBox(v.name, v.args)})
+		cmds = append(cmds, m.commit(toolCallBox(v.name, v.args)))
 	case chatToolResultMsg:
 		m.closeStreaming()
 		// 复用 box.go 的 toolResultBox 生成框线文本（>15 行截断 + 成功/失败标题）。
-		m.lines = append(m.lines, chatLine{text: toolResultBox(v.name, v.result, v.isError)})
+		cmds = append(cmds, m.commit(toolResultBox(v.name, v.result, v.isError)))
 	case chatContinueMsg:
-		m.lines = append(m.lines, chatLine{text: styleThink.Render(fmt.Sprintf("🔄 继续推理 (iter %d)", v.iteration))})
+		cmds = append(cmds, m.commit(styleThink.Render(fmt.Sprintf("🔄 继续推理 (iter %d)", v.iteration))))
 	case chatErrorMsg:
-		m.lines = append(m.lines, chatLine{text: styleError.Render(fmt.Sprintf("❌ Error: %v", v.err))})
+		cmds = append(cmds, m.commit(styleError.Render(fmt.Sprintf("❌ Error: %v", v.err))))
 	case chatMessageMsg:
-		m.lines = append(m.lines, chatLine{text: v.content})
+		cmds = append(cmds, m.commit(v.content))
 	case chatWelcomeMsg:
-		m.lines = append(m.lines, chatLine{text: v.content})
+		cmds = append(cmds, m.commit(v.content))
 	case chatBalanceMsg:
 		// 余额进 footer 状态栏（常驻显示），不再追加对话行。
 		m.balance = v.balance
@@ -284,12 +280,15 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.contextUsedTokens = v.usedTokens
 		m.contextLimit = v.contextLimit
 	case chatHistoryMsg:
-		// 切换会话后加载历史：先清空对话区，再追加历史事件行。
+		// 切换会话后加载历史：先清空对话区，再经 commit 单次打印整段历史
+		// （多段合并为一个 tea.Println，保序——tea.Batch 内 Cmd 并发不保序）。
 		m.lines = nil
 		m.closeStreaming()
+		var parts []string
 		for _, e := range v.events {
-			m.lines = append(m.lines, chatLine{text: e.text, streaming: e.streaming})
+			parts = append(parts, e.text)
 		}
+		cmds = append(cmds, m.commit(parts...))
 	case chatPickerMsg:
 		// 启动会话选择器（/list）：创建 picker 模型，进入选择模式。
 		m.picker = session.NewSessionPickerModel(v.sessions, v.activeID)
@@ -341,6 +340,20 @@ func (m *ChatModel) closeStreaming() {
 	if len(m.lines) > 0 {
 		m.lines[len(m.lines)-1].streaming = false
 	}
+}
+
+// commit 定稿若干段：逐段记入转录 m.lines，并返回单次 tea.Println
+// （多段合并为一个打印命令——tea.Batch 内的 Cmd 并发执行不保序，
+// 单次 Println 用 \n 连接保证段落顺序）。
+// 空串段照记（保留段落间空行语义）；整次调用无段时返回 nil。
+func (m *ChatModel) commit(parts ...string) tea.Cmd {
+	if len(parts) == 0 {
+		return nil
+	}
+	for _, p := range parts {
+		m.lines = append(m.lines, chatLine{text: p})
+	}
+	return tea.Println(strings.Join(parts, "\n"))
 }
 
 // View 渲染底部活区。
