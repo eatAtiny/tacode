@@ -46,9 +46,8 @@ main.go
        ├─ internal/session    (session.go, picker.go) — session CRUD + picker
        ├─ internal/tool       (8 files) — Tool interface + Registry
        └─ internal/ui         (ui.go) — UI interface
-            ├─ ui/bubble/     — BubbleUI 全 tea 聊天界面（chat.go ChatModel + bubble.go 包装器 + box.go 框线）
-            ├─ ui/text/       — TextUI (headless, callback-based)
-            └─ ui/components/ — reusable components (conversation, input, status, toolview)
+            ├─ ui/bubble/     — BubbleUI 全 tea 聊天界面（chat.go ChatModel + bubble.go 包装器 + box.go 框线 + welcome.go 欢迎界面）
+            └─ ui/text/       — TextUI (headless, callback-based)
 ```
 
 `llm`, `memory`, `prompt`, `session`, `tool`, and `ui` are independent leaf packages; only `agent` imports all of them.
@@ -135,7 +134,6 @@ Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncat
 - `ui.UI` is the second interface — all UI operations go through it (pluggable).
 - **BubbleUI** (`ui/bubble/`): 全 tea 渲染聊天界面（参照 j178/chatgpt 模式）。`chat.go` 的 `ChatModel` 用 `bubbles.Viewport`（对话区滚动）+ `bubbles.Textarea`（输入）+ `glamour`（markdown）全屏渲染；`bubble.go` 是 tea 包装器——UI 事件方法（OnThink/OnDelta/OnFinal 等）→ `Program.Send` 投递消息 → ChatModel 追加对话行。输入由 textarea 接管（Enter 提交 → submitCh → Runner）。`box.go` 提供工具框线。
 - **TextUI** (`ui/text/`): Headless mode, dispatches via `OnEvent` callback. For sub-agent scenarios. Auto-approves permissions.
-- **Components** (`ui/components/`): Reusable Bubble Tea components (ConversationModel, InputModel, StatusModel, ToolViewModel) — 当前聊天界面不直接使用（ChatModel 内置 viewport/textarea），保留供其他场景。
 
 ### Permission System
 
@@ -215,16 +213,13 @@ On each user input:
 - `extractor.go` — `Extractor` (LLM-driven memory extraction)
 - `retriever.go` — `Retriever` (3-tier retrieval + compression)
 
-### `internal/ui/` (5 files + components)
+### `internal/ui/` (7 files)
 - `ui.go` — `UI` interface definition
 - `bubble/bubble.go` — BubbleUI tea 包装器（事件→Program.Send、输入桥接、生命周期）
 - `bubble/chat.go` — ChatModel（全 tea 聊天界面：viewport 对话区 + textarea 输入 + footer）
 - `bubble/box.go` — 工具调用/结果框线共享渲染
+- `bubble/welcome.go` — Claude Code 风格欢迎界面（ASCII logo + 版本/模型/目录）
 - `text/text.go` — TextUI headless implementation
-- `components/conversation.go` — scrollable conversation history
-- `components/input.go` — text input bar
-- `components/status.go` — status bar (session, model, tokens)
-- `components/toolview.go` — tool execution popup
 
 ## Conventions
 
