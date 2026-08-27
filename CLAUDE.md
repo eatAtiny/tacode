@@ -46,7 +46,7 @@ main.go
        ├─ internal/session    (session.go, picker.go) — session CRUD + picker
        ├─ internal/tool       (8 files) — Tool interface + Registry
        └─ internal/ui         (ui.go) — UI interface
-            ├─ ui/bubble/     — BubbleUI 全 tea 聊天界面（chat.go ChatModel + bubble.go 包装器 + box.go 框线 + welcome.go 欢迎界面）
+            ├─ ui/bubble/     — BubbleUI inline 聊天界面（chat.go ChatModel + bubble.go 包装器 + box.go 框线 + welcome.go 欢迎界面）
             └─ ui/text/       — TextUI (headless, callback-based)
 ```
 
@@ -132,7 +132,7 @@ Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncat
 ### UI System
 
 - `ui.UI` is the second interface — all UI operations go through it (pluggable).
-- **BubbleUI** (`ui/bubble/`): 全 tea 渲染聊天界面（参照 j178/chatgpt 模式）。`chat.go` 的 `ChatModel` 用 `bubbles.Viewport`（对话区滚动）+ `bubbles.Textarea`（输入）+ `glamour`（markdown）全屏渲染；`bubble.go` 是 tea 包装器——UI 事件方法（OnThink/OnDelta/OnFinal 等）→ `Program.Send` 投递消息 → ChatModel 追加对话行。输入由 textarea 接管（Enter 提交 → submitCh → Runner）。`box.go` 提供工具框线。
+- **BubbleUI** (`ui/bubble/`): inline 聊天界面（参照 j178/chatgpt 模式）。`View()` 只渲染活区（查询状态行 + 权限确认弹层 + `bubbles.Textarea` 输入框 + footer）原地重绘；对话内容经 `commit()` → `tea.Println` 定稿，打印于活区上方滚入终端原生 scrollback。无 alt screen、无鼠标捕获（终端原生选择/复制/滚轮保留）；流式逐段定稿（增量遇换行冲刷）；最终回答经 `glamour` 渲染 markdown。`bubble.go` 是 tea 包装器——UI 事件方法（OnThink/OnDelta/OnFinal 等）→ `Program.Send` 投递消息 → ChatModel.Update 定稿。输入由 textarea 接管（Enter 提交 → submitCh → Runner）。`box.go` 提供工具框线。
 - **TextUI** (`ui/text/`): Headless mode, dispatches via `OnEvent` callback. For sub-agent scenarios. Auto-approves permissions.
 
 ### Permission System
@@ -217,7 +217,7 @@ On each user input:
 ### `internal/ui/` (7 files)
 - `ui.go` — `UI` interface definition
 - `bubble/bubble.go` — BubbleUI tea 包装器（事件→Program.Send、输入桥接、生命周期）
-- `bubble/chat.go` — ChatModel（全 tea 聊天界面：viewport 对话区 + textarea 输入 + footer）
+- `bubble/chat.go` — ChatModel（inline 聊天界面：活区渲染状态行/权限弹层/textarea/footer，对话经 commit→tea.Println 定稿）
 - `bubble/box.go` — 工具调用/结果框线共享渲染
 - `bubble/welcome.go` — Claude Code 风格欢迎界面（ASCII logo + 版本/模型/目录）
 - `text/text.go` — TextUI headless implementation

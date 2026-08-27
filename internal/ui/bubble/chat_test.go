@@ -511,6 +511,25 @@ func TestChatModel_StatusResetOnSubmit(t *testing.T) {
 	}
 }
 
+// 权限确认期间状态行隐藏（弹层已展示工具信息，避免叠加误导），确认后恢复。
+func TestChatModel_StatusHiddenDuringPermission(t *testing.T) {
+	m := NewChatModel()
+	m.Update(chatThinkMsg{iteration: 1})
+	m.Update(chatPermissionMsg{tool: "shell", args: `{"command":"rm -rf /"}`, reason: "高风险操作"})
+	v := m.View()
+	if strings.Contains(v, "思考中") {
+		t.Errorf("权限确认期间状态行应隐藏，实际:\n%s", v)
+	}
+	if !strings.Contains(v, "权限确认") {
+		t.Errorf("权限弹层应显示，实际:\n%s", v)
+	}
+	// 确认完成后状态行恢复（status 未被其他事件清空时）。
+	m.Update(chatPermissionDoneMsg{})
+	if !strings.Contains(m.View(), "思考中") {
+		t.Errorf("确认完成后状态行应恢复，实际:\n%s", m.View())
+	}
+}
+
 // 错误中断冲刷：流式残余随错误行定稿，不泄漏到下一轮（不重复注入助手前缀）。
 func TestChatModel_ErrorFlushesStream(t *testing.T) {
 	m := NewChatModel()

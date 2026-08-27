@@ -1,14 +1,16 @@
 // Package bubble 提供基于 Lip Gloss + Glamour 的终端 UI 实现。
 //
-// chat.go 是全 tea 渲染聊天界面（ChatModel）：
-//   - viewport.Model 对话区（滚动）+ textarea.Model 输入框 + footer 状态栏
-//   - 全部经 View() 渲染，输出不写 os.Stdout（纯 tea，替代追加式主渲染）
+// chat.go 是 inline 聊天界面的模型（ChatModel）：
+//   - 主渲染：View 只渲染活区（查询状态行 + 权限确认弹层 + textarea 输入框
+//     与 footer），原地重绘；对话内容不进 View
+//   - 定稿管线：对话内容经 commit → tea.Println 打印于活区上方，滚入终端
+//     原生 scrollback；流式逐段定稿（增量遇换行冲刷）
 //   - 事件驱动：BubbleUI 事件方法（OnThink/OnDelta/...）经 Program.Send 投递
-//     消息，ChatModel.Update 收到后追加 chatLine 并刷新 viewport
+//     消息，ChatModel.Update 收到后经 commit 定稿并记入转录 m.lines
 //   - 用户提交经 submitCh 桥接给 Runner（BubbleUI → Runner）
 //
-// 参考实现：j178/chatgpt 的 ui.go（viewport+textarea+footer 布局、流式增量更新、
-// WindowSizeMsg 布局计算）。注意 chat.go 接的是 agent 事件流而非 chatgpt 库。
+// 参考实现：j178/chatgpt 的 ui.go（textarea+footer 布局、流式增量更新）。
+// 注意 chat.go 接的是 agent 事件流而非 chatgpt 库。
 package bubble
 
 import (
@@ -105,13 +107,13 @@ type chatLine struct {
 	text string
 }
 
-// ChatModel 全 tea 聊天界面模型。
+// ChatModel inline 聊天界面模型（活区渲染 + commit 定稿管线）。
 //
 // 结构（参照 j178/chatgpt ui.go）：
 //   - textarea 输入区：Enter 提交（Alt+Enter 留待多行换行）
-//   - renderFooter 底部状态栏：占位提示（spinner/错误状态后续细化）
+//   - renderFooter 底部状态栏：上下文占用/余额/退出提示
 //
-// 消息流：BubbleUI 事件方法 → Program.Send(msg) → Update 收到 → append line。
+// 消息流：BubbleUI 事件方法 → Program.Send(msg) → Update 收到 → commit 定稿。
 // 用户输入：Enter → submitCh（Runner 从 channel 读，不直接持有 ChatModel）。
 type ChatModel struct {
 	textarea textarea.Model        // 输入框（单行）
@@ -281,6 +283,8 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = ""
 	case chatMessageMsg:
 		// 同错误路径：先冲刷流式残余再接内容（单次 commit 保序）。
+		// OnMessage 会清状态（/stop 兜底依赖此路径）；查询中排队通知会
+		// 短暂清空状态行，自愈且纯外观，已知可接受。
 		parts := append(m.flushBuf(), v.content)
 		cmds = append(cmds, m.commit(parts...))
 		m.status = ""
@@ -382,8 +386,8 @@ func (m *ChatModel) commit(parts ...string) tea.Cmd {
 
 // View 渲染底部活区。
 // 选择器模式（picking）时渲染会话选择器；查询中（status 非空）顶部渲染状态行；
-// 权限确认（permLayer）时在输入框上方渲染弹层；否则渲染输入框 + footer
-// （对话内容不在 View 内）。
+// 权限确认（permLayer）时隐藏状态行、在输入框上方渲染弹层；其余渲染
+// 输入框 + footer（对话内容不在 View 内）。
 func (m *ChatModel) View() string {
 	if m.picking && m.picker != nil {
 		return lipgloss.JoinVertical(lipgloss.Left,
@@ -392,7 +396,9 @@ func (m *ChatModel) View() string {
 		)
 	}
 	parts := []string{}
-	if m.status != "" {
+	// 权限确认期间隐藏状态行（弹层已展示工具信息，避免叠加误导——
+	// 状态行此时常显示「🔧 执行工具」但工具尚未执行）。
+	if m.status != "" && m.permLayer == nil {
 		parts = append(parts, styleThink.Render(m.status+"▌"))
 	}
 	if m.permLayer != nil {

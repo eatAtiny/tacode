@@ -1,30 +1,26 @@
 // Package bubble 提供基于 Lip Gloss + Glamour 的终端 UI 实现。
 //
-// BubbleUI 是全 tea 渲染聊天界面（ChatModel）的包装器（回退阶段 2 后重启的
-// tea 主渲染方案，替代追加式主屏）：
-//   - 主渲染：ChatModel（chat.go）用 viewport + textarea + footer 全屏渲染，
-//     输出不写 os.Stdout（纯 tea 渲染，无 ANSI 光标控制、无 Glamour 直出）
+// BubbleUI 是 inline 聊天界面（ChatModel）的 tea 包装器：
+//   - 主渲染：ChatModel（chat.go）的 View 只渲染活区（查询状态行 + 权限
+//     确认弹层 + textarea 输入框 + footer），原地重绘
+//   - 定稿管线：对话内容经 commit → tea.Println 打印于活区上方，滚入终端
+//     原生 scrollback；流式逐段定稿（增量遇换行冲刷）
+//   - 无 alt screen、无鼠标捕获：终端原生选择/复制/滚轮滚动全部保留
 //   - 主输入：textarea 接管输入（Enter 提交 → submitCh → Runner）
 //   - 事件转发：BubbleUI 的 UI 接口方法（OnThink/OnDelta/...）→ Program.Send
-//     投递消息 → ChatModel.Update 追加对话行并刷新 viewport
-//   - 会话选择器：独立 Bubble Tea 全屏程序（/list 时前台运行）
+//     投递消息 → ChatModel.Update 定稿对话内容
+//   - 会话选择器：聊天 TUI 内融合运行（/list 经 chatPickerMsg 切活区渲染）
 //
 // 核心特性：
-//   - 流式文本：delta 经 chatDeltaMsg 追加对话区（逐 token 增量显示）
+//   - 流式文本：delta 增量缓冲，遇换行切段定稿（逐段上屏）
 //   - Markdown 渲染：最终回答经 Glamour 渲染为终端友好的格式
 //   - 框线输出：工具调用和结果用 box.go 的 Unicode 框线字符绘制
-//   - 权限确认：提示进对话区 + 输入经 textarea 提交流转（Runner 查询运行时
+//   - 权限确认：输入框上方弹层 + 输入经 textarea 提交流转（Runner 查询运行时
 //     转发到 inputForward，ConfirmPermission 从该 channel 读取）
-//
-// 架构调整背景（2026-08）：追加式主屏（rawInputLoop 逐 rune 输入 + ANSI 光标
-// 控制）实测体验不佳，方案确定为全 tea 渲染聊天界面（参照 j178/chatgpt），
-// 本文件从追加式输出核心重写为 ChatModel 包装器。raw 输入（rawInputLoop）、
-// ANSI 光标控制、termios OPOST 恢复等追加式基础设施全部删除。
-// 框线（box.go）保留——ChatModel 的工具消息渲染复用。
 //
 // 文件组织：
 //   - bubble.go  tea 包装器（事件方法 → Program.Send、输入桥接、生命周期）
-//   - chat.go    ChatModel（全 tea 聊天界面：viewport + textarea + footer）
+//   - chat.go    ChatModel（inline 聊天界面：活区渲染 + commit 定稿管线）
 //   - box.go     工具框线共享渲染
 package bubble
 
@@ -40,21 +36,22 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// BubbleUI 是 UI 接口的终端美化实现（全 tea 聊天界面包装器）。
+// BubbleUI 是 UI 接口的终端美化实现（inline 聊天界面包装器）。
 //
 // 职责边界：
 //   - BubbleUI：UI 接口适配层——事件方法收 agent 事件 → Program.Send 投递；
-//     不持有任何渲染状态（对话内容、输入框、滚动位置全在 ChatModel）
-//   - ChatModel：tea.Model 实现——持有对话区（viewport）/ 输入框（textarea）/
-//     footer，View 渲染整屏，Update 响应事件消息与按键
+//     不持有任何渲染状态（活区组件、转录、流式缓冲全在 ChatModel）
+//   - ChatModel：tea.Model 实现——持有活区组件（textarea/footer）与流式/
+//     转录状态（streamBuf/m.lines），View 渲染活区，Update 响应事件消息
+//     与按键
 //
 // 线程安全：事件方法可能被多个 goroutine 调用（queryLoop 事件推送、
 // 后台余额查询、后台记忆保存），send 用 uiMu 串行化 Program.Send 调用
 // （Program.Send 本身线程安全，锁是防御性保证字段读写的可见性）。
 type BubbleUI struct {
-	// program 聊天 TUI 渲染程序（Start 时创建，tea.Program 全屏运行）。
+	// program 聊天 TUI 渲染程序（Start 时创建，inline 渲染不进 alt screen）。
 	program *tea.Program
-	// chat 聊天模型（viewport+textarea+footer 全 tea 界面）。
+	// chat 聊天模型（活区渲染 + commit 定稿管线）。
 	chat *ChatModel
 	// submitCh 用户提交 channel（ChatModel.submitCh → Runner.ReadInputChan）。
 	submitCh <-chan string
@@ -292,9 +289,9 @@ func (b *BubbleUI) ConfirmPermission(tool, args, reason string, inputForward <-c
 }
 
 // Welcome 打印启动横幅。
-// 全 tea 界面下在对话区追加一个 Claude Code 风格的多行欢迎界面：
-// ASCII logo + 欢迎语 + 版本/模型/目录 + 使用提示。
-// 投递 chatWelcomeMsg（追加后滚到顶部，logo 完整可见）。
+// inline 界面下经 commit 定稿一个 Claude Code 风格的多行欢迎界面：
+// ASCII logo + 欢迎语 + 版本/模型/目录 + 使用提示（追加进转录）。
+// 投递 chatWelcomeMsg。
 func (b *BubbleUI) Welcome(model string) {
 	cwd, _ := os.Getwd()
 	b.send(chatWelcomeMsg{content: welcomeBanner(model, version, cwd)})
