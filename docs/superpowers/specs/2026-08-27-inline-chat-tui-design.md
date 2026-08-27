@@ -14,8 +14,10 @@
 2. **Alt screen 隔绝回滚缓冲区**：`chat.go` Init 的 `tea.EnterAltScreen` 使对话只存在于
    备用屏幕，退出即丢弃，终端 scrollback 从未包含对话——「运行中选不了」且「退出后没得选」。
 
-附带问题：未启用 `tea.WithBracketedPaste()`，多行粘贴以按键流进入，粘贴内容中的换行
-被 Enter 提交逻辑拦截，导致第一个换行处提前提交。
+附带说明（源码核实，v1.3.10）：bubbletea 默认开启 bracketed paste，粘贴以
+`tea.KeyMsg{Type: KeyRunes, Runes, Paste: true}` 整块到达，bubbles textarea 走
+default 分支进 `insertRunesFromUserInput`（多行插入逻辑完整，sanitizer 默认保留
+`\n`）——**多行粘贴输入当前已可用**，不在本设计修复范围，仅补回归测试钉住。
 
 本设计将渲染模型改为 **inline（内联）**：app 只「拥有」终端底部几行活区，定稿内容经
 `tea.Println` 打入原生 scrollback。对话历史交还终端管理，复制/滚轮/选择/退出留存全部
@@ -26,7 +28,7 @@
 - 鼠标拖选复制、滚轮滚动、退出后对话留存于 scrollback——全部原生终端行为
 - 输入框 + footer 常驻终端底部（活区原地重绘），交互体验与 alt screen 版一致
 - 流式输出逐段自然流出（用户选定策略），长回答不再有活区高度上限风险
-- 顺带修复多行粘贴（bracketed paste）
+- 顺带为多行粘贴补回归测试（v1.3.10 默认 bracketed paste 已可用，防止回退）
 - 改动收敛在 `internal/ui/bubble/` 包内；UI 接口、Runner 接线、submitCh/pickerDone/
   权限链路不动
 
@@ -67,10 +69,10 @@ agentic │ 上下文 3.2k/50k │ 💰 … │ ctrl+c 退出 ← 常驻：foote
 
 | 现状 | 变更 |
 |------|------|
-| `tea.WithMouseCellMotion()` | 删除 |
-| — | 新增 `tea.WithBracketedPaste()` |
+| `tea.WithMouseCellMotion()` | 删除（恢复原生选择/滚轮/复制） |
 
-`tea.NewProgram` 不传 alt screen 选项即默认 inline。
+无新增选项：bubbletea v1.3.10 默认 inline（不传 alt screen 选项）、默认开启
+bracketed paste。
 
 ## ChatModel 改造（chat.go）
 
@@ -121,8 +123,8 @@ onFinal:
 
 ### 粘贴
 
-`tea.PasteMsg`（bracketed paste 开启后粘贴以整块消息到达）：ChatModel 拦截并
-`textarea.InsertString(string(v))`，换行符进入 textarea 值而不触发 Enter 提交。
+无实现改动（已可用）。回归测试：`tea.KeyMsg{Type: KeyRunes, Runes: "a\nb", Paste: true}`
+进入 textarea 值（含换行）、不写 submitCh。
 
 ### WindowSizeMsg
 
@@ -152,7 +154,7 @@ textarea.SetWidth(v.Width)；记录 width/height；glamour wordwrap 宽度随终
 - 流式段落冲刷：delta 跨 `\n` 分两段定稿，streamBuf 清空
 - final 不重印：有流式时 final 后无全文重复行；无流式时 final 打印 glamour 全文
 - 状态行生命周期：think 置位、final/error 清空、提交重置
-- PasteMsg 多行文本：进入 textarea 值、不写 submitCh
+- PasteMsg 场景（`KeyMsg{Paste:true}`）：多行文本进入 textarea 值、不写 submitCh
 
 不变：Submit/SubmitEmpty/SubmitTwice、ToolMessages、picker 双测、
 statusbar/welcome/bubble 生命周期测试（`WithoutRenderer` 注入不受选项变化影响）。
