@@ -240,11 +240,15 @@ func (b *BubbleUI) ConfirmPermission(tool, args, reason string, inputForward <-c
 }
 
 // Welcome 打印启动横幅。
-// 全 tea 界面下不打印 ASCII banner（对话区已由 View 渲染 footer），
-// 改为在对话区追加一行欢迎信息（模型名），保持启动即有反馈。
+// 全 tea 界面下在对话区追加一个 Claude Code 风格的多行欢迎界面：
+// ASCII logo + 欢迎语 + 版本/模型/目录 + 使用提示。
 func (b *BubbleUI) Welcome(model string) {
-	b.send(chatMessageMsg{content: fmt.Sprintf("欢迎使用 agentic！模型: %s", model)})
+	cwd, _ := os.Getwd()
+	b.send(chatMessageMsg{content: welcomeBanner(model, version, cwd)})
 }
+
+// version 当前版本号（欢迎界面展示）。
+const version = "v0.1"
 
 // ──────────────────────────────────────────────────────────
 // 内部方法
