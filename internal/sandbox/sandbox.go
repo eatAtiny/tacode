@@ -16,7 +16,8 @@ import (
 type Sandbox interface {
 	// Wrap 包装 exec.Cmd，注入沙箱约束。返回新 cmd（或原地修改后返回）。
 	Wrap(cmd *exec.Cmd) *exec.Cmd
-	// AllowsNetwork 报告该沙箱是否允许网络（供 shell 工具判权限）。
+	// AllowsNetwork 报告该沙箱是否允许网络。
+	// 预留接口方法：当前生产无调用（shell 权限判定解析 args 的 network 字段）。
 	AllowsNetwork() bool
 	// Close 释放资源（如临时 profile 文件）。
 	Close() error

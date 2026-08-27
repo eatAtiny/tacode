@@ -19,7 +19,7 @@ func NewListTool() *ListTool { return &ListTool{} }
 
 // ── Tool 接口：基础方法 ──
 
-func (t *ListTool) Name() string    { return "list" }
+func (t *ListTool) Name() string      { return "list" }
 func (t *ListTool) Aliases() []string { return nil }
 
 func (t *ListTool) Description() string {
@@ -51,7 +51,6 @@ type dirEntry struct {
 	isDir bool
 	name  string
 	size  int64
-	path  string // 相对路径（含缩进，用于递归显示）
 }
 
 // Execute 列出目录内容。
@@ -62,7 +61,7 @@ func (t *ListTool) Execute(args string) (string, error) {
 		MaxEntries int    `json:"max_entries"`
 	}
 	if err := parseArgs(args, &params); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
+		return "", err
 	}
 
 	if params.Path == "" {
@@ -191,13 +190,12 @@ func collectEntries(basePath, prefix string, currentDepth, maxDepth, maxEntries 
 		}
 
 		if de.IsDir() {
+			subPath := filepath.Join(basePath, name)
 			*entries = append(*entries, dirEntry{
 				isDir: true,
 				name:  displayPath + "/",
-				path:  filepath.Join(basePath, name),
 			})
 			// 递归进入子目录，prefix 传递相对路径而非空格缩进。
-			subPath := filepath.Join(basePath, name)
 			collectEntries(subPath, displayPath, currentDepth+1, maxDepth, maxEntries, entries)
 		} else {
 			*entries = append(*entries, dirEntry{

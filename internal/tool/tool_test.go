@@ -185,8 +185,8 @@ func TestEditReplaceAll(t *testing.T) {
 
 	// ── replace_all=false, 多处匹配 → 应该报错 ──
 	args := toJSON(map[string]any{
-		"path":   tmpFile,
-		"search": "foo",
+		"path":    tmpFile,
+		"search":  "foo",
 		"replace": "XXX",
 	})
 	_, err := e.Execute(args)
@@ -569,16 +569,18 @@ type aliasTestTool struct {
 	aliases []string
 }
 
-func (t *aliasTestTool) Name() string                               { return t.name }
-func (t *aliasTestTool) Aliases() []string                          { return t.aliases }
-func (t *aliasTestTool) Description() string                        { return "test" }
-func (t *aliasTestTool) Parameters() map[string]any                 { return map[string]any{} }
-func (t *aliasTestTool) Execute(args string) (string, error)        { return "ok", nil }
-func (t *aliasTestTool) CheckPermission(args string) PermissionResult { return PermissionResult{Allow: true} }
-func (t *aliasTestTool) PromptGuide() string                        { return "" }
-func (t *aliasTestTool) IsConcurrencySafe(args string) bool         { return true }
-func (t *aliasTestTool) IsReadOnly(args string) bool                { return true }
-func (t *aliasTestTool) ResultLimit() int                           { return 1000 }
+func (t *aliasTestTool) Name() string                        { return t.name }
+func (t *aliasTestTool) Aliases() []string                   { return t.aliases }
+func (t *aliasTestTool) Description() string                 { return "test" }
+func (t *aliasTestTool) Parameters() map[string]any          { return map[string]any{} }
+func (t *aliasTestTool) Execute(args string) (string, error) { return "ok", nil }
+func (t *aliasTestTool) CheckPermission(args string) PermissionResult {
+	return PermissionResult{Allow: true}
+}
+func (t *aliasTestTool) PromptGuide() string                { return "" }
+func (t *aliasTestTool) IsConcurrencySafe(args string) bool { return true }
+func (t *aliasTestTool) IsReadOnly(args string) bool        { return true }
+func (t *aliasTestTool) ResultLimit() int                   { return 1000 }
 
 // ──────────────────────────────────────────────────────────
 // Shell 危险命令检测
@@ -586,15 +588,15 @@ func (t *aliasTestTool) ResultLimit() int                           { return 100
 
 func TestIsDangerousShellCommand(t *testing.T) {
 	tests := []struct {
-		command  string
+		command   string
 		dangerous bool
 	}{
 		{`{"command": "ls -la"}`, false},
 		{`{"command": "cat file.txt"}`, false},
-		{`{"command": "rm /tmp/foo"}`, true},          // 普通 rm 删除 → 需确认（本次新增）
-		{`{"command": "rm -f /tmp/foo"}`, true},        // rm -f（无 -r）也需确认
-		{`{"command": "rmdir /tmp/foo"}`, false},       // rmdir 不含 "rm "，不误伤
-		{`{"command": "warmup --check"}`, false},       // warmup 等含 rm 子串的词不误伤
+		{`{"command": "rm /tmp/foo"}`, true},     // 普通 rm 删除 → 需确认（本次新增）
+		{`{"command": "rm -f /tmp/foo"}`, true},  // rm -f（无 -r）也需确认
+		{`{"command": "rmdir /tmp/foo"}`, false}, // rmdir 不含 "rm "，不误伤
+		{`{"command": "warmup --check"}`, false}, // warmup 等含 rm 子串的词不误伤
 		{`{"command": "rm -rf /tmp/foo"}`, true},
 		{`{"command": "sudo rm file"}`, true},
 		{`{"command": "chmod 777 script.sh"}`, true},

@@ -2,7 +2,6 @@ package tool
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -10,6 +9,9 @@ import (
 
 	"agentic/internal/sandbox"
 )
+
+// defaultCmdTimeout 命令执行默认超时（shell/git 工具共享）。
+const defaultCmdTimeout = 30 * time.Second
 
 // ShellTool 执行 shell 命令。
 type ShellTool struct {
@@ -20,12 +22,12 @@ type ShellTool struct {
 
 // NewShellTool 创建无沙箱 shell 工具（默认，向后兼容）。
 func NewShellTool() *ShellTool {
-	return &ShellTool{timeout: 30 * time.Second, approved: make(map[string]bool)}
+	return &ShellTool{timeout: defaultCmdTimeout, approved: make(map[string]bool)}
 }
 
 // NewShellToolWithSandbox 创建带沙箱的 shell 工具。
 func NewShellToolWithSandbox(sb sandbox.Sandbox) *ShellTool {
-	return &ShellTool{timeout: 30 * time.Second, sandbox: sb, approved: make(map[string]bool)}
+	return &ShellTool{timeout: defaultCmdTimeout, sandbox: sb, approved: make(map[string]bool)}
 }
 
 // AllowNetworkFor 记录已确认放行网络的命令参数。
@@ -70,7 +72,7 @@ func (t *ShellTool) Execute(args string) (string, error) {
 		Network bool   `json:"network"`
 	}
 	if err := parseArgs(args, &params); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
+		return "", err
 	}
 	if strings.TrimSpace(params.Command) == "" {
 		return "", fmt.Errorf("command is empty")
@@ -92,24 +94,36 @@ func (t *ShellTool) Execute(args string) (string, error) {
 			cmd = t.sandbox.Wrap(cmd)
 		}
 	}
+	return runCmd(ctx, cmd, "命令", "", t.timeout)
+}
+
+// ──────────────────────────────────────────────────────────
+// 共享命令执行辅助（shell/git 工具复用）
+// ──────────────────────────────────────────────────────────
+
+// runCmd 执行 cmd 并返回 TrimSpace 后的合并输出（stdout + stderr），
+// 统一包装超时与非零退出码错误：
+//   - 超时 → "<label>超时 (<timeout>)"，timeoutCmd 非空时附命令回显
+//   - 非零退出码 → "<label>失败 (退出码 N)"，附输出或「无输出」
+//
+// label 是错误前缀（shell 传 "命令"，git 传 "git 命令"）；
+// timeoutCmd 是超时错误中回显给用户的命令（空串表示不回显）。
+func runCmd(ctx context.Context, cmd *exec.Cmd, label, timeoutCmd string, timeout time.Duration) (string, error) {
 	output, err := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(output))
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("命令超时 (%s)", t.timeout)
-		}
-		// 提取退出码，让 LLM 能看到具体的失败原因。
-		exitCode := -1
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
+			if timeoutCmd != "" {
+				return "", fmt.Errorf("%s超时 (%s): %s", label, timeout, timeoutCmd)
+			}
+			return "", fmt.Errorf("%s超时 (%s)", label, timeout)
 		}
 		if result != "" {
-			return "", fmt.Errorf("命令失败 (退出码 %d):\n%s", exitCode, result)
+			return "", fmt.Errorf("%s失败 (退出码 %d):\n%s", label, exitCodeOf(err), result)
 		}
-		return "", fmt.Errorf("命令失败 (退出码 %d)，无输出", exitCode)
+		return "", fmt.Errorf("%s失败 (退出码 %d)，无输出", label, exitCodeOf(err))
 	}
-
 	return result, nil
 }
 
@@ -159,7 +173,7 @@ func (t *ShellTool) CheckPermission(args string) PermissionResult {
 // 可接受（该命令已不属于只读，走串行 + 权限确认路径兜底）。
 func isDangerousShellCommand(args string) bool {
 	var params map[string]interface{}
-	if err := json.Unmarshal([]byte(args), &params); err != nil {
+	if err := parseArgs(args, &params); err != nil {
 		return false
 	}
 
@@ -172,10 +186,9 @@ func isDangerousShellCommand(args string) bool {
 	normalized := strings.Join(strings.Fields(command), " ")
 
 	// 危险命令列表（归一化后子串匹配，大小写不敏感）。
+	// "rm " 前缀已覆盖 "rm -rf"/"rm -r" 等所有 rm 变体，无需单列。
 	dangerousCommands := []string{
 		"rm ", // 普通 rm 删除也需确认（如 "rm /tmp/foo"）；尾随空格避免子串误伤 rmdir/warmup/firmware 等
-		"rm -rf",
-		"rm -r",
 		"mkfs",
 		"dd if=",
 		"chmod 777",

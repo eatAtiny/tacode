@@ -12,14 +12,14 @@ import (
 //
 // 设计参考 Claude Code 的 FileEditTool：
 //   - 唯一性校验：search 文本在文件中必须唯一匹配
-//   - 引号容错：自动标准化弯引号为直引号
+//   - 引号容错：自动剥除包裹的直引号（ASCII " ' `）
 //   - Diff 输出：编辑后显示变更内容
 //   - read-before-edit：编辑前验证文件已被读取且未被外部修改
 //
 // 这是对 file write（全量覆盖）的安全替代。
 type EditTool struct {
-	maxFileSize int64              // 最大文件大小（避免 LLM 尝试编辑大文件）
-	readState   ReadState          // 已读文件状态（框架注入），nil 表示跳过检查
+	maxFileSize int64     // 最大文件大小（避免 LLM 尝试编辑大文件）
+	readState   ReadState // 已读文件状态（框架注入），nil 表示跳过检查
 }
 
 // NewEditTool 创建编辑工具。
@@ -35,7 +35,7 @@ func (t *EditTool) SetReadState(state ReadState) {
 
 // ── Tool 接口：基础方法 ──
 
-func (t *EditTool) Name() string    { return "edit" }
+func (t *EditTool) Name() string      { return "edit" }
 func (t *EditTool) Aliases() []string { return nil }
 
 func (t *EditTool) Description() string {
@@ -70,7 +70,7 @@ func (t *EditTool) Parameters() map[string]any {
 // Execute 执行搜索替换操作。
 //
 // 流程：
-//  1. 引号标准化（弯引号→直引号）
+//  1. 引号容错（剥除包裹的直引号）
 //  2. 唯一性校验（replace_all=false 时：0次→报错, >1次→报错, 1次→执行）
 //  3. 执行替换 + 回写文件
 //  4. 生成 diff 输出
@@ -82,14 +82,14 @@ func (t *EditTool) Execute(args string) (string, error) {
 		ReplaceAll bool   `json:"replace_all"`
 	}
 	if err := parseArgs(args, &params); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
+		return "", err
 	}
 
 	if strings.TrimSpace(params.Path) == "" {
 		return "", fmt.Errorf("path is empty")
 	}
 
-	// ── 步骤 1: 引号标准化 ──
+	// ── 步骤 1: 引号容错 ──
 	search := stripQuotes(params.Search)
 	replace := stripQuotes(params.Replace)
 
@@ -198,10 +198,10 @@ func (t *EditTool) ResultLimit() int { return 4000 }
 // 辅助函数
 // ──────────────────────────────────────────────────────────
 
-// stripQuotes 去除包裹字符串的引号（直引号和弯引号）。
+// stripQuotes 去除包裹字符串的直引号（ASCII " ' `）。
 //
-// LLM 的 tokenization 可能将直引号映射为弯引号，
-// 容错处理确保编辑操作不会因为引号差异而失败。
+// LLM 可能给 search/replace 整体包裹一层引号，
+// 容错剥除确保编辑操作不会因为引号差异而失败。
 func stripQuotes(s string) string {
 	if len(s) < 2 {
 		return s

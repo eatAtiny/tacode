@@ -57,7 +57,7 @@ func (a *mcpToolAdapter) ResultLimit() int { return 12000 }
 
 // Execute 调用 MCP server 的 tools/call。
 // 带 mcpCallTimeout 超时：卡死的 MCP server 不应永久阻塞 queryLoop
-//（与 shell 工具的 30s 超时一致）。
+// （与 shell 工具的 30s 超时一致）。
 func (a *mcpToolAdapter) Execute(args string) (string, error) {
 	// ── 解析参数 JSON → map[string]any ──
 	var arguments map[string]any

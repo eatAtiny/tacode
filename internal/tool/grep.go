@@ -23,7 +23,7 @@ func NewGrepTool() *GrepTool { return &GrepTool{} }
 
 // ── Tool 接口：基础方法 ──
 
-func (t *GrepTool) Name() string    { return "grep" }
+func (t *GrepTool) Name() string      { return "grep" }
 func (t *GrepTool) Aliases() []string { return nil }
 
 func (t *GrepTool) Description() string {
@@ -64,7 +64,7 @@ func (t *GrepTool) Execute(args string) (string, error) {
 		CaseSensitive bool   `json:"case_sensitive"`
 	}
 	if err := parseArgs(args, &params); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
+		return "", err
 	}
 
 	if strings.TrimSpace(params.Pattern) == "" {

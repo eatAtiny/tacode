@@ -80,7 +80,7 @@ func (t *WebFetchTool) Execute(args string) (string, error) {
 		MaxChars int    `json:"max_chars"`
 	}
 	if err := parseArgs(args, &params); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
+		return "", err
 	}
 
 	if strings.TrimSpace(params.URL) == "" {
@@ -270,6 +270,7 @@ func formatOutput(title, description, body string, maxChars int) string {
 }
 
 // truncate 截断字符串（保留前 70% + 后 30%，加截断提示）。
+// 仅处理超长输入（len(s) > maxChars），此时 head+tail 必小于 len(s)。
 func truncate(s string, maxChars int) string {
 	if len(s) <= maxChars {
 		return s
@@ -282,9 +283,6 @@ func truncate(s string, maxChars int) string {
 		if tail < 0 {
 			tail = 0
 		}
-	}
-	if head+tail > len(s) {
-		return s
 	}
 	return s[:head] + marker + s[len(s)-tail:]
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
@@ -89,6 +88,3 @@ func (s *MacOSSandbox) Close() error {
 
 // 确保沙箱在 darwin 下可用（编译期断言）。
 var _ Sandbox = (*MacOSSandbox)(nil)
-
-// filepath 引用（避免误删 import）。
-var _ = filepath.Join

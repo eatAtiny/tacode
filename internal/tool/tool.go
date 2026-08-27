@@ -9,7 +9,7 @@
 //	queryLoop.executeSingleTool() → tool.Execute(args)   ← 执行工具
 //
 // 添加新工具的步骤：
-//  1. 实现 Tool 接口（6 个方法）
+//  1. 实现 Tool 接口（10 个方法）
 //  2. 在 main.go 中调用 Registry.Register(newTool)
 package tool
 
@@ -26,9 +26,10 @@ import (
 
 // parseArgs 将 JSON 字符串参数解析到目标结构体。
 // 工具实现中使用此函数解析 Execute(args) 的 args 参数。
+// 解析失败返回带统一前缀的完整错误，调用方无需再包装。
 func parseArgs(raw string, dst any) error {
 	if err := json.Unmarshal([]byte(raw), dst); err != nil {
-		return fmt.Errorf("invalid JSON args: %w", err)
+		return fmt.Errorf("解析参数失败: %w", err)
 	}
 	return nil
 }
@@ -49,7 +50,7 @@ type PermissionResult struct {
 }
 
 // ──────────────────────────────────────────────────────────
-// Tool 接口（重构后 — 6 个方法）
+// Tool 接口（重构后 — 10 个方法）
 // ──────────────────────────────────────────────────────────
 
 // Tool 定义一个可被 Agent 调用的工具。
@@ -394,10 +395,10 @@ func (r *Registry) Names() []string {
 //
 // 输出格式：
 //
-//	- shell: 执行 bash 命令并返回输出结果
-//	  参数: {"type":"object","properties":{"command":{"type":"string"}},...}
-//	- file: 读取或写入文件
-//	  参数: {"type":"object","properties":{"action":{"type":"string"},...},...}
+//   - shell: 执行 bash 命令并返回输出结果
+//     参数: {"type":"object","properties":{"command":{"type":"string"}},...}
+//   - file: 读取或写入文件
+//     参数: {"type":"object","properties":{"action":{"type":"string"},...},...}
 func (r *Registry) Descriptions() string {
 	if len(r.tools) == 0 {
 		return "(无可用工具)"
