@@ -5,6 +5,8 @@ import (
 )
 
 func TestInferContextLimit_KnownModels(t *testing.T) {
+	// 表中已并入兜底分支的型号名（gpt-3.5-turbo-16k、claude 系列等）
+	// 是回归锚点：防止兜底分支将来丢失/改值导致这些型号的返回值漂移。
 	tests := []struct {
 		model string
 		want  int

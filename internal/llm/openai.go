@@ -389,6 +389,8 @@ func (c *OpenAIClient) SetConfig(cfg *config.Config) {
 //     gpt-4 → 8k, gpt-3.5-turbo* → 16k
 //   - Anthropic: claude* → 200k
 //   - DeepSeek: deepseek-v4-flash → 1M, 其余 deepseek → 128k
+//
+// 分支顺序敏感：特异型号分支必须先于家族兜底分支（子串包含关系）。
 func inferContextLimit(model string) int {
 	// 环境变量覆盖优先。
 	if v := strings.TrimSpace(os.Getenv("OPENAI_CONTEXT_LIMIT")); v != "" {
