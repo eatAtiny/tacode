@@ -107,9 +107,17 @@ func runGenerateFinalSummary(t *testing.T, client *llm.OpenAIClient, messages []
 	lc.generateFinalSummary()
 
 	var finalContent string
+	drained := 0
 	for {
 		select {
 		case evt := <-events:
+			// 钉住 Think yield 修复（2d591d7）：总结路径首个事件必须是
+			// QueryEventThink（inline UI 依赖它重置 streamed，删除该 yield
+			// 会导致 final 的 glamour 重印分支被跳过、总结文本不上屏）。
+			if drained == 0 && evt.Type != QueryEventThink {
+				t.Fatalf("首个排空的事件应为 QueryEventThink（总结轮重置流式状态），实际 %v", evt.Type)
+			}
+			drained++
 			if evt.Type == QueryEventFinal {
 				finalContent = evt.Content
 			}
@@ -270,8 +278,8 @@ func TestCallLLMStream_CalibratesMsgTokens(t *testing.T) {
 			{Role: "system", Content: "s"},
 			{Role: "user", Content: "u"},
 		},
-		maxIter:  10,
-		events:   events,
+		maxIter:   10,
+		events:    events,
 		msgTokens: -1,
 	}
 

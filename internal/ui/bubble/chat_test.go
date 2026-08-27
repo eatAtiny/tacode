@@ -114,13 +114,10 @@ func TestChatModel_SubmitTwice(t *testing.T) {
 	}
 }
 
-// WindowSizeMsg 更新布局（textarea 宽度；viewport 已删除）。
+// WindowSizeMsg 更新布局（textarea 宽度；窗口尺寸字段已删，宽高只喂 textarea）。
 func TestChatModel_WindowSize(t *testing.T) {
 	m := NewChatModel()
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-	if m.width != 80 || m.height != 24 {
-		t.Errorf("size = %dx%d, want 80x24", m.width, m.height)
-	}
 	// bubbles v1 的 SetWidth 含 prompt（"> " 宽 2），Width() 返回内容宽：80-2=78。
 	if m.textarea.Width() != 78 {
 		t.Errorf("textarea 宽度 = %d, want 78（窗口 80 - prompt 2）", m.textarea.Width())
@@ -227,16 +224,21 @@ func TestChatModel_ContextNoLimitHidden(t *testing.T) {
 	}
 }
 
-// 历史加载（chatHistoryMsg）清空重建转录，顺序保留。
+// 历史加载（chatHistoryMsg）清空重建转录（旧对话不残留），顺序保留。
 func TestChatModel_HistoryAppended(t *testing.T) {
 	m := NewChatModel()
+	// 先 seed 一行旧对话，验证历史加载是清空重建（旧的没了）。
+	m.Update(chatMessageMsg{content: "旧对话"})
 	var evts []chatHistoryEvent
 	for i := 0; i < 30; i++ {
 		evts = append(evts, chatHistoryEvent{text: fmt.Sprintf("历史第 %d 行", i)})
 	}
 	m.Update(chatHistoryMsg{events: evts})
 	if len(m.lines) != 30 {
-		t.Fatalf("lines = %d, want 30", len(m.lines))
+		t.Fatalf("lines = %d, want 30（旧对话应被清空，只留历史）", len(m.lines))
+	}
+	if !strings.Contains(m.lines[0].text, "历史第 0 行") {
+		t.Errorf("首条应为第一行历史，实际: %q", m.lines[0].text)
 	}
 	if !strings.Contains(m.lines[29].text, "历史第 29 行") {
 		t.Errorf("末条应为最后一行历史，实际: %q", m.lines[29].text)

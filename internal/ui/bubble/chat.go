@@ -72,8 +72,8 @@ type (
 	chatErrorMsg struct{ err error }
 	// chatMessageMsg 一般性消息（OnMessage）。
 	chatMessageMsg struct{ content string }
-	// chatWelcomeMsg 欢迎界面（Welcome）。独立类型：追加后滚到顶部展示
-	// 完整 banner（logo 在首屏顶部），而非滚到底部（chatMessageMsg 行为）。
+	// chatWelcomeMsg 欢迎界面（Welcome）。独立类型：欢迎 banner 内容
+	// （追加进转录）。
 	chatWelcomeMsg struct{ content string }
 	// chatBalanceMsg 账户余额（ShowBalance）。
 	chatBalanceMsg struct{ balance string }
@@ -83,8 +83,7 @@ type (
 	chatHistoryMsg struct{ events []chatHistoryEvent }
 	// chatHistoryEvent 历史中的一条记录（已渲染文本）。
 	chatHistoryEvent struct {
-		text      string // 渲染后的对话行（用户消息/助手回答/工具框线）
-		streaming bool   // 是否流式（历史加载恒 false）
+		text string // 渲染后的对话行（用户消息/助手回答/工具框线）
 	}
 	// chatPickerMsg 启动会话选择器（/list）。
 	chatPickerMsg struct {
@@ -99,13 +98,11 @@ type (
 	chatPermissionDoneMsg struct{}
 )
 
-// chatLine 对话区的一行（渲染后文本）。
+// chatLine 转录的一行（渲染后文本）。
 // text 是 lipgloss/glamour 渲染后的行文本，可能含换行（框线文本、Markdown 渲染）。
-// streaming 字段在流式改为「增量缓冲 + 换行切段定稿」后不再写入（保留字段，
-// 后续任务处理光标标记时可能复用）。
+// m.lines 是测试 seam：生产上屏走 commit→tea.Println，转录仅供测试断言。
 type chatLine struct {
-	text      string
-	streaming bool
+	text string
 }
 
 // ChatModel 全 tea 聊天界面模型。
@@ -117,9 +114,6 @@ type chatLine struct {
 // 消息流：BubbleUI 事件方法 → Program.Send(msg) → Update 收到 → append line。
 // 用户输入：Enter → submitCh（Runner 从 channel 读，不直接持有 ChatModel）。
 type ChatModel struct {
-	width  int
-	height int
-
 	textarea textarea.Model        // 输入框（单行）
 	renderer *glamour.TermRenderer // markdown 渲染
 
@@ -206,7 +200,9 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pickerDone <- m.picker.Chosen()
 				m.picker = nil
 			}
-			return m, nil
+			// picker 的 cmd 已收进 cmds，一并返回（SessionPickerModel 的
+			// cmd 通常为 nil，tea.Batch(nil) 安全）。
+			return m, tea.Batch(cmds...)
 		}
 		// 非按键消息（如 WindowSize）不转发，直接忽略。
 		return m, nil
@@ -228,15 +224,14 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 	}
-	// 更新子组件（textarea 处理按键、光标等消息）。
+	// 更新子组件（textarea 处理按键/粘贴等输入消息）。
 	var cmd tea.Cmd
 	m.textarea, cmd = m.textarea.Update(msg)
 	cmds = append(cmds, cmd)
 
 	switch v := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = v.Width
-		m.height = v.Height
+		// 窗口尺寸只喂 textarea 宽度（活区无全屏布局，高度不使用）。
 		m.textarea.SetWidth(v.Width)
 	case chatThinkMsg:
 		m.streamed = false

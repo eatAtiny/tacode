@@ -150,7 +150,7 @@ func (b *BubbleUI) ReadInputChan() <-chan string {
 // ──────────────────────────────────────────────────────────
 
 // OnThink 通知新一轮思考开始。
-// 投递 chatThinkMsg，ChatModel 在对话区追加 "⏳ 思考中..." 行。
+// 投递 chatThinkMsg，ChatModel 更新活区状态行（"⏳ 思考中"）。
 func (b *BubbleUI) OnThink(iteration int) {
 	b.send(chatThinkMsg{iteration: iteration})
 }
@@ -174,7 +174,7 @@ func (b *BubbleUI) OnToolResult(name, result string, isError bool) {
 }
 
 // OnContinue 通知继续推理。
-// 投递 chatContinueMsg，ChatModel 追加 "🔄 继续推理" 行。
+// 投递 chatContinueMsg，ChatModel 更新活区状态行（"🔄 继续推理"）。
 func (b *BubbleUI) OnContinue(iteration int) {
 	b.send(chatContinueMsg{iteration: iteration})
 }
