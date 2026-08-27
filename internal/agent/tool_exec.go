@@ -360,10 +360,10 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 //
 // 阻塞机制：
 //
-//	queryLoop 创建 PermissionCh channel → yield Permission 事件
+//	checkToolPermission 自建 PermissionCh channel → yield Permission 事件
 //	→ QueryEngine 收到事件 → 调用 UI.ConfirmPermission()
 //	→ 用户在终端输入 y/N → 写入 PermissionCh
-//	→ queryLoop 从 PermissionCh 读取结果 → 继续或拒绝
+//	→ checkToolPermission 从 PermissionCh 读取结果 → 继续或拒绝
 func (lc *queryLoopContext) checkToolPermission(tc llm.ToolCall, t tool.Tool, iter int) bool {
 	// ── 全局权限注入点（极端定制场景） ──
 	if globalPermissionChecker != nil {

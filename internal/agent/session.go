@@ -14,6 +14,10 @@ import (
 // ──────────────────────────────────────────────────────────
 // 会话管理函数
 //
+// 注：handleSessionCommand 实为全量斜杠命令路由器——除会话管理
+// （/new、/list、/switch、/delete、/rename、/current）外，/balance、
+// /compress、/reload、/memory 等非会话命令也在此分发。
+//
 // 会话生命周期：
 //
 //	启动 → 临时会话（不在 manifest 中）
@@ -47,6 +51,17 @@ func deriveSessionName(input string) string {
 	return cleaned
 }
 
+// setStorePaths 把四个 store（history/summary/memStore/events）与 Compactor
+// 目录统一指向 dir。
+// 临时会话初始化、会话切换、临时会话落盘共用。
+func (r *Runner) setStorePaths(dir string) {
+	r.history.SetPath(dir)
+	r.summary.SetPath(dir)
+	r.memStore.SetPath(dir)
+	r.events.SetPath(dir)
+	r.syncCompactorPaths(dir)
+}
+
 // switchSession 切换会话时重新初始化所有 store 路径。
 //
 // 所有 memory store 都有 SetPath 方法，切换会话时只需修改底层文件路径，
@@ -59,15 +74,11 @@ func deriveSessionName(input string) string {
 func (r *Runner) switchSession() {
 	activeDir := r.sessions.ActiveSessionDir()
 	os.MkdirAll(activeDir, 0o755)
-	r.history.SetPath(activeDir)
-	r.summary.SetPath(activeDir)
-	r.memStore.SetPath(activeDir)
-	r.events.SetPath(activeDir)
+	r.setStorePaths(activeDir)
 	// 切换会话：清空跨轮累积的对话消息与记忆 preamble 缓存。
 	// 下一轮查询将基于新会话的记忆重新构建（preamble + 记忆兜底）。
 	r.messages = nil
 	r.memoryPreamble = ""
-	r.syncCompactorPaths(activeDir)
 }
 
 // syncCompactorPaths 同步 Compactor 的 transcript/tool-results 目录到当前会话。
@@ -136,7 +147,7 @@ func historyToMessages(events []memory.Event) []llm.ChatMessage {
 //	/rename <name> → 重命名当前会话
 //	/current       → 显示当前会话信息
 //	/compress      → 手动压缩 L2 摘要
-//	/reload        → 重新加载项目指令（AGENTS.md）
+//	/reload        → 重新加载项目指令（CLAUDE.md/AGENTS.md/AGENTS/.cursorrules，CLAUDE.md 优先）
 //	/memory [...]  → L3 记忆管理（list/add/rm）
 //
 // 返回值：新的轮次号（切换会话时重置为 1），是否已处理。
@@ -170,13 +181,8 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 				return 0, true
 			}
 			r.tempID = newTempID
-			tempDir := r.sessions.SessionDir(newTempID)
-			r.history.SetPath(tempDir)
-			r.summary.SetPath(tempDir)
-			r.memStore.SetPath(tempDir)
-			r.events.SetPath(tempDir)
+			r.setStorePaths(r.sessions.SessionDir(newTempID))
 			r.messages = nil // 新会话：清空跨轮累积
-			r.syncCompactorPaths(tempDir)
 			// 记住用户指定的会话名，ensurePersisted 时使用。
 			r.pendingSessionName = name
 			displayName := "新会话"
@@ -192,11 +198,7 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 			return 0, true
 		}
 		r.switchSession()
-		meta := r.sessions.FindMeta(id)
-		displayName := id
-		if meta != nil {
-			displayName = meta.Name
-		}
+		displayName := displayNameOf(r.sessions.FindMeta(id), id)
 		r.ui.OnMessage(fmt.Sprintf("✅ 已创建并切换到新会话: %s", displayName))
 		return 1, true
 
@@ -212,21 +214,7 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 			r.ui.OnError(fmt.Errorf("用法: /switch <会话ID>"))
 			return 0, true
 		}
-		id := parts[1]
-		if err := r.sessions.Switch(id); err != nil {
-			r.ui.OnError(fmt.Errorf("切换失败: %v", err))
-			return 0, true
-		}
-		r.isTemporary = false // 切换到已持久化会话
-		r.switchSession()
-		meta := r.sessions.FindMeta(r.sessions.ActiveID())
-		displayName := r.sessions.ActiveID()
-		if meta != nil {
-			displayName = meta.Name
-		}
-		r.ui.OnMessage(fmt.Sprintf("✅ 已切换到会话: %s", displayName))
-		r.printSessionHistory()
-		return 1, true
+		return r.switchToPersisted(parts[1]), true
 
 	// ── /delete <id> ──
 	// 不能删除当前活跃的会话。
@@ -275,7 +263,7 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 		return 0, true
 
 	// ── /balance ──
-	// 手动查询余额；成功后开启每轮结束展示。
+	// 每轮结束自动查询余额（无条件），此命令用于立即刷新/排查。
 	case "/balance":
 		r.handleBalanceCommand()
 		return 0, true
@@ -287,7 +275,8 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 		return 0, true
 
 	// ── /reload ──
-	// 重新加载项目指令（AGENTS.md），用于指令文件变更后手动刷新。
+	// 重新加载项目指令（CLAUDE.md/AGENTS.md/AGENTS/.cursorrules，CLAUDE.md 优先），
+	// 用于指令文件变更后手动刷新。
 	// 先清空再加载：用户显式触发刷新，加载失败时保留空缓存（而非旧内容），
 	// 失败信息已通过 OnError 展示。
 	case "/reload":
@@ -306,6 +295,64 @@ func (r *Runner) handleSessionCommand(input string) (int, bool) {
 
 	default:
 		return 0, false
+	}
+}
+
+// displayNameOf 返回会话展示名：meta 存在用其 Name，否则回退 id。
+func displayNameOf(meta *session.SessionMeta, id string) string {
+	if meta != nil {
+		return meta.Name
+	}
+	return id
+}
+
+// switchToPersisted 切换到已持久化会话并展示其历史（/list 与 /switch 共用序列）：
+// Switch → isTemporary=false → switchSession → 展示名 → OnMessage → printSessionHistory。
+// 返回新的轮次号：切换成功为 1（重置轮次），失败为 0。
+func (r *Runner) switchToPersisted(id string) int {
+	if err := r.sessions.Switch(id); err != nil {
+		r.ui.OnError(fmt.Errorf("切换失败: %v", err))
+		return 0
+	}
+	r.isTemporary = false // 切换到已持久化会话
+	r.switchSession()
+	activeID := r.sessions.ActiveID()
+	displayName := displayNameOf(r.sessions.FindMeta(activeID), activeID)
+	r.ui.OnMessage(fmt.Sprintf("✅ 已切换到会话: %s", displayName))
+	r.printSessionHistory()
+	return 1
+}
+
+// handleListCommand 处理 /list 命令。
+// 聊天 TUI（BubbleUI）下选择器融合进主渲染循环（不另起 tea 程序）；
+// TextUI/headless 下用独立 tea 程序前台运行。
+func (r *Runner) handleListCommand() (int, bool) {
+	// 运行选择器（UI 接口统一入口，实现差异在各 UI）。
+	selected, err := r.ui.RunSessionPicker(r.sessions.List(), r.sessions.ActiveID())
+	if err != nil {
+		r.ui.OnError(fmt.Errorf("选择器错误: %v", err))
+		return 0, true
+	}
+	if selected == "" {
+		return 0, true
+	}
+	// 用户选中了一个会话，执行切换。
+	return r.switchToPersisted(selected), true
+}
+
+// moveFile 把 tempDir 下的文件/目录迁移到 realDir（ensurePersisted 步骤 3 用）。
+// 源不存在时跳过；warnPrefix 非空时 Rename 失败输出「⚠️ <warnPrefix>: <err>」
+// 警告（IsNotExist 静默），为空则完全静默——分别对应旧的完备/忽略两种错误语义。
+func (r *Runner) moveFile(tempDir, realDir, name, warnPrefix string) {
+	tempPath := tempDir + "/" + name
+	if _, err := os.Stat(tempPath); err != nil {
+		return
+	}
+	os.MkdirAll(realDir, 0o755)
+	if err := os.Rename(tempPath, realDir+"/"+name); err != nil {
+		if warnPrefix != "" && !os.IsNotExist(err) {
+			r.ui.OnMessage(fmt.Sprintf("⚠️ %s: %v", warnPrefix, err))
+		}
 	}
 }
 
@@ -343,56 +390,39 @@ func (r *Runner) ensurePersisted(firstInput string) error {
 	realDir := r.sessions.SessionDir(realID)
 
 	// ── 步骤 3: 迁移文件 ──
-	// events.jsonl
-	tempEvents := tempDir + "/events.jsonl"
-	realEvents := realDir + "/events.jsonl"
-	if _, err := os.Stat(tempEvents); err == nil {
-		os.MkdirAll(realDir, 0o755)
-		if err := os.Rename(tempEvents, realEvents); err != nil {
-			if !os.IsNotExist(err) {
-				r.ui.OnMessage(fmt.Sprintf("⚠️ 临时事件文件迁移失败: %v", err))
-			}
-		}
-	}
-	// history.jsonl
-	tempHistory := tempDir + "/history.jsonl"
-	realHistory := realDir + "/history.jsonl"
-	if _, err := os.Stat(tempHistory); err == nil {
-		os.MkdirAll(realDir, 0o755)
-		if err := os.Rename(tempHistory, realHistory); err != nil {
-			if !os.IsNotExist(err) {
-				r.ui.OnMessage(fmt.Sprintf("⚠️ 临时历史文件迁移失败: %v", err))
-			}
-		}
-	}
-	// summaries.jsonl
-	tempSummary := tempDir + "/summaries.jsonl"
-	realSummary := realDir + "/summaries.jsonl"
-	if _, err := os.Stat(tempSummary); err == nil {
-		os.MkdirAll(realDir, 0o755)
-		os.Rename(tempSummary, realSummary)
-	}
-	// memory/ 目录
-	tempMemory := tempDir + "/memory"
-	realMemory := realDir + "/memory"
-	if _, err := os.Stat(tempMemory); err == nil {
-		os.MkdirAll(realDir, 0o755)
-		os.Rename(tempMemory, realMemory)
-	}
+	// events/history 迁移失败输出警告；summaries/memory 静默忽略失败
+	// （保持各文件原有的错误处理语义）。
+	r.moveFile(tempDir, realDir, "events.jsonl", "临时事件文件迁移失败")
+	r.moveFile(tempDir, realDir, "history.jsonl", "临时历史文件迁移失败")
+	r.moveFile(tempDir, realDir, "summaries.jsonl", "")
+	r.moveFile(tempDir, realDir, "memory", "")
 
 	// ── 步骤 4: 清理临时目录 ──
 	os.RemoveAll(tempDir)
 
 	// ── 步骤 5: 更新 store 路径 ──
-	r.history.SetPath(realDir)
-	r.summary.SetPath(realDir)
-	r.memStore.SetPath(realDir)
-	r.events.SetPath(realDir)
-	r.syncCompactorPaths(realDir)
+	r.setStorePaths(realDir)
 
 	// ── 步骤 6: 标记为非临时 ──
 	r.isTemporary = false
 	r.tempID = ""
+	return nil
+}
+
+// initTempSession 启动临时会话：分配 ID、将各 store 指向临时目录。
+//
+// 临时会话不在 manifest 中，首次对话后通过 ensurePersisted 落盘。
+// Run() 和 RunOnce() 共用此初始化逻辑。
+func (r *Runner) initTempSession() error {
+	r.isTemporary = true
+	tempID, err := session.GenerateID()
+	if err != nil {
+		return fmt.Errorf("generate temp session id failed: %w", err)
+	}
+	r.tempID = tempID
+	tempDir := r.sessions.SessionDir(tempID)
+	r.setStorePaths(tempDir)
+	r.cleanOrphanTempDirs()
 	return nil
 }
 

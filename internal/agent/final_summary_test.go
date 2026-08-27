@@ -244,6 +244,12 @@ func TestStreamRequest_IncludesUsage(t *testing.T) {
 	if !includeUsage {
 		t.Error("stream_options.include_usage must be true for token tracking")
 	}
+
+	// 响应侧断言：mock 响应携带 usage.prompt_tokens=10，drainStream 应把
+	// 它落地到 lc.lastInputTokens（若落地逻辑丢失，此处恒 0）。
+	if lc.lastInputTokens == 0 {
+		t.Errorf("lastInputTokens must be populated from stream usage (prompt_tokens=10), got 0")
+	}
 }
 
 func TestPrepareIfNeeded_NoopWithoutCompactor(t *testing.T) {

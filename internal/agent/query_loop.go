@@ -35,7 +35,7 @@ type queryLoopContext struct {
 	toolRegistry      *tool.Registry         // 工具注册表，用于查找和执行工具
 	maxIter           int                    // 最大迭代次数
 	resultLimit       int                    // 结果截断上限（字符数，默认 8000）
-	inputForward      <-chan string          // 输入转发通道（/interrupt 等控制命令），nil = 不启用
+	inputForward      <-chan string          // 输入转发通道：权限确认期间转发输入（/interrupt 修复见后续 fix commit），nil = 不启用
 	events            chan<- QueryEvent      // 事件输出 channel（yield 事件到此）
 	seenToolCalls     map[string]bool        // 已见过的工具调用签名（用于重复检测）
 	totalInputTokens  int                    // 累计输入 token 数
@@ -54,27 +54,30 @@ type queryLoopContext struct {
 //
 //	┌─────────────────────────────────────────────────────────┐
 //	│  for iter := 0; iter < maxIter; iter++                  │
-//	│    ├─ 步骤 4a: callLLMStream()                           │
+//	│    ├─ 步骤 1: ctx 取消检查（支持 /stop）                │
+//	│    │                                                     │
+//	│    ├─ 步骤 2: prepareIfNeeded()                         │
+//	│    │    每次模型调用前运行 s08 四步压缩管线              │
+//	│    │    （字符用量超 contextCharLimit（默认 50K）时压缩）│
+//	│    │                                                     │
+//	│    ├─ 步骤 3: callLLMStream()                           │
 //	│    │    调用 LLM 流式接口，yield Think/Delta 事件         │
 //	│    │    返回: content（文本）+ toolCalls（工具调用列表）    │
 //	│    │                                                     │
-//	│    ├─ 步骤 4b: 检查 toolCalls                             │
+//	│    ├─ 步骤 6: 检查 toolCalls                             │
 //	│    │    if len(toolCalls) == 0 → yield Final + return    │
 //	│    │                                                     │
-//	│    ├─ 步骤 4c: executeToolCalls()                        │
+//	│    ├─ 步骤 7: executeToolCalls()                        │
 //	│    │    对每个 toolCall:                                 │
 //	│    │      ├─ checkToolPermission() ← 工具自检权限        │
 //	│    │      ├─ toolRegistry.Get().Execute() ← 执行工具     │
 //	│    │      ├─ TruncateResult() ← 统一截断                │
 //	│    │      └─ yield ToolCall / ToolResult / Permission    │
 //	│    │                                                     │
-//	│    ├─ 步骤 4d: detectDuplicateAndWarn()                  │
+//	│    ├─ 步骤 8: detectDuplicateAndWarn()                  │
 //	│    │    检测重复调用，注入警告消息                         │
 //	│    │                                                     │
-//	│    ├─ 步骤 4e: prepareIfNeeded()                         │
-//	│    │    字符用量超过 contextCharLimit（默认 50K）时压缩   │
-//	│    │                                                     │
-//	│    └─ yield Continue → 进入下一轮迭代                     │
+//	│    └─ 步骤 9: yield Continue → 进入下一轮迭代            │
 //	│                                                          │
 //	│  超限处理: generateFinalSummary()                         │
 //	│    达到 maxIter → 强制 LLM 生成总结                       │
@@ -153,7 +156,7 @@ func queryLoop(
 // 零值表示使用默认值。
 type queryLoopOptions struct {
 	ResultLimit   int           // 结果截断上限，字符数（默认 8000）
-	InputForward  <-chan string // 输入转发通道（/interrupt 等控制命令），nil = 不启用
+	InputForward  <-chan string // 输入转发通道：权限确认期间转发输入（/interrupt 修复见后续 fix commit），nil = 不启用
 	ActiveRequest string        // 当前轮用户请求（压缩时注入 [Compacted] 消息用）
 	Compactor     *Compactor    // s08 四步压缩管线（nil = 禁用，保持旧行为）
 }
@@ -173,21 +176,21 @@ type queryLoopOptions struct {
 //	9. yield Continue → 回到步骤 1
 func (lc *queryLoopContext) runLoop() {
 	for iter := 0; iter < lc.maxIter; iter++ {
-		// ── 步骤 4-前置: 检查上下文是否被取消 ──
+		// ── 步骤 1: 检查上下文是否被取消 ──
 		// 支持 /stop 命令：Runner 调用 cancel() → ctx.Err() != nil
 		if lc.ctx.Err() != nil {
 			lc.yieldError("query loop cancelled", lc.ctx.Err())
 			return
 		}
 
-		// ── 步骤 4e: 检查并压缩上下文 ──
+		// ── 步骤 2: 检查并压缩上下文 ──
 		// 每次模型调用前运行 s08 四步压缩管线（Prepare）。
 		// compactor 为 nil 时保持旧行为（不压缩）。
 		if !lc.prepareIfNeeded(iter) {
 			return
 		}
 
-		// ── 步骤 4a: 调用 LLM 流式接口 ──
+		// ── 步骤 3: 调用 LLM 流式接口 ──
 		// 流式调用 LLM，通过 channel yield Delta 事件（实时增量文本）。
 		// 返回完整的 content 文本和 toolCalls 列表。
 		content, toolCalls, ok := lc.callLLMStream(iter)
@@ -195,38 +198,38 @@ func (lc *queryLoopContext) runLoop() {
 			return
 		}
 
-		// ── 累计 token 用量 ──
+		// ── 步骤 4: 累计 token 用量 ──
 		lc.accumulateTokens()
 
-		// ── 步骤 4a-后置: 推入 assistant 响应到消息历史 ──
+		// ── 步骤 5: 推入 assistant 响应到消息历史 ──
 		lc.appendAssistantMessage(content, toolCalls)
 
-		// ── 步骤 4b: 检查是否完成 ──
+		// ── 步骤 6: 检查是否完成 ──
 		// 如果没有工具调用，LLM 直接给出了最终答案 → 任务完成。
 		if len(toolCalls) == 0 {
 			lc.yieldFinal(content, iter+1)
 			return
 		}
 
-		// ── 步骤 4c: 执行工具调用 ──
+		// ── 步骤 7: 执行工具调用 ──
 		// 遍历所有工具调用：权限检查 → 查找工具 → 执行 → 截断 → yield 结果。
 		// 权限被拒绝时跳过该工具但继续执行其他工具。
 		if !lc.executeToolCalls(toolCalls, iter) {
 			return
 		}
 
-		// ── 步骤 4c-后置: compact 工具 ──
+		// ── 步骤 7-后置: compact 工具 ──
 		// 整批工具执行完毕（tool 结果已全部追加）后，若模型请求了 compact，
 		// 对该已闭合的回合执行历史摘要（镜像 s08：避免孤儿 tool_result，不丢副作用记录）。
 		if lc.compactor != nil && lc.hasCompactRequest(toolCalls) {
 			lc.messages = lc.compactor.compactHistory(lc.messages, lc.activeRequest)
 		}
 
-		// ── 步骤 4d: 重复调用检测 ──
+		// ── 步骤 8: 重复调用检测 ──
 		// 如果 LLM 重复调用相同的工具+参数，注入警告消息引导 LLM 改变策略。
 		lc.detectDuplicateAndWarn(toolCalls)
 
-		// ── yield: 继续推理 ──
+		// ── 步骤 9: yield 继续推理 ──
 		// 通知上层进入下一轮迭代。
 		lc.yieldContinue(iter + 1)
 	}
@@ -238,7 +241,7 @@ func (lc *queryLoopContext) runLoop() {
 
 // prepareIfNeeded 每次模型调用前运行 s08 四步压缩管线。
 //
-// 与旧 checkAndCompressContext 的差异：
+// 与旧 checkAndCompressContext（该函数已删除）的差异：
 //   - 由 token 阈值触发改为 Prepare 内部按字符超限分级触发（无条件跑步骤 1/2）
 //   - 旧压缩用占位符丢弃信息；新管线每步都落盘可恢复（transcript/tool-results）
 //   - compactor 为 nil 时 no-op（保持旧行为，保护不注入 compactor 的测试）
@@ -407,6 +410,19 @@ func (lc *queryLoopContext) detectDuplicateAndWarn(toolCalls []llm.ToolCall) {
 			Content: fmt.Sprintf("你已经调用过 %s 工具并获得了相同的结果。请根据已有信息直接给出最终回答，不要再调用任何工具。", strings.Join(duplicates, "、")),
 		})
 	}
+}
+
+// singleCallSignature 生成单个工具调用的签名，用于检测重复调用。
+//
+// 签名格式：工具名:参数JSON
+// 与之前的 batch 签名不同，逐条检测能发现单个 toolCall 级别的重复。
+//
+// 返回空字符串表示空的 tool call。
+func singleCallSignature(tc llm.ToolCall) string {
+	if tc.Name == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s:%s", tc.Name, tc.Arguments)
 }
 
 // generateFinalSummary 达到最大迭代次数时，生成最终总结。

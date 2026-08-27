@@ -12,7 +12,8 @@ package agent
 //
 // 重构变化：
 //   - 删除了 DefaultPermissionChecker，权限现在内聚在工具自身（Tool.CheckPermission）
-//   - isDangerousShellCommand / isDangerousFileOperation 移入 shell.go / file.go
+//   - isDangerousShellCommand 移入 shell.go；isDangerousFileOperation 已随重构
+//     删除（文件写危险检测内聚在 file/edit 工具的 CheckPermission）
 //   - 保留 ToolPermissionChecker 接口和全局注入点（极端定制场景）
 //   - 保留全局 ForbiddenTools 列表（管理策略：完全禁用某工具）
 // ──────────────────────────────────────────────────────────
@@ -33,9 +34,9 @@ type ToolPermissionChecker interface {
 // 全局禁止列表
 // ──────────────────────────────────────────────────────────
 
-// ForbiddenTools 全局禁止的工具名称列表。
+// ForbiddenTools 全局禁止的工具名称列表（预留扩展点）。
 // 被列入此列表的工具完全不可执行（管理级别的安全策略）。
-// 如需禁用某工具，在 init() 或 main.go 中向此切片追加工具名。
+// 当前无任何代码向此切片追加，isToolForbidden 的禁用检查恒为 false。
 var ForbiddenTools []string
 
 // isToolForbidden 检查工具是否在全局禁止列表中。

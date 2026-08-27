@@ -56,7 +56,7 @@ func formatBalanceLine(resp *llm.BalanceResponse) string {
 func (r *Runner) queryBalance() (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	resp, err := llm.FetchBalance(ctx, r.llm.APIKey(), balanceBaseURL(r.llm))
+	resp, err := llm.FetchBalance(ctx, r.llm.APIKey(), r.llm.BaseURL())
 	if err != nil {
 		return err.Error(), false
 	}
@@ -84,11 +84,6 @@ func (r *Runner) queryBalanceWith(query balanceQueryFunc) {
 		return
 	}
 	r.balanceFailCount.Store(0)
-}
-
-// balanceBaseURL 获取余额查询使用的 baseURL（复用 OpenAI client 的 BaseURL）。
-func balanceBaseURL(c *llm.OpenAIClient) string {
-	return c.BaseURL()
 }
 
 // handleBalanceCommand 处理 /balance 命令。

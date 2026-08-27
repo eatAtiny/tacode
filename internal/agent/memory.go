@@ -29,6 +29,7 @@ import (
 // 流程（每次对话后执行一次）：
 //   1. 调用 extractor.Extract(userInput, assistantOutput)
 //      → LLM 分析对话，返回 ExtractionResult{Summary, Memories[]}
+//      （Summary 字段当前无消费者（预留），仅 Memories 被处理）
 //   2. 处理 L3 记忆操作：
 //      - create/update → memStore.SaveEntry()（写入 .md 文件 + 更新 MEMORY.md）
 //      - delete → memStore.DeleteEntry()（删除 .md 文件 + 更新 MEMORY.md）
@@ -49,7 +50,8 @@ func (r *Runner) extractMemory(ctx context.Context, round int, userInput, assist
 	// 三级记忆分流：
 	//   - project / reference → 项目级 store（跨会话，data/project-memory/）
 	//   - user / feedback     → 全局 store（跨项目，data/global-memory/）
-	// 会话级不再落 L3（对话细节靠 L2 摘要 + EventStore）。
+	// 会话级不再落 L3（L2 摘要仅在压缩时生成——当前未持久化到 summaries.jsonl，
+	// 对话细节由跨轮累积 messages + EventStore 承载）。
 	// 对应 store 未启用时回退到会话 store（保持旧行为）。
 	for _, action := range result.Memories {
 		// 选择目标 store。
@@ -148,18 +150,20 @@ func (r *Runner) handleMemoryCommand(parts []string) {
 
 // listMemories 列出三级 L3 记忆（全局 → 项目 → 会话，按重要性降序）。
 func (r *Runner) listMemories() {
-	// 辅助：列出单个 store 的记忆。
-	listStore := func(title string, store *memory.MemoryStore) {
+	// 辅助：列出单个 store 的记忆，返回条目数。
+	// -1 表示未读取成功（store 未启用或 ListEntries 出错），0 表示已读取且为空
+	// ——区分二者是为了保持旧行为：读取失败时不提示「暂无记忆」。
+	listStore := func(title string, store *memory.MemoryStore) int {
 		if store == nil {
-			return
+			return -1
 		}
 		entries, err := store.ListEntries()
 		if err != nil {
 			r.ui.OnError(fmt.Errorf("读取记忆失败: %v", err))
-			return
+			return -1
 		}
 		if len(entries) == 0 {
-			return
+			return 0
 		}
 		r.ui.OnMessage(fmt.Sprintf("🌐 %s（%d 条）:", title, len(entries)))
 		for _, e := range entries {
@@ -167,19 +171,17 @@ func (r *Runner) listMemories() {
 			r.ui.OnMessage(fmt.Sprintf("  [%s] %s", e.Type, e.Description))
 			r.ui.OnMessage(fmt.Sprintf("    %s name=%s", importanceIcon, e.Name))
 		}
+		return len(entries)
 	}
 
 	listStore("全局记忆", r.globalMem)
 	listStore("项目记忆", r.projectMem)
-	listStore("会话记忆", r.memStore)
+	sessionCount := listStore("会话记忆", r.memStore)
 
 	if r.globalMem == nil && r.projectMem == nil {
 		// 无全局/项目 store（未启用）时只显示会话记忆，保持旧行为。
-		entries, err := r.memStore.ListEntries()
-		if err != nil {
-			return
-		}
-		if len(entries) == 0 {
+		// 复用上面 listStore 的读取结果判空，不再为判空二次读盘。
+		if sessionCount == 0 {
 			r.ui.OnMessage("  (暂无记忆)")
 		}
 	}
