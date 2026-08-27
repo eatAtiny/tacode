@@ -76,7 +76,7 @@ func TestEvents_ReachChatModel(t *testing.T) {
 	b := startTest(t)
 
 	// 事件方法 → Program.Send → ChatModel.Update → lines 追加
-	// （think 例外：进活区状态行，不占转录——见 chat_test.go TestChatModel_StatusLine）。
+	// （think 例外：进活区状态行不占转录，送达观测见 TestOnThink_SetsStatus）。
 	b.OnThink(1)
 	b.OnMessage("状态更新")
 	b.OnFinal("最终回答", 100, 50, 150)
@@ -99,6 +99,23 @@ func TestEvents_ReachChatModel(t *testing.T) {
 	}
 	if !strings.Contains(joined, "150 tokens") {
 		t.Errorf("对话区应含 token 统计行，实际:\n%s", joined)
+	}
+}
+
+// OnThink 送达 ChatModel：think 不再触碰 lines，送达只能从活区状态行观测。
+// 不在 TestEvents_ReachChatModel 里轮询断言——事件循环 goroutine 写 status、
+// 测试 goroutine 读无 happens-before 边，-race 实测报数据竞争；改为 Close
+// （join 事件循环，Quit 前消息已全部处理）后读取，与本文件读 lines 模式一致。
+func TestOnThink_SetsStatus(t *testing.T) {
+	b := startTest(t)
+
+	b.OnThink(1)
+
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+	if b.chat.status == "" {
+		t.Error("OnThink 后 status 应非空（think 送达只能从状态行观测）")
 	}
 }
 

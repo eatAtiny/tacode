@@ -290,7 +290,10 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.commit(parts...))
 		m.status = ""
 	case chatWelcomeMsg:
-		cmds = append(cmds, m.commit(v.content))
+		// 同 error/message 一致模式：先冲刷流式残余再接内容（welcome 当前
+		// 仅启动时发、理论无进行中流式，防御性保持冲刷一致）。
+		parts := append(m.flushBuf(), v.content)
+		cmds = append(cmds, m.commit(parts...))
 		m.status = ""
 	case chatBalanceMsg:
 		// 余额进 footer 状态栏（常驻显示），不再追加对话行。

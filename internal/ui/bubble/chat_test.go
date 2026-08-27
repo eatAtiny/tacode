@@ -527,9 +527,17 @@ func TestChatModel_ErrorFlushesStream(t *testing.T) {
 		t.Errorf("残余应随错误行定稿，实际:\n%s", all)
 	}
 
-	// 下一轮首个 delta 只注入一次助手前缀（两轮共 2 次）。
+	// 下一轮首个 delta 只注入一次助手前缀。
 	m.Update(chatThinkMsg{iteration: 1})
 	m.Update(chatDeltaMsg{content: "新轮\n"})
+	// 区分度断言用末行单行计数：无冲刷的旧 bug 下泄漏残余与新轮 delta 会
+	// 合并成同一行（行内两个前缀），全量计数仍是 2、无区分度；单行计数
+	// 正常=1（残余已随错误行单独定稿）而 bug=2（合并进一行），才能区分。
+	last := m.lines[len(m.lines)-1]
+	if got := strings.Count(last.text, "助手"); got != 1 {
+		t.Errorf("新轮末行应恰含 1 个助手前缀，实际 %d 个: %q", got, last.text)
+	}
+	// 补充：全量恰好 2 次（每轮一次）。
 	all2 := ""
 	for _, l := range m.lines {
 		all2 += l.text + "\n"
