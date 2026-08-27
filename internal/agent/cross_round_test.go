@@ -180,3 +180,35 @@ func (h *captureHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, stopResponseSSE())
 }
+
+// /stop 主动取消后，queryEngine 收到的流式错误（receive stream failed）应静默：
+// 不 OnError、不返回 error（取消的预期副作用，非真实失败）。
+func TestQueryEngine_CancelledSilencesError(t *testing.T) {
+	handler := &captureHandler{}
+	srv := newTestSSEServer(t, handler)
+	defer srv.Close()
+	client := newLLMClientViaEnv(t, srv.URL)
+
+	dir := t.TempDir()
+	history, _ := memory.NewHistoryStore(dir)
+	summary, _ := memory.NewSummaryStore(dir)
+	memStore, _ := memory.NewMemoryStore(dir)
+	events := memory.NewEventStore(dir)
+	extractor := memory.NewExtractor(client)
+	retriever := memory.NewRetriever(history, summary, memStore, events)
+	tools := tool.NewRegistry()
+	tools.Register(tool.NewListTool())
+
+	runner := NewRunner(client, history, summary, memStore, events, extractor, retriever, tools, nil, text.NewTextUI())
+	compactor := NewCompactor(client, dir+"/transcripts", dir+"/tool-results")
+	runner.SetCompactor(compactor)
+
+	// 取消的 context（模拟 /stop）。
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := runner.queryEngine(ctx, 1, "任务", nil, nil)
+	if err != nil {
+		t.Errorf("取消后 queryEngine 不应返回 error（静默），got: %v", err)
+	}
+}

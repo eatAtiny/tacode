@@ -215,7 +215,15 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 			}()
 
 		case QueryEventError:
-			// 错误：通知 UI 并返回错误信息。
+			// 错误处理：区分「主动取消」与「真实错误」。
+			// /stop（或 /interrupt）主动取消时 ctx 已取消，queryLoop 的流式
+			// 读取会因连接中断返回错误（receive stream failed 等）——
+			// 这是取消的预期副作用，静默处理（不显示错误、不返回 error），
+			// 由 Runner 的 /stop 分支已给出「⏹️ 已停止」反馈。
+			if ctx.Err() != nil {
+				return "", nil, nil
+			}
+			// 真实错误：通知 UI 并返回错误信息。
 			r.ui.OnError(event.Error)
 			return "", nil, fmt.Errorf("query loop error: %w", event.Error)
 		}
