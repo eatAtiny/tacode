@@ -546,3 +546,19 @@ func TestChatModel_ErrorFlushesStream(t *testing.T) {
 		t.Errorf("助手前缀应恰好 2 次（每轮一次），实际 %d 次:\n%s", got, all2)
 	}
 }
+
+// 多行粘贴回归：bracketed paste（v1.3.10 默认开启）以 KeyMsg{Paste:true}
+// 到达，textarea 多行插入，换行不触发 Enter 提交。
+func TestChatModel_PasteMultiline(t *testing.T) {
+	m := NewChatModel()
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("第一行\n第二行"), Paste: true})
+
+	if !strings.Contains(m.textarea.Value(), "\n") {
+		t.Errorf("多行粘贴应保留换行，实际: %q", m.textarea.Value())
+	}
+	select {
+	case got := <-m.SubmitCh():
+		t.Errorf("粘贴不应触发提交，got %q", got)
+	default:
+	}
+}
