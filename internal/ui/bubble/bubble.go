@@ -82,7 +82,8 @@ func (b *BubbleUI) Start(opts ...tea.ProgramOption) error {
 		return nil // 已启动，幂等
 	}
 	done := make(chan struct{})
-	p := tea.NewProgram(b.chat, opts...)
+	// 启用鼠标（CellMotion：滚轮/移动事件），让 viewport 对话区支持滚轮滚动历史。
+	p := tea.NewProgram(b.chat, append([]tea.ProgramOption{tea.WithMouseCellMotion()}, opts...)...)
 	b.program = p
 	b.runDone = done
 	b.uiMu.Unlock()
@@ -209,9 +210,11 @@ func (b *BubbleUI) ShowBalance(line string) {
 // ConfirmPermission 显示权限确认提示，等待用户输入。
 //
 // 聊天界面下的确认输入流转（链路）：
-//   textarea 提交 → ChatModel.submitCh → Runner.Run() 主循环
-//     → queryRunning 分支转发到 inputForward（查询运行中非 nil）
-//     → ConfirmPermission 从 inputForward 读取
+//
+//	textarea 提交 → ChatModel.submitCh → Runner.Run() 主循环
+//	  → queryRunning 分支转发到 inputForward（查询运行中非 nil）
+//	  → ConfirmPermission 从 inputForward 读取
+//
 // 提示先发进对话区（chatMessageMsg），用户据此在 textarea 输入 y/N 回车。
 // inputForward 为 nil（无运行中查询，理论不发生）时回退 ReadInputChan。
 func (b *BubbleUI) ConfirmPermission(tool, args, reason string, inputForward <-chan string) (bool, error) {

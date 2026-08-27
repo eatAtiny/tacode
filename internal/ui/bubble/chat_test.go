@@ -72,6 +72,45 @@ func TestChatModel_SubmitEmpty(t *testing.T) {
 	}
 }
 
+// 双轮提交：第一轮提交 + 事件流后，第二轮仍能提交（Bug 2 复现）。
+func TestChatModel_SubmitTwice(t *testing.T) {
+	m := NewChatModel()
+
+	// 第一轮：输入 + Enter。
+	m.textarea.SetValue("第一轮")
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	select {
+	case got := <-m.SubmitCh():
+		if got != "第一轮" {
+			t.Errorf("第一轮 submit = %q, want 第一轮", got)
+		}
+	default:
+		t.Fatal("第一轮 submitCh 无消息")
+	}
+
+	// 模拟第一轮事件流（think → delta → final）。
+	m.Update(chatThinkMsg{iteration: 1})
+	m.Update(chatDeltaMsg{content: "增量"})
+	m.Update(chatFinalMsg{content: "回答", totalTokens: 100})
+
+	// 第二轮：输入 + Enter。
+	m.textarea.SetValue("第二轮")
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	select {
+	case got := <-m.SubmitCh():
+		if got != "第二轮" {
+			t.Errorf("第二轮 submit = %q, want 第二轮", got)
+		}
+	default:
+		t.Fatal("第二轮 submitCh 无消息（Bug 2：第二轮输入无反应）")
+	}
+
+	// 第二轮用户消息应进对话区。
+	if len(m.lines) < 3 {
+		t.Fatalf("lines = %d, want >= 3（两轮用户消息 + 事件行）", len(m.lines))
+	}
+}
+
 // WindowSizeMsg 更新布局（viewport 高度 = 窗口 - textarea - footer）。
 func TestChatModel_WindowSize(t *testing.T) {
 	m := NewChatModel()

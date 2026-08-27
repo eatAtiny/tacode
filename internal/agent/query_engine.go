@@ -179,7 +179,11 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 		case QueryEventPermission:
 			// 权限确认：调用 UI 获取用户决策，结果写回 channel。
 			// queryLoop 内部阻塞等待此 channel，实现同步确认。
+			// 设置 permWaiting：主循环据此把输入转发给 ConfirmPermission
+			// （而非排队），确认完成后清除。
+			r.permWaiting.Store(true)
 			approved, _ := r.ui.ConfirmPermission(event.PermissionTool, event.PermissionArgs, event.PermissionReason, inputForward)
+			r.permWaiting.Store(false)
 			if event.PermissionCh != nil {
 				event.PermissionCh <- approved
 			}
