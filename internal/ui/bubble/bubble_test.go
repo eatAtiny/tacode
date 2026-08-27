@@ -21,30 +21,6 @@ func TestBubbleUIClose(t *testing.T) {
 	}
 }
 
-func TestBubbleUISetters(t *testing.T) {
-	b := NewBubbleUI()
-
-	b.SetSessionName("test")
-	if b.sessionName != "test" {
-		t.Fatalf("sessionName should be 'test', got %q", b.sessionName)
-	}
-
-	b.SetModel("gpt-4")
-	if b.model != "gpt-4" {
-		t.Fatalf("model should be 'gpt-4', got %q", b.model)
-	}
-
-	b.UpdateTokens(100, 50)
-	if b.inputTokens != 100 || b.outputTokens != 50 {
-		t.Fatalf("tokens should be 100/50, got %d/%d", b.inputTokens, b.outputTokens)
-	}
-
-	b.ResetTokens()
-	if b.inputTokens != 0 || b.outputTokens != 0 {
-		t.Fatalf("tokens should be 0/0 after reset, got %d/%d", b.inputTokens, b.outputTokens)
-	}
-}
-
 func TestTrimArgs(t *testing.T) {
 	tests := []struct {
 		input  string

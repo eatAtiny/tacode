@@ -59,16 +59,6 @@ type BubbleUI struct {
 	// toolView 工具调用弹窗组件（预留，未来实现交互式工具详情查看）
 	toolView *components.ToolViewModel
 
-	// sessionName 当前会话的显示名称（由 Runner.SetSessionName 设置）
-	sessionName string
-	// model 当前使用的 LLM 模型名称（启动时设置）
-	model string
-
-	// inputTokens 本轮已累计的输入 token 数
-	inputTokens int
-	// outputTokens 本轮已累计的输出 token 数
-	outputTokens int
-
 	// balanceText 账户余额展示文本（/balance 成功后由 Runner 设置）
 	balanceText string
 
@@ -447,32 +437,6 @@ func (b *BubbleUI) Welcome(model string) {
 	fmt.Printf("  %s  %s\n", muted.Render("Usage"), muted.Render("输入任务开始对话，输入 exit 退出"))
 	fmt.Printf("  %s  %s\n", muted.Render("Cmds "), muted.Render("/new /list /switch /delete /rename /current"))
 	fmt.Println()
-}
-
-// ──────────────────────────────────────────────────────────
-// UI 接口实现：元数据设置
-// ──────────────────────────────────────────────────────────
-
-// SetSessionName 设置当前会话的显示名称。
-func (b *BubbleUI) SetSessionName(name string) {
-	b.sessionName = name
-}
-
-// SetModel 设置当前使用的模型名称。
-func (b *BubbleUI) SetModel(model string) {
-	b.model = model
-}
-
-// UpdateTokens 累计本轮 token 用量。
-func (b *BubbleUI) UpdateTokens(input, output int) {
-	b.inputTokens += input
-	b.outputTokens += output
-}
-
-// ResetTokens 重置本轮 token 计数（新一轮查询开始前调用）。
-func (b *BubbleUI) ResetTokens() {
-	b.inputTokens = 0
-	b.outputTokens = 0
 }
 
 // ──────────────────────────────────────────────────────────

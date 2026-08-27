@@ -9,7 +9,7 @@
 //  1. 输入组：ReadInput / ReadInputChan — 读取用户输入
 //  2. 事件通知组：OnThink / OnDelta / OnToolCall / OnToolResult / OnContinue / OnFinal / OnError / OnMessage / ShowBalance
 //  3. 交互组：ConfirmPermission — 权限确认
-//  4. 生命周期组：Welcome / Close / SetSessionName / SetModel / UpdateTokens / ResetTokens
+//  4. 生命周期组：Welcome / Close
 package ui
 
 // UI 定义了 Agent 与用户交互的接口。
@@ -149,23 +149,4 @@ type UI interface {
 	// 调用时机：Runner.Run() 退出时（正常退出或错误退出）。
 	// 典型实现：恢复终端状态（raw mode → cooked mode）、关闭文件句柄。
 	Close() error
-
-	// SetSessionName 设置当前会话的显示名称。
-	// 调用时机：会话创建/切换时，Runner 更新 UI 显示的会话名。
-	SetSessionName(name string)
-
-	// SetModel 设置当前使用的模型名称。
-	// 调用时机：初始化时设置一次，后续模型不变（目前不支持运行时切换模型）。
-	SetModel(model string)
-
-	// UpdateTokens 累计本轮 token 用量。
-	// input 是输入 token 增量，output 是输出 token 增量。
-	//
-	// 调用时机：每次 LLM 调用完成后（在 queryEngine 消费事件时）。
-	// 配合 ResetTokens 使用，每轮查询开始时重置，结束时显示总用量。
-	UpdateTokens(input, output int)
-
-	// ResetTokens 重置本轮 token 计数。
-	// 调用时机：每轮新查询开始前。
-	ResetTokens()
 }

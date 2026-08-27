@@ -194,13 +194,8 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 			finalIteration = event.Iteration
 			finalMessages = event.Messages
 
-			// 状态栏 token 统计：每轮结束时用 Final 事件的精确累计值更新。
-			// 注意必须在 OnFinal 之前调用——OnFinal 末尾会重绘状态栏，
-			// 提前累计才能让本轮 token 段显示正确数值（否则一直是 0）。
-			// queryLoop 内部可能有多次 LLM 调用（工具迭代），但这里只在
-			// Final 时累计一次（Final 事件携带全程累计值），避免重复累加。
-			r.ui.UpdateTokens(event.InputTokens, event.OutputTokens)
-
+			// OnFinal 的 token 行直接读取 Final 事件携带的精确累计值
+			// （queryLoop 内部多次 LLM 调用已累加，Final 是最终值）。
 			r.ui.OnFinal(finalAnswer, event.InputTokens, event.OutputTokens, event.TotalTokens)
 
 			// 每轮结束展示余额（/balance 开启后生效，失败静默；连续失败达到阈值时提示一次）。

@@ -209,10 +209,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 
-	// 设置 UI 初始状态。
-	r.ui.SetSessionName("new")
-	r.ui.SetModel(r.llm.Model())
-
 	// 显示欢迎信息。
 	r.ui.Welcome(r.llm.Model())
 
@@ -297,7 +293,6 @@ func (r *Runner) Run(ctx context.Context) error {
 
 			// ── 子分支 A3: 普通输入，启动异步查询 ──
 			round++
-			r.ui.ResetTokens()
 
 			// 记录用户输入事件。
 			r.events.Append(memory.Event{
@@ -423,10 +418,6 @@ func (r *Runner) RunOnce(ctx context.Context, input string) (string, error) {
 	if err := r.initTempSession(); err != nil {
 		return "", err
 	}
-
-	// 设置 UI 初始状态（TextUI 中为空操作，保持调用统一）。
-	r.ui.SetSessionName("new")
-	r.ui.SetModel(r.llm.Model())
 
 	// ── 记录用户输入事件（与 Run() 一致） ──
 	r.events.Append(memory.Event{
