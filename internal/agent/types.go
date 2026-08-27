@@ -90,7 +90,7 @@ const (
 //   - 通用字段：Type、Content、Iteration
 //   - 工具调用：ToolCalls、ToolName、ToolResult、IsError
 //   - Token 追踪：InputTokens、OutputTokens、TotalTokens
-//   - 权限确认：PermissionRequired、PermissionTool、PermissionArgs、PermissionReason、PermissionCh
+//   - 权限确认：PermissionTool、PermissionArgs、PermissionReason、PermissionCh
 //   - 错误：Error
 //
 // 使用场景：
@@ -120,10 +120,9 @@ type QueryEvent struct {
 	// ── 跨轮累积字段（final 类型时有效） ──
 	Messages []llm.ChatMessage // 查询结束后的完整消息数组（供 Runner 跨轮累积）
 
-	// ── 权限请求字段（PermissionRequired 为 true 时有效） ──
-	PermissionRequired bool     // 是否需要权限确认
-	PermissionTool     string   // 需要确认的工具名
-	PermissionArgs     string   // 工具参数（JSON 字符串）
-	PermissionReason   string   // 需要确认的原因（如 "high_risk_operation"）
-	PermissionCh       chan bool // 上层写入确认结果（true=允许，false=拒绝）
+	// ── 权限请求字段（permission 类型时有效） ──
+	PermissionTool   string    // 需要确认的工具名
+	PermissionArgs   string    // 工具参数（JSON 字符串）
+	PermissionReason string    // 需要确认的原因（如 "high_risk_operation"）
+	PermissionCh     chan bool // 上层写入确认结果（true=允许，false=拒绝）
 }

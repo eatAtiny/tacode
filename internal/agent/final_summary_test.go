@@ -198,7 +198,7 @@ func TestGenerateFinalSummary_AppendsStopPrompt(t *testing.T) {
 //
 // 背景：ChatWithToolsStream 若未设置 stream_options.include_usage，
 // OpenAI 流式响应不返回 usage 字段 → InputTokens/OutputTokens 恒 0，
-// 累计 token 统计为空，压缩判断退化为纯估算。
+// 累计 token 统计恒为空。
 // 本测试断言流式请求必须带 include_usage=true。
 // ──────────────────────────────────────────────────────────
 
@@ -243,57 +243,6 @@ func TestStreamRequest_IncludesUsage(t *testing.T) {
 	includeUsage, _ := streamOpts["include_usage"].(bool)
 	if !includeUsage {
 		t.Error("stream_options.include_usage must be true for token tracking")
-	}
-}
-
-// ──────────────────────────────────────────────────────────
-// Token 精确账本（usage 校准）
-//
-// queryLoopContext.msgTokens 记录消息数组的精确 token 数：
-//   - callLLMStream 收到 usage 时校准（API 真实值）
-//   - checkAndCompressContext 优先用精确值，未知时回退估算
-//   - 压缩后旧账本失效（消息变了）
-// ──────────────────────────────────────────────────────────
-
-// usageSSE 生成带 usage 的流式响应。
-func usageSSE() string {
-	return "data: " + `{"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,` +
-		`"model":"gpt-4o-mini","choices":[{"index":0,` +
-		`"delta":{"content":"final answer","role":"assistant"},"finish_reason":"stop"}],` +
-		`"usage":{"prompt_tokens":1234,"completion_tokens":56}}` + "\n\n" +
-		"data: [DONE]\n\n"
-}
-
-func TestCallLLMStream_CalibratesMsgTokens(t *testing.T) {
-	handler := &sseHandler{response: usageSSE()}
-	srv := httptest.NewServer(handler)
-	defer srv.Close()
-
-	client := newLLMClientViaEnv(t, srv.URL)
-	events := make(chan QueryEvent, 16)
-	lc := &queryLoopContext{
-		ctx:       context.Background(),
-		llmClient: client,
-		messages: []llm.ChatMessage{
-			{Role: "system", Content: "s"},
-			{Role: "user", Content: "u"},
-		},
-		maxIter:   10,
-		events:    events,
-		msgTokens: -1,
-	}
-
-	// 同步调用 callLLMStream（mock server 立即返回）。
-	go func() {
-		lc.callLLMStream(0)
-		close(events)
-	}()
-	for range events {
-	}
-
-	// usage.prompt_tokens=1234 → msgTokens 校准为 1234（API 真实值）。
-	if lc.msgTokens != 1234 {
-		t.Errorf("msgTokens should be calibrated to 1234, got %d", lc.msgTokens)
 	}
 }
 
@@ -344,9 +293,5 @@ func TestPrepareIfNeeded_CompactsOverLimit(t *testing.T) {
 	}
 	if len(lc.messages) > snipMaxMessages+2 {
 		t.Errorf("messages should be compacted near %d, got %d", snipMaxMessages, len(lc.messages))
-	}
-	// 压缩后 token 账本失效。
-	if lc.msgTokens != -1 {
-		t.Errorf("msgTokens should be reset to -1 after compression, got %d", lc.msgTokens)
 	}
 }

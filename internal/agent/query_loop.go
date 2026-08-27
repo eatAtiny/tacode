@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"agentic/internal/llm"
-	"agentic/internal/memory"
 	"agentic/internal/tool"
 
 	openai "github.com/sashabaranov/go-openai"
@@ -20,9 +19,6 @@ import (
 // ──────────────────────────────────────────────────────────
 // 常量定义（默认值，可由 config 覆盖）
 // ──────────────────────────────────────────────────────────
-
-// defaultCompressThreshold 默认压缩阈值：token 使用率超过 80% 触发压缩。
-const defaultCompressThreshold = 0.8
 
 // defaultResultLimit 默认结果截断上限（字符数）。
 const defaultResultLimit = 8000
@@ -39,8 +35,6 @@ type queryLoopContext struct {
 	tools             []openai.Tool          // 工具定义列表（OpenAI function calling 格式）
 	toolRegistry      *tool.Registry         // 工具注册表，用于查找和执行工具
 	maxIter           int                    // 最大迭代次数
-	contextLimit      int                    // 模型上下文窗口大小（token 数）
-	compressThreshold float64                // 压缩阈值（token 使用率，默认 0.8）
 	resultLimit       int                    // 结果截断上限（字符数，默认 8000）
 	inputForward      <-chan string          // 输入转发通道（/interrupt 等控制命令），nil = 不启用
 	events            chan<- QueryEvent      // 事件输出 channel（yield 事件到此）
@@ -49,9 +43,7 @@ type queryLoopContext struct {
 	totalOutputTokens int                    // 累计输出 token 数
 	lastInputTokens   int                    // 暂存每次调用的输入 token 数
 	lastOutputTokens  int                    // 暂存每次调用的输出 token 数
-	currentIter       int                    // 当前迭代次数（用于 mtime 追踪）
 	fileReads         map[string]time.Time   // 已读文件的 mtime（key=绝对路径，用于 read-before-edit 检测）
-	msgTokens         int                    // 消息数组精确 token 数（来自 API usage），-1 = 未知（用估算）
 	compactor         *Compactor             // s08 四步压缩管线（nil = 禁用）
 	activeRequest     string                 // 当前轮用户请求（压缩时注入 [Compacted] 消息用）
 	reactiveRetries   int                    // prompt_too_long 补救重试次数（上限 MAX_REACTIVE_RETRIES）
@@ -80,8 +72,8 @@ type queryLoopContext struct {
 //	│    ├─ 步骤 4d: detectDuplicateAndWarn()                  │
 //	│    │    检测重复调用，注入警告消息                         │
 //	│    │                                                     │
-//	│    ├─ 步骤 4e: checkAndCompressContext()                 │
-//	│    │    token 超过 80% 阈值时压缩旧消息                   │
+//	│    ├─ 步骤 4e: prepareIfNeeded()                         │
+//	│    │    字符用量超过 contextCharLimit（默认 50K）时压缩   │
 //	│    │                                                     │
 //	│    └─ yield Continue → 进入下一轮迭代                     │
 //	│                                                          │
@@ -102,8 +94,7 @@ type queryLoopContext struct {
 //   - tools: 工具定义列表（OpenAI function calling 格式）
 //   - toolRegistry: 工具注册表，用于查找和执行工具
 //   - maxIter: 最大迭代次数，防止无限循环
-//   - contextLimit: 模型的上下文窗口大小（token 数），用于压缩检查
-//   - opts: 可选配置（压缩阈值、结果截断上限），零值使用默认
+//   - opts: 可选配置（结果截断上限等），零值使用默认
 //
 // 返回：
 //   - <-chan QueryEvent: 只读 channel，上层通过 range 实时读取中间事件
@@ -114,7 +105,6 @@ func queryLoop(
 	tools []openai.Tool,
 	toolRegistry *tool.Registry,
 	maxIter int,
-	contextLimit int,
 	opts ...queryLoopOptions,
 ) <-chan QueryEvent {
 	events := make(chan QueryEvent)
@@ -123,15 +113,11 @@ func queryLoop(
 		defer close(events)
 
 		// 应用可选配置（零值回退默认）。
-		compressThreshold := defaultCompressThreshold
 		resultLimit := defaultResultLimit
 		var inputForward <-chan string
 		var activeRequest string
 		var compactor *Compactor
 		if len(opts) > 0 {
-			if opts[0].CompressThreshold > 0 {
-				compressThreshold = opts[0].CompressThreshold
-			}
 			if opts[0].ResultLimit > 0 {
 				resultLimit = opts[0].ResultLimit
 			}
@@ -142,22 +128,19 @@ func queryLoop(
 
 		// 初始化循环上下文。
 		lc := &queryLoopContext{
-			ctx:               ctx,
-			llmClient:         llmClient,
-			messages:          messages,
-			tools:             tools,
-			toolRegistry:      toolRegistry,
-			maxIter:           maxIter,
-			contextLimit:      contextLimit,
-			compressThreshold: compressThreshold,
-			resultLimit:       resultLimit,
-			inputForward:      inputForward,
-			events:            events,
-			seenToolCalls:     make(map[string]bool),
-			fileReads:         make(map[string]time.Time),
-			msgTokens:         -1, // 未知，首次压缩判断用估算
-			compactor:         compactor,
-			activeRequest:     activeRequest,
+			ctx:           ctx,
+			llmClient:     llmClient,
+			messages:      messages,
+			tools:         tools,
+			toolRegistry:  toolRegistry,
+			maxIter:       maxIter,
+			resultLimit:   resultLimit,
+			inputForward:  inputForward,
+			events:        events,
+			seenToolCalls: make(map[string]bool),
+			fileReads:     make(map[string]time.Time),
+			compactor:     compactor,
+			activeRequest: activeRequest,
 		}
 
 		// 执行核心循环。
@@ -170,11 +153,10 @@ func queryLoop(
 // queryLoopOptions queryLoop 的可选配置参数。
 // 零值表示使用默认值。
 type queryLoopOptions struct {
-	CompressThreshold float64 // token 使用率压缩阈值（默认 0.8）
-	ResultLimit       int     // 结果截断上限，字符数（默认 8000）
-	InputForward      <-chan string // 输入转发通道（/interrupt 等控制命令），nil = 不启用
-	ActiveRequest     string  // 当前轮用户请求（压缩时注入 [Compacted] 消息用）
-	Compactor         *Compactor // s08 四步压缩管线（nil = 禁用，保持旧行为）
+	ResultLimit   int           // 结果截断上限，字符数（默认 8000）
+	InputForward  <-chan string // 输入转发通道（/interrupt 等控制命令），nil = 不启用
+	ActiveRequest string        // 当前轮用户请求（压缩时注入 [Compacted] 消息用）
+	Compactor     *Compactor    // s08 四步压缩管线（nil = 禁用，保持旧行为）
 }
 
 // runLoop 执行核心 ReAct 循环。
@@ -182,7 +164,7 @@ type queryLoopOptions struct {
 // 循环体（每次迭代）：
 //
 //	1. 检查 ctx 是否被取消（支持 /stop）
-//	2. 检查并压缩上下文（token 用量超过 80% 阈值）
+//	2. 运行压缩管线（字符用量超过 contextCharLimit 时压缩，默认上限 50K）
 //	3. 调用 LLM 流式接口 → 收集 content + toolCalls
 //	4. 累计 token 用量
 //	5. 推入 assistant 消息到历史
@@ -192,8 +174,6 @@ type queryLoopOptions struct {
 //	9. yield Continue → 回到步骤 1
 func (lc *queryLoopContext) runLoop() {
 	for iter := 0; iter < lc.maxIter; iter++ {
-		lc.currentIter = iter
-
 		// ── 步骤 4-前置: 检查上下文是否被取消 ──
 		// 支持 /stop 命令：Runner 调用 cancel() → ctx.Err() != nil
 		if lc.ctx.Err() != nil {
@@ -241,7 +221,6 @@ func (lc *queryLoopContext) runLoop() {
 		// 对该已闭合的回合执行历史摘要（镜像 s08：避免孤儿 tool_result，不丢副作用记录）。
 		if lc.compactor != nil && lc.hasCompactRequest(toolCalls) {
 			lc.messages = lc.compactor.compactHistory(lc.messages, lc.activeRequest)
-			lc.msgTokens = -1
 		}
 
 		// ── 步骤 4d: 重复调用检测 ──
@@ -258,11 +237,6 @@ func (lc *queryLoopContext) runLoop() {
 	lc.generateFinalSummary()
 }
 
-// checkAndCompressContext 检查 token 用量，接近上限时压缩。
-//
-// 压缩策略：
-//   - 保留 system prompt（第 0 条消息，始终不动）
-//   - 保留最近 2 轮的工具调用（4 条消息：assistant + tool × 2）
 // prepareIfNeeded 每次模型调用前运行 s08 四步压缩管线。
 //
 // 与旧 checkAndCompressContext 的差异：
@@ -281,8 +255,6 @@ func (lc *queryLoopContext) prepareIfNeeded(iter int) bool {
 	before := len(lc.messages)
 	lc.messages = lc.compactor.Prepare(lc.messages, lc.activeRequest)
 	if len(lc.messages) != before {
-		// 压缩改变了消息内容，旧 token 账本失效。
-		lc.msgTokens = -1
 		// yield: 压缩事件（供 UI 提示）。
 		lc.events <- QueryEvent{
 			Type:      QueryEventThink,
@@ -340,7 +312,6 @@ func (lc *queryLoopContext) callLLMStream(iter int) (string, []llm.ToolCall, boo
 		if lc.compactor != nil && isTooLongError(streamErr) && lc.reactiveRetries < maxReactiveRetries {
 			lc.reactiveRetries++
 			lc.messages = lc.compactor.reactiveCompact(lc.messages, lc.activeRequest)
-			lc.msgTokens = -1
 			fullContent, toolCalls = "", nil
 			continue // 压缩后重试
 		}
@@ -377,11 +348,8 @@ func (lc *queryLoopContext) drainStream(streamChan <-chan llm.StreamEvent, iter 
 			*inputTokens = streamEvent.InputTokens
 			*outputTokens = streamEvent.OutputTokens
 			// usage.prompt_tokens 是本次请求输入消息的精确 token 数
-			// （API 计算，含 role 标记/JSON schema 结构开销）。
-			// 用它校准消息数组的 token 账本；0 表示 API 未返回（兜底估算）。
-			if *inputTokens > 0 {
-				lc.msgTokens = *inputTokens
-			}
+			// （API 计算，含 role 标记/JSON schema 结构开销），
+			// 供 accumulateTokens 累计到本轮 token 统计。
 			if streamEvent.Content != "" {
 				*fullContent = streamEvent.Content
 			}
@@ -394,7 +362,8 @@ func (lc *queryLoopContext) drainStream(streamChan <-chan llm.StreamEvent, iter 
 	return nil
 }
 
-// lastInputTokens 和 lastOutputTokens 用于暂存每次调用的 token 数。
+// accumulateTokens 把最近一次调用暂存的输入/输出 token（lastInputTokens/
+// lastOutputTokens）累加到总计。
 func (lc *queryLoopContext) accumulateTokens() {
 	lc.totalInputTokens += lc.lastInputTokens
 	lc.totalOutputTokens += lc.lastOutputTokens
@@ -416,7 +385,7 @@ func (lc *queryLoopContext) appendAssistantMessage(content string, toolCalls []l
 //     → 用 goroutine 并行执行
 //  2. 其余工具 → 串行执行
 //
-// 并行执行时收集完整结果，然后按原始顺序 yield 事件和推入消息。
+// 并发批内按原始顺序 yield 事件和推入消息（并发批整体先于串行批）。
 // 设计参考 Claude Code 的 StreamingToolExecutor。
 //
 // 返回：
@@ -435,7 +404,7 @@ func (lc *queryLoopContext) executeToolCalls(toolCalls []llm.ToolCall, iter int)
 
 	// ── 分类：并发安全 vs 串行 ──
 	//
-	// 并发安全条件（三者同时满足）：
+	// 并发安全条件（以下条件同时满足）：
 	//   1. 工具存在
 	//   2. IsConcurrencySafe(args) == true
 	//   3. IsReadOnly(args) == true
@@ -778,13 +747,12 @@ func (lc *queryLoopContext) checkToolPermission(tc llm.ToolCall, t tool.Tool, it
 	// ── 需要确认 ──
 	ch := make(chan bool, 1)
 	lc.events <- QueryEvent{
-		Type:               QueryEventPermission,
-		PermissionRequired: true,
-		PermissionTool:     tc.Name,
-		PermissionArgs:     tc.Arguments,
-		PermissionReason:   perm.Reason,
-		PermissionCh:       ch,
-		Iteration:          iter + 1,
+		Type:             QueryEventPermission,
+		PermissionTool:   tc.Name,
+		PermissionArgs:   tc.Arguments,
+		PermissionReason: perm.Reason,
+		PermissionCh:     ch,
+		Iteration:        iter + 1,
 	}
 
 	// 阻塞等待用户确认。
@@ -979,160 +947,4 @@ func (lc *queryLoopContext) recordFileRead(toolName string, args string) {
 	}
 
 	lc.fileReads[absPath] = info.ModTime()
-}
-
-// ──────────────────────────────────────────────────────────
-// 辅助函数
-// ──────────────────────────────────────────────────────────
-
-// estimateMessagesTokens 估算消息数组的 token 数。
-//
-// 计算方式：遍历所有消息，对每条消息的 content、工具调用名和参数
-// 逐段调用 memory.EstimateTokens 累加（避免拼接大字符串的重复分配）。
-// 结果乘 1.2 安全系数，覆盖 role 标记、JSON schema 等结构性开销——
-// 纯文本估算会低估真实用量，压缩判断宁可偏早不可偏晚。
-func estimateMessagesTokens(messages []llm.ChatMessage) int {
-	var total int
-	for _, msg := range messages {
-		total += memory.EstimateTokens(msg.Content)
-		for _, tc := range msg.ToolCalls {
-			total += memory.EstimateTokens(tc.Name + tc.Arguments)
-		}
-	}
-	return total + total/5 // *1.2 安全系数（total/5 为整数除法）
-}
-
-// compressMessages 压缩旧的工具调用消息，减少 token 用量。
-//
-// 策略：
-//   - 保留 system prompt（第 0 条，始终不动）
-//   - 保留最近 2 轮的工具调用（完整保留 4 条消息）
-//   - 压缩更早的 assistant(含 toolCalls) 消息 → "[已压缩] 调用工具: xxx"
-//   - 压缩更早的 tool(结果) 消息 → "[已压缩] 工具结果（完整内容已持久化）"
-//   - 非工具消息保留原样
-//
-// 与旧实现的差异：
-//   - tool 结果占位符改为中性描述，不再用 Contains("出错"/"错误") 猜测状态
-//     （工具输出含"错误码说明"文档也会被误判为失败）
-//   - 被压缩的完整结果由调用方（compressMessagesWithPersistence）持久化，
-//     LLM 可通过 file read 回读，避免信息不可逆丢失
-//
-// 这样在 token 接近上限时仍能保留上下文的关键信息。
-func compressMessages(messages []llm.ChatMessage, _ int) []llm.ChatMessage {
-	if len(messages) <= 3 {
-		return messages // 消息太少，不需要压缩
-	}
-
-	// 找到需要压缩的消息范围。
-	// 保留：system prompt + 最近 2 轮的工具调用（4 条消息：assistant + tool + assistant + tool）
-	// 压缩：更早的工具调用
-	compressEnd := len(messages) - 4 // 保留最后 4 条消息
-	if compressEnd < 1 {
-		compressEnd = 1
-	}
-
-	// 创建压缩后的消息数组。
-	compressed := make([]llm.ChatMessage, 0, len(messages))
-	compressed = append(compressed, messages[0]) // 保留 system prompt
-
-	// 压缩早期的工具调用消息。
-	for i := 1; i < compressEnd; i++ {
-		msg := messages[i]
-		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
-			// 压缩 assistant 的工具调用消息。
-			// 注意：必须保留 ToolCalls 结构！OpenAI API 要求 role=tool 消息
-			// 紧跟一条带匹配 tool_calls 的 assistant，否则返回 400
-			// ("Messages with role 'tool' must be a response to a preceding message with 'tool_calls'")。
-			// 只替换 Content 为占位符，ToolCalls 原样保留以维持配对。
-			toolNames := make([]string, len(msg.ToolCalls))
-			for j, tc := range msg.ToolCalls {
-				toolNames[j] = tc.Name
-			}
-			compressed = append(compressed, llm.ChatMessage{
-				Role:      "assistant",
-				Content:   fmt.Sprintf("[已压缩] 调用工具: %s", strings.Join(toolNames, ", ")),
-				ToolCalls: msg.ToolCalls, // 保留，避免产生孤儿 tool 消息
-			})
-		} else if msg.Role == "tool" {
-			// 压缩工具结果消息：中性占位符（不再猜测成功/失败）。
-			// 完整内容由 compressMessagesWithPersistence 预先持久化，
-			// 占位符带上回读提示（持久化失败时退化为纯占位符）。
-			compressed = append(compressed, llm.ChatMessage{
-				Role:       "tool",
-				Content:    "[已压缩] 工具结果（完整内容已持久化，可使用 file read 读取）",
-				ToolCallID: msg.ToolCallID,
-			})
-		} else {
-			// 其他消息保留原样。
-			compressed = append(compressed, msg)
-		}
-	}
-
-	// 保留最近的工具调用消息（完整保留）。
-	compressed = append(compressed, messages[compressEnd:]...)
-
-	return compressed
-}
-
-// compressMessagesWithPersistence 压缩消息，并在压缩前把被压缩的 tool 结果
-// 完整持久化到 toolResultsDir（默认 data/tool-results），占位符带回读路径。
-//
-// 调用时机：checkAndCompressContext 触发压缩时。
-// 持久化失败不阻断压缩（降级为纯占位符，与旧行为一致）。
-func (lc *queryLoopContext) compressMessagesWithPersistence(messages []llm.ChatMessage, iter int, toolResultsDir string) []llm.ChatMessage {
-	if len(messages) <= 3 {
-		return messages
-	}
-
-	// 先持久化将被压缩的 tool 结果，再替换占位符。
-	compressEnd := len(messages) - 4
-	if compressEnd < 1 {
-		compressEnd = 1
-	}
-
-	// 为每条将被压缩的 tool 消息持久化完整内容，并把路径写进占位符。
-	// 需要先持久化再构造消息：遍历被压缩区间，收集 tool 结果。
-	var toolResults []struct {
-		content   string
-		toolCallID string
-	}
-	for i := 1; i < compressEnd; i++ {
-		msg := messages[i]
-		if msg.Role == "tool" && strings.TrimSpace(msg.Content) != "" {
-			toolResults = append(toolResults, struct {
-				content   string
-				toolCallID string
-			}{content: msg.Content, toolCallID: msg.ToolCallID})
-		}
-	}
-
-	// 持久化每个结果。
-	if toolResultsDir == "" {
-		toolResultsDir = tool.DefaultToolResultsDir
-	}
-	savedPaths := make(map[string]string, len(toolResults)) // key=toolCallID
-	for _, tr := range toolResults {
-		if tr.content == "" {
-			continue
-		}
-		if path, err := tool.SaveLargeResult(toolResultsDir, "compressed", tr.content); err == nil {
-			savedPaths[tr.toolCallID] = path
-		}
-	}
-
-	compressed := compressMessages(messages, iter)
-
-	// 把占位符替换为带回读路径的版本（仅当持久化成功）。
-	if len(savedPaths) > 0 {
-		for i := range compressed {
-			if compressed[i].Role != "tool" {
-				continue
-			}
-			if path, ok := savedPaths[compressed[i].ToolCallID]; ok {
-				compressed[i].Content = fmt.Sprintf("[已压缩] 工具结果（完整内容已保存到: %s，可使用 file read 读取）", path)
-			}
-		}
-	}
-
-	return compressed
 }

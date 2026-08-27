@@ -42,7 +42,7 @@ const maxIterations = 10
 //	            │    └─ runLoop()           ←   步骤 4a-4f 的 while 循环
 //	            │         ├─ callLLMStream() ←   步骤 4a: 调用 LLM 流式接口
 //	            │         ├─ executeToolCalls() ← 步骤 4b: 执行工具调用
-//	            │         ├─ checkAndCompressContext() ← 步骤 4c: 检查并压缩上下文
+//	            │         ├─ prepareIfNeeded() ← 步骤 4c: 模型调用前运行 s08 压缩管线
 //	            │         ├─ detectDuplicateAndWarn() ← 步骤 4d: 检测重复调用
 //	            │         └─ generateFinalSummary()   ← 步骤 4e: 超限时生成总结
 //	            └─ 消费 event channel       ← 步骤 5: 转发事件到 UI + EventStore
@@ -194,15 +194,6 @@ func (r *Runner) resultLimit() int {
 		return *r.config.ResultLimit
 	}
 	return defaultResultLimit
-}
-
-// compressThreshold 返回上下文压缩阈值（token 使用率）。
-// 优先使用 config 中的显式设置，否则回退到代码默认 0.8。
-func (r *Runner) compressThreshold() float64 {
-	if r.config != nil && r.config.CompressThreshold != nil {
-		return *r.config.CompressThreshold
-	}
-	return defaultCompressThreshold
 }
 
 // Run 进入交互循环：读用户输入 -> QueryEngine -> 保存记忆。

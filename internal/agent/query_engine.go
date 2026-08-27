@@ -114,13 +114,11 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 	// ═══════════════════════════════════════════════════════
 	// queryLoop 返回一个只读 channel，内部 goroutine 持续 yield 事件。
 	// 上层通过 range channel 实时消费事件，无需轮询。
-	contextLimit := r.llm.ContextLimit()
-	eventChan := queryLoop(ctx, r.llm, messages, tools, r.tools, r.maxIter(), contextLimit, queryLoopOptions{
-		CompressThreshold: r.compressThreshold(),
-		ResultLimit:       r.resultLimit(),
-		InputForward:      inputForward,
-		ActiveRequest:     userInput,
-		Compactor:         r.compactor,
+	eventChan := queryLoop(ctx, r.llm, messages, tools, r.tools, r.maxIter(), queryLoopOptions{
+		ResultLimit:   r.resultLimit(),
+		InputForward:  inputForward,
+		ActiveRequest: userInput,
+		Compactor:     r.compactor,
 	})
 
 	// ═══════════════════════════════════════════════════════
@@ -136,7 +134,6 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 	//   - final      → UI.OnFinal()      渲染最终回答（Markdown）
 	//   - error      → UI.OnError()      显示错误并返回
 	var finalAnswer string
-	var finalIteration int
 	var finalMessages []llm.ChatMessage // 查询结束后的完整消息数组（跨轮累积）
 
 	for event := range eventChan {
@@ -169,7 +166,6 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 			// 工具执行结果：记录到事件日志并通知 UI。
 			r.events.Append(memory.Event{
 				Type:       memory.EventToolResult,
-				ToolCallID: "",
 				ToolName:   event.ToolName,
 				ToolResult: event.ToolResult,
 				IsError:    event.IsError,
@@ -195,7 +191,6 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 		case QueryEventFinal:
 			// 最终回答：保存结果，通知 UI 渲染 Markdown + 本轮 token 统计。
 			finalAnswer = event.Content
-			finalIteration = event.Iteration
 			finalMessages = event.Messages
 
 			// OnFinal 的 token 行直接读取 Final 事件携带的精确累计值
@@ -210,9 +205,7 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 			}
 
 			// 每轮结束更新余额（每轮自动查询，失败静默；连续失败达到阈值时提示一次）。
-			go func() {
-				r.queryBalanceWith(r.queryBalance)
-			}()
+			go r.queryBalanceWith(r.queryBalance)
 
 		case QueryEventError:
 			// 错误处理：区分「主动取消」与「真实错误」。
@@ -232,6 +225,5 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 	// ═══════════════════════════════════════════════════════
 	// 步骤 6: 返回最终结果
 	// ═══════════════════════════════════════════════════════
-	_ = finalIteration
 	return finalAnswer, finalMessages, nil
 }
