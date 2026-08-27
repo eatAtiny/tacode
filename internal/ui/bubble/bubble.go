@@ -14,10 +14,12 @@
 // 架构调整背景（2026-08）：阶段 2 用 tea alt screen 做固定底部输入框，用户实测
 // 不满意（双提示符、滚动抖动、输入框固定在窗口而非流末尾）。决策回退到追加式
 // 主屏——rawInputLoop 已是正确输入实现（中文退格/回显 OK），tea 退出主渲染。
+// 状态栏常驻随之删除（阶段 2 的 ANSI 状态栏是滚动错位的唯一来源）：每轮结束
+// 由 OnFinal 追加 token 统计行（含余额段），ShowBalance 直接打印一行。
 // 框线（box.go）与 components 包等阶段 1/2 组件复用保留。
 //
 // 文件组织：
-//   - bubble.go  追加式输出核心（事件转发方法、ANSI 光标控制、状态栏、样式、字段）
+//   - bubble.go  追加式输出核心（事件转发方法、ANSI 光标控制、样式、字段）
 //   - box.go     工具框线/最终回答共享渲染
 //   - termios_*.go  生模式 OPOST 恢复的平台封装
 package bubble
@@ -54,8 +56,6 @@ type BubbleUI struct {
 	conversation *components.ConversationModel
 	// input 输入栏组件（预留，主循环使用 rawInputLoop 而非此组件）
 	input components.InputModel
-	// status 状态栏组件（statusBarText/renderStatusBar 复用其渲染逻辑）
-	status components.StatusModel
 	// toolView 工具调用弹窗组件（预留，未来实现交互式工具详情查看）
 	toolView *components.ToolViewModel
 
@@ -71,17 +71,6 @@ type BubbleUI struct {
 
 	// balanceText 账户余额展示文本（/balance 成功后由 Runner 设置）
 	balanceText string
-	// statusVisible 状态栏是否启用（阶段 1：默认启用；可通过 SetStatusBarVisible 控制）
-	statusVisible bool
-	// statusBarShown 状态栏是否当前在屏（renderStatusBar 后 true，clearStatusBar 后 false）。
-	// 状态位驱动生命周期：clear/render 仅在应然状态下执行 ANSI 序列，
-	// 避免"空上移清错行"与"重复上移叠字"。
-	statusBarShown bool
-
-	// uiMu 保护状态栏相关字段（balanceText/statusVisible/statusBarShown/sessionName/model/inputTokens/outputTokens）
-	// 与 clearStatusBar/renderStatusBar 的 ANSI 输出。
-	// 后台余额查询 goroutine（ShowBalance）与主循环并发访问，用单把大锁粗粒度串行化。
-	uiMu sync.Mutex
 
 	// hasDelta 本轮是否收到过 OnDelta（用于判断是否需要清除流式文本）
 	hasDelta bool
@@ -91,6 +80,11 @@ type BubbleUI struct {
 	// glamour 是 Markdown 渲染器，用于 OnFinal 时渲染最终回答。
 	// 初始化失败时为 nil，此时回退到纯文本输出。
 	glamour *glamour.TermRenderer
+
+	// balanceMu 保护 balanceText 的并发读写：
+	// ShowBalance 可能由后台余额查询 goroutine 调用（query_engine 每轮结束后），
+	// 与 OnFinal 内的读取（token 行合并）并发，用锁避免数据竞争（-race 验证）。
+	balanceMu sync.Mutex
 
 	// inputChan 是异步输入 channel，由 ReadInputChan 首次调用时启动
 	inputChan chan string
@@ -105,7 +99,7 @@ type BubbleUI struct {
 
 // NewBubbleUI 创建 BubbleUI 实例。
 // 初始化 Glamour 渲染器（自动检测终端样式，100 列自动换行），
-// 以及各子组件（conversation、input、status、toolView）。
+// 以及各子组件（conversation、input、toolView）。
 func NewBubbleUI() *BubbleUI {
 	glamourRenderer, err := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
@@ -116,12 +110,10 @@ func NewBubbleUI() *BubbleUI {
 		glamourRenderer = nil
 	}
 	return &BubbleUI{
-		conversation:  components.NewConversationModel(),
-		input:         components.NewInputModel(),
-		status:        components.NewStatusModel(),
-		toolView:      components.NewToolViewModel(),
-		glamour:       glamourRenderer,
-		statusVisible: true,
+		conversation: components.NewConversationModel(),
+		input:        components.NewInputModel(),
+		toolView:     components.NewToolViewModel(),
+		glamour:      glamourRenderer,
 	}
 }
 
@@ -285,9 +277,6 @@ func (b *BubbleUI) rawInputLoop(fd int) {
 // 打印空行后保存光标位置（\033[s），然后显示 "⏳ 思考中..."。
 // 追加式模型：流式文本从保存的光标位置输出，OnFinal/OnToolCall 时恢复并清除。
 func (b *BubbleUI) OnThink(_ int) {
-	// 新一轮思考开始前清除在屏状态栏：下一轮内容将从该行覆盖输出。
-	// 若状态栏不在屏（正常场景）则空操作。
-	b.clearStatusBar()
 	fmt.Println()
 	// 保存光标位置：后续 OnDelta 的流式文本从此位置开始输出，
 	// OnFinal 或 OnToolCall 时从此位置恢复并清除。
@@ -325,9 +314,6 @@ func (b *BubbleUI) OnToolCall(name, args string) {
 	}
 	// 复用 box.go 的 toolCallBox 生成框线文本（含尾 \n，追加式直接打印）。
 	fmt.Print(toolCallBox(name, args))
-
-	// 多迭代时保持状态栏：工具调用框线后重绘（状态位守卫避免重复上移）。
-	b.renderStatusBar()
 }
 
 // OnToolResult 显示工具执行结果。
@@ -336,18 +322,14 @@ func (b *BubbleUI) OnToolCall(name, args string) {
 func (b *BubbleUI) OnToolResult(name, result string, isError bool) {
 	// 复用 box.go 的 toolResultBox 生成框线文本（含尾 \n，追加式直接打印）。
 	fmt.Print(toolResultBox(name, result, isError))
-
-	// 多迭代时保持状态栏：工具结果框线后重绘（状态位守卫避免重复上移）。
-	b.renderStatusBar()
 }
 
 // OnContinue 通知继续推理。清除流式状态，打印继续提示。
-// 后续 queryLoop 会立刻 yield 下一轮 OnThink（先 clearStatusBar），故此处不重复清除。
+// 后续 queryLoop 会立刻 yield 下一轮 OnThink，故此处不重复清除。
 func (b *BubbleUI) OnContinue(iteration int) {
 	b.hasDelta = false
 	b.cursorSaved = false
 	fmt.Println(styleThink.Render(fmt.Sprintf("  🔄 Continuing... (iteration %d)", iteration)))
-	b.renderStatusBar()
 }
 
 // OnFinal 显示最终回答。
@@ -368,11 +350,6 @@ func (b *BubbleUI) OnFinal(answer string, inputTokens, outputTokens, totalTokens
 	}
 	b.hasDelta = false
 
-	// \033[u 恢复光标位置后，光标回到 OnThink 保存的"思考中"行首——
-	// 状态栏位置假设（光标位于输入提示符行）已失效，先清除在屏状态栏，
-	// 防止后续渲染正文时把状态栏残留写进正文。
-	b.clearStatusBar()
-
 	// 用 Glamour 渲染 Markdown 最终答案（带左侧缩进），复用 box.go 的 finalAnswerText。
 	fmt.Print(finalAnswerText(b, answer))
 	b.hasDelta = false
@@ -381,42 +358,36 @@ func (b *BubbleUI) OnFinal(answer string, inputTokens, outputTokens, totalTokens
 	// 本轮 token 统计（精确值，来自 API usage）。
 	// totalTokens 为 0 时（API 未返回 usage）不展示，避免误导。
 	if totalTokens > 0 {
-		fmt.Println(styleMuted.Render(fmt.Sprintf(
+		// 余额行（/balance 开启时由后台 goroutine 更新）合并到 token 行，
+		// 每轮结束追加打印一行，随流滚动。
+		line := fmt.Sprintf(
 			"  ⚡ 本轮 %d tokens（输入 %d / 输出 %d）",
 			totalTokens, inputTokens, outputTokens,
-		)))
+		)
+		if bal := b.balance(); bal != "" {
+			line += "  |  " + bal
+		}
+		fmt.Println(styleMuted.Render(line))
 	}
 	fmt.Println(styleSeparator.Render(strings.Repeat("─", 60)))
-
-	// 输出完成后重绘状态栏（此时光标已回到输入提示符行首）。
-	b.renderStatusBar()
 }
 
 // OnError 打印错误信息（红色加粗）。
 func (b *BubbleUI) OnError(err error) {
-	// 追加正文前先清除在屏状态栏，避免把状态栏写进错误行。
-	b.clearStatusBar()
 	fmt.Println(styleError.Render(fmt.Sprintf("❌ Error: %v", err)))
-	b.renderStatusBar()
 }
 
 // OnMessage 打印一般性消息（无额外样式）。
 func (b *BubbleUI) OnMessage(msg string) {
-	// 追加正文前先清除在屏状态栏，避免把状态栏写进消息行。
-	b.clearStatusBar()
 	fmt.Println(msg)
-	b.renderStatusBar()
 }
 
-// ShowBalance 展示账户余额（更新状态栏并重绘）。
+// ShowBalance 展示账户余额（追加式：直接打印一行，随流滚动）。
 // line 是已格式化的余额文本，如 "💰 ¥110.00（充值 ¥100.00 / 赠金 ¥10.00）"。
-// 注意：可能在后台 goroutine 调用（query_engine 每轮余额查询），
-// 锁保护字段读写 + 状态栏 ANSI 重绘，避免与主循环竞态。
+// 注意：可能在后台 goroutine 调用（query_engine 每轮余额查询）。
 func (b *BubbleUI) ShowBalance(line string) {
-	b.SetBalanceText(line)
-	// clear/render 内部均有状态位 + statusVisible 守卫，外层无需重复判断。
-	b.clearStatusBar()
-	b.renderStatusBar()
+	b.setBalance(line)
+	fmt.Println(styleMuted.Render(line))
 }
 
 // ConfirmPermission 显示权限确认提示，等待用户输入。
@@ -484,133 +455,45 @@ func (b *BubbleUI) Welcome(model string) {
 
 // SetSessionName 设置当前会话的显示名称。
 func (b *BubbleUI) SetSessionName(name string) {
-	b.uiMu.Lock()
 	b.sessionName = name
-	b.uiMu.Unlock()
 }
 
 // SetModel 设置当前使用的模型名称。
 func (b *BubbleUI) SetModel(model string) {
-	b.uiMu.Lock()
 	b.model = model
-	b.uiMu.Unlock()
 }
 
 // UpdateTokens 累计本轮 token 用量。
 func (b *BubbleUI) UpdateTokens(input, output int) {
-	b.uiMu.Lock()
 	b.inputTokens += input
 	b.outputTokens += output
-	b.uiMu.Unlock()
 }
 
 // ResetTokens 重置本轮 token 计数（新一轮查询开始前调用）。
 func (b *BubbleUI) ResetTokens() {
-	b.uiMu.Lock()
 	b.inputTokens = 0
 	b.outputTokens = 0
-	b.uiMu.Unlock()
 }
 
-// SetBalanceText 设置账户余额展示文本（空=不显示余额段）。
-func (b *BubbleUI) SetBalanceText(text string) {
-	b.uiMu.Lock()
+// ──────────────────────────────────────────────────────────
+// 余额文本（后台 goroutine 并发写）
+// ──────────────────────────────────────────────────────────
+
+// balance 返回当前余额展示文本（空=未设置）。
+// 由 OnFinal 在 token 行合并余额段时读取，可能与 ShowBalance 的后台写入并发，
+// 用 balanceMu 保护避免数据竞争。
+func (b *BubbleUI) balance() string {
+	b.balanceMu.Lock()
+	defer b.balanceMu.Unlock()
+	return b.balanceText
+}
+
+// setBalance 更新余额展示文本。
+// 可能在后台 goroutine 调用（ShowBalance），用 balanceMu 保护。
+func (b *BubbleUI) setBalance(text string) {
+	b.balanceMu.Lock()
 	b.balanceText = text
-	b.uiMu.Unlock()
-}
-
-// SetStatusBarVisible 控制状态栏是否渲染（阶段 3 全量模式接管后此开关用于过渡）。
-func (b *BubbleUI) SetStatusBarVisible(visible bool) {
-	b.uiMu.Lock()
-	b.statusVisible = visible
-	b.uiMu.Unlock()
-}
-
-// ──────────────────────────────────────────────────────────
-// 状态栏（ANSI 追加式路径）
-// ──────────────────────────────────────────────────────────
-
-// statusBarText 渲染状态栏单行文本（供测试与 renderStatusBar 共用）。
-// 复用 components.StatusModel 的渲染逻辑：同步 session/model/token/余额后调 View()。
-// 余额文本多货币时为 \n 分隔多行，进状态栏前 clamp 成单行（\n → 、），保持单行渲染。
-func (b *BubbleUI) statusBarText() string {
-	b.uiMu.Lock()
-	defer b.uiMu.Unlock()
-	return b.statusBarTextLocked()
-}
-
-// statusBarTextLocked 渲染状态栏单行文本，调用方必须持有 b.uiMu。
-// 拆出锁内实现，避免 renderStatusBar 锁内调用 statusBarText 时二次加锁死锁。
-func (b *BubbleUI) statusBarTextLocked() string {
-	if !b.statusVisible {
-		return ""
-	}
-	st := b.status
-	st.SetSession(b.sessionName)
-	st.SetModel(b.model)
-	st.SetTokens(b.inputTokens, b.outputTokens)
-	balance := b.balanceText
-	if strings.Contains(balance, "\n") {
-		balance = strings.ReplaceAll(balance, "\n", "、")
-	}
-	st.SetBalance(balance)
-	return st.View()
-}
-
-// clearStatusBar 清除状态栏所在行（将光标移到该行并清空）。
-// 状态栏渲染在屏幕底部最后一行上方，追加输出前需先清除，输出完再重绘。
-// 状态位驱动：仅当状态栏当前在屏（statusBarShown）时才执行清除，
-// 避免"状态栏已清除却空操作"。清除后置 statusBarShown = false。
-//
-// 定位：先把光标移到屏幕底部最后一行（\033[999B 下移 999 行，实际停在最后一行），
-// 再上移一行到状态栏位置清除。这样无论光标此前在哪（工具框线内、思考中行、正文中间），
-// clear 都只作用于屏幕底部状态栏行，不会清错正文行。
-// 注意：清除后光标停留在状态栏行，调用方（追加式输出）会从该行覆盖新内容。
-func (b *BubbleUI) clearStatusBar() {
-	b.uiMu.Lock()
-	defer b.uiMu.Unlock()
-	if !b.statusVisible {
-		return
-	}
-	if !b.statusBarShown {
-		return
-	}
-	fmt.Print("\033[999B\033[1A\033[2K")
-	os.Stdout.Sync()
-	b.statusBarShown = false
-}
-
-// renderStatusBar 在屏幕底部渲染状态栏。
-// 状态位驱动：仅当状态栏不在屏（!statusBarShown）时才执行上移输出，
-// 避免连续 render 时重复上移叠字。渲染后置 statusBarShown = true。
-//
-// 定位：先把光标移到屏幕底部最后一行（\033[999B），再上移一行渲染状态栏。
-// 多迭代场景下 OnToolCall 的 \033[u\033[J 会把光标恢复到"思考中"行（非输入提示符行），
-// 若直接 \033[1A 会把状态栏画进工具框线内（叠字）；\033[999B 先归位到底部可避免。
-// 渲染后光标停留在底部行（状态栏 \n 换行落到最后一行），与 runner 的 "> " 提示符衔接。
-func (b *BubbleUI) renderStatusBar() {
-	b.uiMu.Lock()
-	defer b.uiMu.Unlock()
-	if !b.statusVisible {
-		return
-	}
-	if b.statusBarShown {
-		// 已在屏：重绘内容。仍先 \033[999B 定位到底部，避免光标漂移（多迭代/后台余额）时画进正文。
-		line := b.statusBarTextLocked()
-		if line == "" {
-			return
-		}
-		fmt.Printf("\033[999B\033[1A\033[2K%s\n", line)
-		os.Stdout.Sync()
-		return
-	}
-	line := b.statusBarTextLocked()
-	if line == "" {
-		return
-	}
-	fmt.Printf("\033[999B\033[1A%s\n", line)
-	os.Stdout.Sync()
-	b.statusBarShown = true
+	b.balanceMu.Unlock()
 }
 
 // ──────────────────────────────────────────────────────────
