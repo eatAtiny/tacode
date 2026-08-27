@@ -128,8 +128,8 @@ onFinal:
 
 ### WindowSizeMsg
 
-textarea.SetWidth(v.Width)；记录 width/height；glamour wordwrap 宽度随终端宽更新
-（cap 100，初始仍 100）。不再计算 viewport 高度。
+textarea.SetWidth(v.Width)；记录 width/height。glamour wordwrap 保持初始 100 不随
+resize 重建（YAGNI：无流式 final 才走 glamour，收益边际；验收发现换行难看再补）。
 
 ## 不变的部分
 
