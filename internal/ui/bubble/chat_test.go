@@ -127,7 +127,7 @@ func TestChatModel_WindowSize(t *testing.T) {
 	}
 }
 
-// 事件消息（think/final/error）追加对话行并刷新 viewport。
+// 事件消息（final/error）追加对话行；think 进活区状态行（Task 5 起不占对话行）。
 // 余额（chatBalanceMsg）进 footer 字段而非对话行（新版行为）。
 func TestChatModel_Events(t *testing.T) {
 	m := NewChatModel()
@@ -144,15 +144,12 @@ func TestChatModel_Events(t *testing.T) {
 	// context（进 footer 字段）
 	m.Update(chatContextMsg{usedTokens: 100, contextLimit: 50000})
 
-	if len(m.lines) != 4 {
-		t.Fatalf("lines = %d, want 4（think+final+token+error，余额不再占对话行）", len(m.lines))
+	if len(m.lines) != 3 {
+		t.Fatalf("lines = %d, want 3（final+token+error，think 进状态行不占对话行，余额不占对话行）", len(m.lines))
 	}
 	all := ""
 	for _, l := range m.lines {
 		all += l.text + "\n"
-	}
-	if !strings.Contains(all, "思考中") {
-		t.Errorf("转录应含思考行，实际:\n%s", all)
 	}
 	if !strings.Contains(all, "bold") {
 		t.Errorf("转录应含渲染后的 final 文本，实际:\n%s", all)
@@ -252,9 +249,9 @@ func TestChatModel_StreamingFlushOnNewline(t *testing.T) {
 	m.Update(chatThinkMsg{iteration: 1})
 	m.Update(chatDeltaMsg{content: "第一段"})
 	m.Update(chatDeltaMsg{content: "收尾\n第二段开头"})
-	// "…第一段收尾" 已定稿为一条转录（think 行仍在转录且占 1 行，Task 5 移除）。
-	if len(m.lines) != 2 {
-		t.Fatalf("lines = %d, want 2（思考行 + 换行前定稿段）", len(m.lines))
+	// "…第一段收尾" 已定稿为一条转录（think 进状态行，不占转录行）。
+	if len(m.lines) != 1 {
+		t.Fatalf("lines = %d, want 1（换行前定稿段）", len(m.lines))
 	}
 	seg := m.lines[len(m.lines)-1]
 	if !strings.Contains(seg.text, "第一段收尾") {
@@ -304,9 +301,9 @@ func TestChatModel_FinalWithoutStreamPrintsRendered(t *testing.T) {
 	m.Update(chatThinkMsg{iteration: 1})
 	m.Update(chatFinalMsg{content: "**加粗**回答", totalTokens: 0})
 
-	// think 行仍在转录且占 1 行（Task 5 移除），final 定稿一条 + 无 token 行。
-	if len(m.lines) != 2 {
-		t.Fatalf("lines = %d, want 2（思考行 + final 渲染全文，无 token 行）", len(m.lines))
+	// think 进状态行不占转录行；final 定稿一条 + 无 token 行。
+	if len(m.lines) != 1 {
+		t.Fatalf("lines = %d, want 1（final 渲染全文，无 token 行）", len(m.lines))
 	}
 	last := m.lines[len(m.lines)-1]
 	if !strings.Contains(last.text, "加粗") || !strings.Contains(last.text, "助手") {
@@ -359,16 +356,16 @@ func TestChatModel_ToolCallFlushOrder(t *testing.T) {
 	m.Update(chatDeltaMsg{content: "残余文本"})
 	m.Update(chatToolCallMsg{name: "shell", args: "{}"})
 
-	// think(1) + 冲刷残余(1) + 框线(1) = 3（think 行 Task 5 移除后 -1）。
-	if len(m.lines) != 3 {
-		t.Fatalf("lines = %d, want 3（think + 残余 + 框线）", len(m.lines))
+	// 冲刷残余(1) + 框线(1) = 2（think 进状态行不占转录行）。
+	if len(m.lines) != 2 {
+		t.Fatalf("lines = %d, want 2（残余 + 框线）", len(m.lines))
 	}
-	// think 占首行（Task 5 移除），残余紧随其后、框线最后（同次 commit 保序）。
-	if !strings.Contains(m.lines[1].text, "残余文本") {
-		t.Errorf("第二条应为冲刷的残余文本，实际: %q", m.lines[1].text)
+	// 残余在前、框线在后（同次 commit 保序）。
+	if !strings.Contains(m.lines[0].text, "残余文本") {
+		t.Errorf("首条应为冲刷的残余文本，实际: %q", m.lines[0].text)
 	}
-	if !strings.Contains(m.lines[2].text, "🔧") {
-		t.Errorf("末条应为工具框线，实际: %q", m.lines[2].text)
+	if !strings.Contains(m.lines[1].text, "🔧") {
+		t.Errorf("末条应为工具框线，实际: %q", m.lines[1].text)
 	}
 }
 
@@ -471,5 +468,73 @@ func TestChatModel_ViewExcludesConversation(t *testing.T) {
 	// 定稿内容记入转录 m.lines。
 	if len(m.lines) != 1 || !strings.Contains(m.lines[0].text, "答案正文内容") {
 		t.Errorf("final 内容应记入 m.lines，实际: %+v", m.lines)
+	}
+}
+
+// 状态行：查询中显示于活区，final/error/message 清空；think 不再进对话区。
+func TestChatModel_StatusLine(t *testing.T) {
+	m := NewChatModel()
+	m.Update(chatThinkMsg{iteration: 1})
+	if !strings.Contains(m.View(), "思考中") {
+		t.Errorf("活区应显示思考状态，实际:\n%s", m.View())
+	}
+	if len(m.lines) != 0 {
+		t.Errorf("think 不应再进对话区，实际 %d 行", len(m.lines))
+	}
+
+	m.Update(chatDeltaMsg{content: "流式文本"})
+	if !strings.Contains(m.View(), "输出中") {
+		t.Errorf("活区应显示输出状态，实际:\n%s", m.View())
+	}
+
+	m.Update(chatToolCallMsg{name: "shell", args: "{}"})
+	if !strings.Contains(m.View(), "执行工具: shell") {
+		t.Errorf("活区应显示工具执行状态，实际:\n%s", m.View())
+	}
+
+	m.Update(chatFinalMsg{content: "答", totalTokens: 0})
+	if strings.Contains(m.View(), "执行工具") || strings.Contains(m.View(), "输出中") {
+		t.Errorf("final 后状态行应清空，实际:\n%s", m.View())
+	}
+}
+
+// 新一轮提交重置状态行。
+func TestChatModel_StatusResetOnSubmit(t *testing.T) {
+	m := NewChatModel()
+	m.Update(chatThinkMsg{iteration: 1})
+	m.textarea.SetValue("继续")
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if strings.Contains(m.View(), "思考中") {
+		t.Errorf("提交后状态行应重置，实际:\n%s", m.View())
+	}
+}
+
+// 错误中断冲刷：流式残余随错误行定稿，不泄漏到下一轮（不重复注入助手前缀）。
+func TestChatModel_ErrorFlushesStream(t *testing.T) {
+	m := NewChatModel()
+	m.Update(chatThinkMsg{iteration: 1})
+	m.Update(chatDeltaMsg{content: "流式中断的部分"})
+	m.Update(chatErrorMsg{err: errSome})
+
+	if m.streamBuf != "" {
+		t.Errorf("错误后 streamBuf 应清空，实际: %q", m.streamBuf)
+	}
+	all := ""
+	for _, l := range m.lines {
+		all += l.text + "\n"
+	}
+	if !strings.Contains(all, "流式中断的部分") {
+		t.Errorf("残余应随错误行定稿，实际:\n%s", all)
+	}
+
+	// 下一轮首个 delta 只注入一次助手前缀（两轮共 2 次）。
+	m.Update(chatThinkMsg{iteration: 1})
+	m.Update(chatDeltaMsg{content: "新轮\n"})
+	all2 := ""
+	for _, l := range m.lines {
+		all2 += l.text + "\n"
+	}
+	if got := strings.Count(all2, "助手"); got != 2 {
+		t.Errorf("助手前缀应恰好 2 次（每轮一次），实际 %d 次:\n%s", got, all2)
 	}
 }

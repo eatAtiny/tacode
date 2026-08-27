@@ -75,7 +75,8 @@ func TestReadInputChan_BridgesSubmitCh(t *testing.T) {
 func TestEvents_ReachChatModel(t *testing.T) {
 	b := startTest(t)
 
-	// 事件方法 → Program.Send → ChatModel.Update → lines 追加。
+	// 事件方法 → Program.Send → ChatModel.Update → lines 追加
+	// （think 例外：进活区状态行，不占转录——见 chat_test.go TestChatModel_StatusLine）。
 	b.OnThink(1)
 	b.OnMessage("状态更新")
 	b.OnFinal("最终回答", 100, 50, 150)
@@ -90,8 +91,8 @@ func TestEvents_ReachChatModel(t *testing.T) {
 	for _, l := range b.chat.lines {
 		joined += l.text + "\n"
 	}
-	if !strings.Contains(joined, "思考中") {
-		t.Errorf("对话区应含思考行，实际:\n%s", joined)
+	if !strings.Contains(joined, "状态更新") {
+		t.Errorf("对话区应含消息行，实际:\n%s", joined)
 	}
 	if !strings.Contains(joined, "最终回答") {
 		t.Errorf("对话区应含最终回答，实际:\n%s", joined)

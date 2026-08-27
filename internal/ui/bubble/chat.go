@@ -129,6 +129,8 @@ type ChatModel struct {
 	streamBuf string
 	// streamed 自最近一次 think 起是否有流式内容（final 判断是否重印全文）。
 	streamed bool
+	// status 活区状态行文本（查询中显示：思考/输出/工具执行；空=不渲染）。
+	status string
 
 	submitCh chan string // 用户提交桥接（BubbleUI → Runner）
 
@@ -217,6 +219,8 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if value != "" {
 				m.submitCh <- value
 				m.textarea.Reset()
+				// 新一轮提交：重置状态行（上一轮残留的思考/输出状态清除）。
+				m.status = ""
 				// 用户消息经 commit 定稿（打印于活区上方入 scrollback）。
 				cmds = append(cmds, m.commit(m.renderUser(value)))
 			}
@@ -236,8 +240,10 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.textarea.SetWidth(v.Width)
 	case chatThinkMsg:
 		m.streamed = false
-		m.lines = append(m.lines, chatLine{text: styleThink.Render("⏳ 思考中...")})
+		// 思考状态进活区状态行（不再追加转录行）。
+		m.status = "⏳ 思考中"
 	case chatDeltaMsg:
+		m.status = "📝 输出中"
 		if segs := m.appendStreaming(v.content); len(segs) > 0 {
 			cmds = append(cmds, m.commit(segs...))
 		}
@@ -259,22 +265,33 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.commit(parts...))
 		}
 		m.streamed = false
+		m.status = ""
 	case chatToolCallMsg:
 		// 先冲刷流式残余再接框线（同一次 commit 打印，保序）。
 		parts := append(m.flushBuf(), toolCallBox(v.name, v.args))
 		cmds = append(cmds, m.commit(parts...))
+		m.status = "🔧 执行工具: " + v.name
 	case chatToolResultMsg:
 		// 先冲刷流式残余再接框线（同一次 commit 打印，保序）。
 		parts := append(m.flushBuf(), toolResultBox(v.name, v.result, v.isError))
 		cmds = append(cmds, m.commit(parts...))
 	case chatContinueMsg:
-		cmds = append(cmds, m.commit(styleThink.Render(fmt.Sprintf("🔄 继续推理 (iter %d)", v.iteration))))
+		// 继续推理提示进活区状态行（不再追加转录行）。
+		m.status = fmt.Sprintf("🔄 继续推理 (iter %d)", v.iteration)
 	case chatErrorMsg:
-		cmds = append(cmds, m.commit(styleError.Render(fmt.Sprintf("❌ Error: %v", v.err))))
+		// 错误中断轮：先冲刷流式残余再接错误行（单次 commit 保序），
+		// 避免残余泄漏到下一轮（下一轮首 delta 会重复注入助手前缀）。
+		parts := append(m.flushBuf(), styleError.Render(fmt.Sprintf("❌ Error: %v", v.err)))
+		cmds = append(cmds, m.commit(parts...))
+		m.status = ""
 	case chatMessageMsg:
-		cmds = append(cmds, m.commit(v.content))
+		// 同错误路径：先冲刷流式残余再接内容（单次 commit 保序）。
+		parts := append(m.flushBuf(), v.content)
+		cmds = append(cmds, m.commit(parts...))
+		m.status = ""
 	case chatWelcomeMsg:
 		cmds = append(cmds, m.commit(v.content))
+		m.status = ""
 	case chatBalanceMsg:
 		// 余额进 footer 状态栏（常驻显示），不再追加对话行。
 		m.balance = v.balance
@@ -366,8 +383,9 @@ func (m *ChatModel) commit(parts ...string) tea.Cmd {
 }
 
 // View 渲染底部活区。
-// 选择器模式（picking）时渲染会话选择器；权限确认（permLayer）时在输入框上方
-// 渲染弹层；否则渲染输入框 + footer（对话内容不在 View 内）。
+// 选择器模式（picking）时渲染会话选择器；查询中（status 非空）顶部渲染状态行；
+// 权限确认（permLayer）时在输入框上方渲染弹层；否则渲染输入框 + footer
+// （对话内容不在 View 内）。
 func (m *ChatModel) View() string {
 	if m.picking && m.picker != nil {
 		return lipgloss.JoinVertical(lipgloss.Left,
@@ -376,6 +394,9 @@ func (m *ChatModel) View() string {
 		)
 	}
 	parts := []string{}
+	if m.status != "" {
+		parts = append(parts, styleThink.Render(m.status+"▌"))
+	}
 	if m.permLayer != nil {
 		parts = append(parts, m.renderPermissionLayer())
 	}
