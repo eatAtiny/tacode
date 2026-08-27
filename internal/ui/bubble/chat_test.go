@@ -329,6 +329,49 @@ func TestChatModel_CommitContract(t *testing.T) {
 	}
 }
 
+// 最大迭代总结路径回归：generateFinalSummary 前会补发 Think（重置 streamed），
+// final 的 glamour 重印分支因此可达，总结文本必须上屏（转录）。
+func TestChatModel_MaxIterationSummaryDisplayed(t *testing.T) {
+	m := NewChatModel()
+	// 模拟事件序列：常规迭代（think→delta→toolcall→toolresult→continue）后，
+	// 总结路径补发 think（当前 agent 行为）→ final 带总结内容。
+	m.Update(chatThinkMsg{iteration: 10})
+	m.Update(chatDeltaMsg{content: "常规迭代的输出\n"})
+	m.Update(chatToolCallMsg{name: "shell", args: "{}"})
+	m.Update(chatToolResultMsg{name: "shell", result: "ok", isError: false})
+	m.Update(chatContinueMsg{iteration: 10})
+	m.Update(chatThinkMsg{iteration: 10}) // generateFinalSummary 补发的 Think
+	m.Update(chatFinalMsg{content: "这是最终总结答案", totalTokens: 50})
+
+	all := ""
+	for _, l := range m.lines {
+		all += l.text + "\n"
+	}
+	if !strings.Contains(all, "这是最终总结答案") {
+		t.Errorf("总结路径 final 应经 glamour 重印上屏，实际转录:\n%s", all)
+	}
+}
+
+// 工具调用前残余冲刷顺序：无尾换行的 delta 残余应在框线之前定稿（同一次 commit 保序）。
+func TestChatModel_ToolCallFlushOrder(t *testing.T) {
+	m := NewChatModel()
+	m.Update(chatThinkMsg{iteration: 1})
+	m.Update(chatDeltaMsg{content: "残余文本"})
+	m.Update(chatToolCallMsg{name: "shell", args: "{}"})
+
+	// think(1) + 冲刷残余(1) + 框线(1) = 3（think 行 Task 5 移除后 -1）。
+	if len(m.lines) != 3 {
+		t.Fatalf("lines = %d, want 3（think + 残余 + 框线）", len(m.lines))
+	}
+	// think 占首行（Task 5 移除），残余紧随其后、框线最后（同次 commit 保序）。
+	if !strings.Contains(m.lines[1].text, "残余文本") {
+		t.Errorf("第二条应为冲刷的残余文本，实际: %q", m.lines[1].text)
+	}
+	if !strings.Contains(m.lines[2].text, "🔧") {
+		t.Errorf("末条应为工具框线，实际: %q", m.lines[2].text)
+	}
+}
+
 // 工具调用/结果用 box.go 框线渲染。
 func TestChatModel_ToolMessages(t *testing.T) {
 	m := NewChatModel()

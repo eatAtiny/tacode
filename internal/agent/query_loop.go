@@ -849,6 +849,14 @@ func (lc *queryLoopContext) generateFinalSummary() {
 		Content: "你已经尝试了多次工具调用。请根据已有信息直接给出回答，不要再调用工具。",
 	})
 
+	// yield: 思考中（总结轮）。与 callLLMStream 开头的 Think 对齐：
+	// inline UI 依赖 Think 重置流式状态（streamed），否则上一轮迭代的 delta
+	// 会让 final 的 glamour 重印分支被跳过，总结文本不上屏。
+	lc.events <- QueryEvent{
+		Type:      QueryEventThink,
+		Iteration: lc.maxIter,
+	}
+
 	// 兜底总结不带任何工具定义：此轮目的是根据已有信息直接作答，
 	// 传 tools 会让 LLM 有机会再次返回 tool_calls，而本函数的事件循环
 	// 不处理 toolCalls（旧实现因此产生过空答案）。
