@@ -149,25 +149,13 @@ func main() {
 	activeDir := sessions.ActiveSessionDir()
 
 	// L1: 原始对话日志（history.jsonl），最多保留 50 轮。
-	history, err := memory.NewHistoryStore(activeDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "init history store failed: %v\n", err)
-		os.Exit(1)
-	}
+	history := memory.NewHistoryStore(activeDir)
 
 	// L2: 对话摘要（summaries.jsonl），LLM 提取 + 自动压缩合并。
-	summary, err := memory.NewSummaryStore(activeDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "init summary store failed: %v\n", err)
-		os.Exit(1)
-	}
+	summary := memory.NewSummaryStore(activeDir)
 
 	// L3: 结构化记忆（memory/*.md），frontmatter + 正文格式。
-	memStore, err := memory.NewMemoryStore(activeDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "init memory store failed: %v\n", err)
-		os.Exit(1)
-	}
+	memStore := memory.NewMemoryStore(activeDir)
 
 	// ── 步骤 6b: 初始化全局 + 项目级记忆（三级记忆的外两层） ──
 	// 数据目录（相对 sessions 的上级，即 data/ 下）：
@@ -175,16 +163,8 @@ func main() {
 	//   - data/project-memory/memory/ — 项目级记忆（project/reference 类，跨会话）
 	// 会话级不再落 L3（对话细节靠 L2 摘要 + EventStore）。
 	dataRoot := filepath.Join(*sessionsDir, "..")
-	globalMem, err := memory.NewMemoryStore(filepath.Join(dataRoot, "global-memory"))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "init global memory store failed: %v\n", err)
-		os.Exit(1)
-	}
-	projectMem, err := memory.NewMemoryStore(filepath.Join(dataRoot, "project-memory"))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "init project memory store failed: %v\n", err)
-		os.Exit(1)
-	}
+	globalMem := memory.NewMemoryStore(filepath.Join(dataRoot, "global-memory"))
+	projectMem := memory.NewMemoryStore(filepath.Join(dataRoot, "project-memory"))
 
 	// ── 步骤 6c: 迁移旧记忆文件（幂等） ──
 	// 把旧版散落在会话目录 / 旧全局目录的 L3 记忆按 type 归位到全局/项目级。

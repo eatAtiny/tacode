@@ -18,7 +18,7 @@ import (
 //       → 一次 LLM 调用（非流式 Chat）
 //       → 返回 ExtractionResult{Summary, Memories[]}
 //       → 上层：
-//           - Summary → summary.Append()（L2）
+//           - Summary → summary.Append()（L2，预留，当前无消费者）
 //           - Memories → memStore.SaveEntry() / DeleteEntry()（L3）
 //
 // 设计决策：
@@ -47,7 +47,7 @@ func NewExtractor(client *llm.OpenAIClient) *Extractor {
 //   6. JSON 解析失败 → 降级为截断摘要
 //
 // 返回的 ExtractionResult：
-//   - Summary: 本轮对话的简要摘要（1-2 句中文），始终不为空
+//   - Summary: 本轮对话的简要摘要（1-2 句中文），始终不为空（预留，当前无消费者）
 //   - Memories: 记忆操作列表（create/update/delete），无值得记忆的内容时为空
 func (e *Extractor) Extract(ctx context.Context, userInput, assistantOutput string) (*ExtractionResult, error) {
 	systemPrompt := buildExtractPrompt()

@@ -16,8 +16,8 @@ type SummaryStore struct {
 }
 
 // NewSummaryStore 构造 SummaryStore，不立即创建目录（惰性创建）。
-func NewSummaryStore(sessionDir string) (*SummaryStore, error) {
-	return &SummaryStore{path: filepath.Join(sessionDir, "summaries.jsonl")}, nil
+func NewSummaryStore(sessionDir string) *SummaryStore {
+	return &SummaryStore{path: filepath.Join(sessionDir, "summaries.jsonl")}
 }
 
 // SetPath 切换底层文件路径。

@@ -24,13 +24,8 @@ const (
 // Retriever — 三层记忆检索器
 //
 // 调用链中的角色：
-//   QueryEngine（步骤 1）
-//     → Retriever.BuildContext(query)
-//       → 返回上下文文本（注入 system/user prompt）
-//
-//   QueryEngine（步骤 2）
-//     → Retriever.CheckAndCompress(ctx, client, tokenLimit, currentUsage)
-//       → 超过 80% 阈值时调用 CompressSummaries()
+//   生产路径仅使用 BuildContextFallback（queryEngine 首轮/切换时调用）；
+//   BuildContext 与 CheckAndCompress 为预留路径，当前无生产调用。
 //
 // 检索顺序（优先级从高到低）：
 //   1. L3 记忆索引（MEMORY.md）—— 所有记忆的目录
@@ -43,7 +38,7 @@ const (
 type Retriever struct {
 	history           *HistoryStore
 	summary           *SummaryStore
-	memory            *MemoryStore // 会话级记忆（feedback 类），三级记忆最内层
+	memory            *MemoryStore // 会话级 L3 store；feedback 类已路由到全局 store，此 store 仅为 globalMem 为 nil 时的回退目标
 	events            *EventStore
 	projectMemory     *MemoryStore // 项目级记忆（project/reference 类，跨会话），nil = 未启用
 	globalMemory      *MemoryStore // 全局记忆（user 类，跨项目），nil = 未启用
@@ -121,7 +116,7 @@ func (r *Retriever) ClearProjectInstructions() {
 
 // BuildContext 构建注入 prompt 的上下文文本。
 //
-// 这是每轮查询前调用的核心方法（QueryEngine 步骤 1）。
+// 预留路径：当前生产调用走 BuildContextFallback，本方法无生产调用。
 //
 // 检索流程（优先级从高到低）：
 //
@@ -268,7 +263,7 @@ func (r *Retriever) BuildContextFallback(query string) (string, error) {
 
 // CheckAndCompress 检查是否需要压缩，超过阈值时自动压缩 L2 摘要。
 //
-// 调用时机：QueryEngine 步骤 2（构建上下文后、构建 prompt 前）。
+// 预留路径：当前无生产调用。
 //
 // 判断逻辑：
 //   currentUsage / tokenLimit > 80% → 触发压缩
@@ -355,7 +350,7 @@ func (r *Retriever) CompressSummaries(ctx context.Context, client *llm.OpenAICli
 //
 // 这不是精确计算（精确计算需要 tokenizer），但对压缩判断足够。
 // 调用方如需覆盖消息结构性开销（role 标记、JSON schema 等），
-// 可在结果上乘安全系数（见 estimateMessagesTokens）。
+// 可在结果上乘安全系数；agent 包另有按字符的估算（见 compactor.estimateChars）。
 func EstimateTokens(text string) int {
 	asciiCount := 0
 	cjkCount := 0

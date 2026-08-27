@@ -19,8 +19,8 @@ type HistoryStore struct {
 }
 
 // NewHistoryStore 构造 HistoryStore，不立即创建目录（惰性创建）。
-func NewHistoryStore(sessionDir string) (*HistoryStore, error) {
-	return &HistoryStore{path: filepath.Join(sessionDir, "history.jsonl")}, nil
+func NewHistoryStore(sessionDir string) *HistoryStore {
+	return &HistoryStore{path: filepath.Join(sessionDir, "history.jsonl")}
 }
 
 // SetPath 切换底层文件路径（用于会话切换）。
@@ -51,11 +51,6 @@ func (s *HistoryStore) Append(round int, userInput, assistantOutput string) erro
 		all = all[len(all)-maxHistoryRecords:]
 	}
 	return s.writeAll(all)
-}
-
-// ReadHistory 返回全部历史记录。
-func (s *HistoryStore) ReadHistory() ([]Record, error) {
-	return s.readAll()
 }
 
 // Digest 从原始日志生成简易摘要（降级方案：当 L2 为空时使用）。

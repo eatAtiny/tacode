@@ -28,18 +28,9 @@ func newTestRunner(t *testing.T) *Runner {
 
 	// store 初始路径指向会话管理器默认目录（initTempSession 会重定向）。
 	activeDir := sessions.ActiveSessionDir()
-	history, err := memory.NewHistoryStore(activeDir)
-	if err != nil {
-		t.Fatalf("NewHistoryStore failed: %v", err)
-	}
-	summary, err := memory.NewSummaryStore(activeDir)
-	if err != nil {
-		t.Fatalf("NewSummaryStore failed: %v", err)
-	}
-	memStore, err := memory.NewMemoryStore(activeDir)
-	if err != nil {
-		t.Fatalf("NewMemoryStore failed: %v", err)
-	}
+	history := memory.NewHistoryStore(activeDir)
+	summary := memory.NewSummaryStore(activeDir)
+	memStore := memory.NewMemoryStore(activeDir)
 	events := memory.NewEventStore(activeDir)
 
 	return &Runner{
