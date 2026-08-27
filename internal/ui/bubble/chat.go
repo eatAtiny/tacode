@@ -76,6 +76,8 @@ type (
 	chatWelcomeMsg struct{ content string }
 	// chatBalanceMsg 账户余额（ShowBalance）。
 	chatBalanceMsg struct{ balance string }
+	// chatContextMsg 上下文窗口占用（UpdateContext）。
+	chatContextMsg struct{ usedTokens, contextLimit int }
 )
 
 // chatLine 对话区的一行（渲染后文本）。
@@ -106,6 +108,13 @@ type ChatModel struct {
 	lines []chatLine // 对话区累积行（事件驱动追加）
 
 	submitCh chan string // 用户提交桥接（BubbleUI → Runner）
+
+	// balance 账户余额展示文本（footer 状态栏显示，空=不显示）。
+	balance string
+	// contextUsedTokens 上下文已用 token 数（footer 显示）。
+	contextUsedTokens int
+	// contextLimit 模型上下文窗口大小（footer 显示，0=未知）。
+	contextLimit int
 }
 
 // NewChatModel 创建聊天模型。
@@ -235,8 +244,12 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refresh()
 		m.viewport.GotoTop()
 	case chatBalanceMsg:
-		m.lines = append(m.lines, chatLine{text: styleMuted.Render(v.balance)})
-		m.scrollBottom()
+		// 余额进 footer 状态栏（常驻显示），不再追加对话行。
+		m.balance = v.balance
+	case chatContextMsg:
+		// 上下文占用进 footer（已用/总/百分比）。
+		m.contextUsedTokens = v.usedTokens
+		m.contextLimit = v.contextLimit
 	}
 
 	return m, tea.Batch(cmds...)
@@ -312,6 +325,32 @@ func (m *ChatModel) View() string {
 }
 
 // renderFooter 底部状态栏。
+// 格式：agentic │ 上下文 15K/50K (30%) │ 💰 余额（有则显示）│ ctrl+c 退出
 func (m *ChatModel) renderFooter() string {
-	return lipgloss.NewStyle().Height(1).Faint(true).Render("agentic │ ctrl+c 退出")
+	var parts []string
+
+	// 上下文窗口占用（used>0 且 limit>0 时显示）。
+	if m.contextUsedTokens > 0 && m.contextLimit > 0 {
+		parts = append(parts, fmt.Sprintf("上下文 %s/%s (%d%%)",
+			formatToken(m.contextUsedTokens), formatToken(m.contextLimit),
+			m.contextUsedTokens*100/m.contextLimit))
+	}
+
+	// 余额（非空时显示）。
+	if m.balance != "" {
+		parts = append(parts, m.balance)
+	}
+
+	parts = append(parts, "ctrl+c 退出")
+
+	style := lipgloss.NewStyle().Height(1).Faint(true)
+	return style.Render("agentic │ " + strings.Join(parts, " │ "))
+}
+
+// formatToken 格式化 token 数（<1000 原样，>=1000 显示 "1.2k"）。
+func formatToken(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
 }

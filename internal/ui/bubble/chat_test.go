@@ -127,7 +127,8 @@ func TestChatModel_WindowSize(t *testing.T) {
 	}
 }
 
-// 事件消息（think/final/error/balance）追加对话行并刷新 viewport。
+// 事件消息（think/final/error）追加对话行并刷新 viewport。
+// 余额（chatBalanceMsg）进 footer 字段而非对话行（新版行为）。
 func TestChatModel_Events(t *testing.T) {
 	m := NewChatModel()
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
@@ -138,11 +139,13 @@ func TestChatModel_Events(t *testing.T) {
 	m.Update(chatFinalMsg{content: "**bold** answer", inputTokens: 100, outputTokens: 50, totalTokens: 150})
 	// error
 	m.Update(chatErrorMsg{err: errSome})
-	// balance
+	// balance（进 footer 字段）
 	m.Update(chatBalanceMsg{balance: "💰 ¥110.00"})
+	// context（进 footer 字段）
+	m.Update(chatContextMsg{usedTokens: 100, contextLimit: 50000})
 
-	if len(m.lines) != 5 {
-		t.Fatalf("lines = %d, want 5（think+final+token+error+balance）", len(m.lines))
+	if len(m.lines) != 4 {
+		t.Fatalf("lines = %d, want 4（think+final+token+error，余额不再占对话行）", len(m.lines))
 	}
 	content := m.viewport.View()
 	if !strings.Contains(content, "思考中") {
@@ -157,8 +160,20 @@ func TestChatModel_Events(t *testing.T) {
 	if !strings.Contains(content, "Error") {
 		t.Errorf("viewport 应含错误行，实际:\n%s", content)
 	}
-	if !strings.Contains(content, "¥110.00") {
-		t.Errorf("viewport 应含余额行，实际:\n%s", content)
+	// 余额进 footer。
+	if m.balance != "💰 ¥110.00" {
+		t.Errorf("balance 字段 = %q, want 💰 ¥110.00", m.balance)
+	}
+	if !strings.Contains(m.renderFooter(), "¥110.00") {
+		t.Errorf("footer 应含余额，实际:\n%s", m.renderFooter())
+	}
+	// 上下文占用进 footer（已用/总/百分比）。
+	if m.contextUsedTokens != 100 || m.contextLimit != 50000 {
+		t.Errorf("context = %d/%d, want 100/50000", m.contextUsedTokens, m.contextLimit)
+	}
+	footer := m.renderFooter()
+	if !strings.Contains(footer, "100") || !strings.Contains(footer, "50.0k") || !strings.Contains(footer, "0%") {
+		t.Errorf("footer 应含上下文占用（100/50.0k/0%%），实际:\n%s", footer)
 	}
 }
 

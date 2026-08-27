@@ -119,6 +119,11 @@ type UI interface {
 	// line 是已格式化的单行文本，如 "💰 余额: ¥110.00（充值 ¥100.00 / 赠金 ¥10.00）"。
 	ShowBalance(line string)
 
+	// UpdateContext 更新上下文窗口占用（每轮 Final 后触发，状态栏常驻展示）。
+	// usedTokens 是当前消息数组精确 token 数，contextLimit 是模型上下文窗口大小。
+	// 两者均为 0 时 UI 应跳过展示（数据未就绪）。
+	UpdateContext(usedTokens, contextLimit int)
+
 	// ── 交互组 ──────────────────────────────────────────
 
 	// ConfirmPermission 请求用户确认权限。

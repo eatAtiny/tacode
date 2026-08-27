@@ -202,6 +202,11 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 			// （queryLoop 内部多次 LLM 调用已累加，Final 是最终值）。
 			r.ui.OnFinal(finalAnswer, event.InputTokens, event.OutputTokens, event.TotalTokens)
 
+			// 上下文窗口占用更新（footer 状态栏常驻显示）。
+			// InputTokens = 本轮请求的输入 token 数（当前上下文占用），
+			// contextLimit = 模型窗口大小。
+			r.ui.UpdateContext(event.InputTokens, r.llm.ContextLimit())
+
 			// 每轮结束展示余额（/balance 开启后生效，失败静默；连续失败达到阈值时提示一次）。
 			if r.showBalance {
 				go func() {

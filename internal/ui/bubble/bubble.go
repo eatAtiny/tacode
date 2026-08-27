@@ -200,11 +200,17 @@ func (b *BubbleUI) OnMessage(msg string) {
 }
 
 // ShowBalance 展示账户余额。
-// 投递 chatBalanceMsg，ChatModel 用次要样式追加余额行。
+// 投递 chatBalanceMsg，ChatModel 存字段并在 footer 状态栏常驻显示。
 // 注意：可能在后台 goroutine 调用（query_engine 每轮余额查询），
 // send 经 uiMu 串行化 + Program.Send 线程安全。
 func (b *BubbleUI) ShowBalance(line string) {
 	b.send(chatBalanceMsg{balance: line})
+}
+
+// UpdateContext 更新上下文窗口占用。
+// 投递 chatContextMsg，ChatModel 存字段并在 footer 状态栏显示（已用/总/百分比）。
+func (b *BubbleUI) UpdateContext(usedTokens, contextLimit int) {
+	b.send(chatContextMsg{usedTokens: usedTokens, contextLimit: contextLimit})
 }
 
 // ConfirmPermission 显示权限确认提示，等待用户输入。
