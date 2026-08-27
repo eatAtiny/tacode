@@ -175,6 +175,23 @@ func TestChatModel_FinalNoTokens(t *testing.T) {
 	}
 }
 
+// 欢迎界面（chatWelcomeMsg）追加后应滚到顶部（logo 可见），而非滚到底部。
+// Bug 回归：启动时 viewport 高度未校准（默认 10 行），GotoBottom 会把
+// 超出的顶部 logo 滚出视口（「要上滑才能看见」根因）。
+func TestChatModel_WelcomeGotoTop(t *testing.T) {
+	m := NewChatModel()
+	// 模拟启动时序：先收 Welcome（viewport 高度还是默认 10），后收 WindowSizeMsg。
+	m.Update(chatWelcomeMsg{content: welcomeBanner("deepseek-v4-flash", "v0.1", "/tmp")})
+
+	if m.viewport.YOffset != 0 {
+		t.Errorf("Welcome 后 viewport.YOffset = %d, want 0（应滚到顶部）", m.viewport.YOffset)
+	}
+	content := m.viewport.View()
+	if !strings.Contains(content, "agentic") {
+		t.Errorf("viewport 顶部应含 logo（agentic），实际:\n%s", content)
+	}
+}
+
 // 流式 delta 合并到最后一行（不逐条 append）。
 func TestChatModel_StreamingMerge(t *testing.T) {
 	m := NewChatModel()

@@ -242,9 +242,10 @@ func (b *BubbleUI) ConfirmPermission(tool, args, reason string, inputForward <-c
 // Welcome 打印启动横幅。
 // 全 tea 界面下在对话区追加一个 Claude Code 风格的多行欢迎界面：
 // ASCII logo + 欢迎语 + 版本/模型/目录 + 使用提示。
+// 投递 chatWelcomeMsg（追加后滚到顶部，logo 完整可见）。
 func (b *BubbleUI) Welcome(model string) {
 	cwd, _ := os.Getwd()
-	b.send(chatMessageMsg{content: welcomeBanner(model, version, cwd)})
+	b.send(chatWelcomeMsg{content: welcomeBanner(model, version, cwd)})
 }
 
 // version 当前版本号（欢迎界面展示）。

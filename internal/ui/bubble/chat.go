@@ -54,20 +54,26 @@ type (
 	// content 是 Markdown 格式的最终回答，token 字段来自 API usage 精确值
 	// （totalTokens 为 0 表示 API 未返回 usage，不展示统计行）。
 	chatFinalMsg struct {
-		content                       string
-		inputTokens, outputTokens     int
-		totalTokens                   int
+		content                   string
+		inputTokens, outputTokens int
+		totalTokens               int
 	}
 	// chatToolCallMsg 工具调用请求（OnToolCall）。
 	chatToolCallMsg struct{ name, args string }
 	// chatToolResultMsg 工具执行结果（OnToolResult）。
-	chatToolResultMsg struct{ name, result string; isError bool }
+	chatToolResultMsg struct {
+		name, result string
+		isError      bool
+	}
 	// chatContinueMsg 继续推理提示（OnContinue）。
 	chatContinueMsg struct{ iteration int }
 	// chatErrorMsg 错误信息（OnError）。
 	chatErrorMsg struct{ err error }
 	// chatMessageMsg 一般性消息（OnMessage）。
 	chatMessageMsg struct{ content string }
+	// chatWelcomeMsg 欢迎界面（Welcome）。独立类型：追加后滚到顶部展示
+	// 完整 banner（logo 在首屏顶部），而非滚到底部（chatMessageMsg 行为）。
+	chatWelcomeMsg struct{ content string }
 	// chatBalanceMsg 账户余额（ShowBalance）。
 	chatBalanceMsg struct{ balance string }
 )
@@ -221,6 +227,13 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatMessageMsg:
 		m.lines = append(m.lines, chatLine{text: v.content})
 		m.scrollBottom()
+	case chatWelcomeMsg:
+		// 欢迎界面：追加后滚到顶部（logo 在首屏顶部），而非滚到底部。
+		// 启动时 viewport 高度可能尚未由 WindowSizeMsg 校准（默认 10 行），
+		// GotoBottom 会把超出的顶部 logo 滚出视口——这是「要上滑才能看见」的根因。
+		m.lines = append(m.lines, chatLine{text: v.content})
+		m.refresh()
+		m.viewport.GotoTop()
 	case chatBalanceMsg:
 		m.lines = append(m.lines, chatLine{text: styleMuted.Render(v.balance)})
 		m.scrollBottom()
