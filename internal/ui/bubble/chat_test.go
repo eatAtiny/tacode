@@ -114,19 +114,16 @@ func TestChatModel_SubmitTwice(t *testing.T) {
 	}
 }
 
-// WindowSizeMsg 更新布局（viewport 高度 = 窗口 - textarea - footer）。
+// WindowSizeMsg 更新布局（textarea 宽度；viewport 已删除）。
 func TestChatModel_WindowSize(t *testing.T) {
 	m := NewChatModel()
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	if m.width != 80 || m.height != 24 {
 		t.Errorf("size = %dx%d, want 80x24", m.width, m.height)
 	}
-	want := 24 - m.textarea.Height() - 2
-	if m.viewport.Height != want {
-		t.Errorf("viewport.Height = %d, want %d", m.viewport.Height, want)
-	}
-	if m.viewport.Width != 80 {
-		t.Errorf("viewport.Width = %d, want 80", m.viewport.Width)
+	// bubbles v1 的 SetWidth 含 prompt（"> " 宽 2），Width() 返回内容宽：80-2=78。
+	if m.textarea.Width() != 78 {
+		t.Errorf("textarea 宽度 = %d, want 78（窗口 80 - prompt 2）", m.textarea.Width())
 	}
 }
 
@@ -150,18 +147,21 @@ func TestChatModel_Events(t *testing.T) {
 	if len(m.lines) != 4 {
 		t.Fatalf("lines = %d, want 4（think+final+token+error，余额不再占对话行）", len(m.lines))
 	}
-	content := m.viewport.View()
-	if !strings.Contains(content, "思考中") {
-		t.Errorf("viewport 应含思考行，实际:\n%s", content)
+	all := ""
+	for _, l := range m.lines {
+		all += l.text + "\n"
 	}
-	if !strings.Contains(content, "bold") {
-		t.Errorf("viewport 应含渲染后的 final 文本，实际:\n%s", content)
+	if !strings.Contains(all, "思考中") {
+		t.Errorf("转录应含思考行，实际:\n%s", all)
 	}
-	if !strings.Contains(content, "150 tokens") {
-		t.Errorf("viewport 应含 token 统计行，实际:\n%s", content)
+	if !strings.Contains(all, "bold") {
+		t.Errorf("转录应含渲染后的 final 文本，实际:\n%s", all)
 	}
-	if !strings.Contains(content, "Error") {
-		t.Errorf("viewport 应含错误行，实际:\n%s", content)
+	if !strings.Contains(all, "150 tokens") {
+		t.Errorf("转录应含 token 统计行，实际:\n%s", all)
+	}
+	if !strings.Contains(all, "Error") {
+		t.Errorf("转录应含错误行，实际:\n%s", all)
 	}
 	// 余额进 footer。
 	if m.balance != "💰 ¥110.00" {
@@ -193,20 +193,15 @@ func TestChatModel_FinalNoTokens(t *testing.T) {
 	}
 }
 
-// 欢迎界面（chatWelcomeMsg）追加后应滚到顶部（logo 可见），而非滚到底部。
-// Bug 回归：启动时 viewport 高度未校准（默认 10 行），GotoBottom 会把
-// 超出的顶部 logo 滚出视口（「要上滑才能看见」根因）。
-func TestChatModel_WelcomeGotoTop(t *testing.T) {
+// 欢迎界面（chatWelcomeMsg）记入转录（首条），无滚动语义。
+func TestChatModel_WelcomePrinted(t *testing.T) {
 	m := NewChatModel()
-	// 模拟启动时序：先收 Welcome（viewport 高度还是默认 10），后收 WindowSizeMsg。
 	m.Update(chatWelcomeMsg{content: welcomeBanner("deepseek-v4-flash", "v0.1", "/tmp")})
-
-	if m.viewport.YOffset != 0 {
-		t.Errorf("Welcome 后 viewport.YOffset = %d, want 0（应滚到顶部）", m.viewport.YOffset)
+	if len(m.lines) != 1 {
+		t.Fatalf("lines = %d, want 1", len(m.lines))
 	}
-	content := m.viewport.View()
-	if !strings.Contains(content, "agentic") {
-		t.Errorf("viewport 顶部应含 logo（agentic），实际:\n%s", content)
+	if !strings.Contains(m.lines[0].text, "agentic") {
+		t.Errorf("欢迎行应含 logo，实际: %q", m.lines[0].text)
 	}
 }
 
@@ -232,23 +227,19 @@ func TestChatModel_ContextNoLimitHidden(t *testing.T) {
 	}
 }
 
-// 历史加载（chatHistoryMsg）后应滚到底部（展示最近一轮结果），而非顶部。
-func TestChatModel_HistoryGotoBottom(t *testing.T) {
+// 历史加载（chatHistoryMsg）清空重建转录，顺序保留。
+func TestChatModel_HistoryAppended(t *testing.T) {
 	m := NewChatModel()
-	// 构造足够多的历史行（超过默认 viewport 高度 10），验证滚动到底部。
 	var evts []chatHistoryEvent
 	for i := 0; i < 30; i++ {
 		evts = append(evts, chatHistoryEvent{text: fmt.Sprintf("历史第 %d 行", i)})
 	}
 	m.Update(chatHistoryMsg{events: evts})
-
-	// 滚到底部：YOffset 应接近最大值（最后一行可见），而非 0（顶部）。
-	if m.viewport.YOffset == 0 {
-		t.Error("历史加载后应滚到底部（YOffset > 0），而非顶部")
+	if len(m.lines) != 30 {
+		t.Fatalf("lines = %d, want 30", len(m.lines))
 	}
-	content := m.viewport.View()
-	if !strings.Contains(content, "历史第 29 行") {
-		t.Errorf("底部应显示最后一行历史，实际:\n%s", content)
+	if !strings.Contains(m.lines[29].text, "历史第 29 行") {
+		t.Errorf("末条应为最后一行历史，实际: %q", m.lines[29].text)
 	}
 }
 
@@ -265,12 +256,9 @@ func TestChatModel_StreamingMerge(t *testing.T) {
 	if m.lines[0].text != "你好，世界！" {
 		t.Errorf("流式合并文本 = %q, want 你好，世界！", m.lines[0].text)
 	}
-	// streaming 标记保持 true，View 末尾应带 ▌ 光标标记。
+	// streaming 标记保持 true（流式光标标记随打印管线在后续任务恢复）。
 	if !m.lines[0].streaming {
 		t.Error("流式行 streaming 标记应为 true")
-	}
-	if v := m.View(); !strings.Contains(v, "▌") {
-		t.Errorf("流式行应带 ▌ 光标标记，实际:\n%s", v)
 	}
 
 	// final 用渲染后的最终回答原地替换流式行（增量与最终回答同源，避免双份显示），
@@ -374,5 +362,18 @@ func TestChatModel_PickerCancel(t *testing.T) {
 		}
 	default:
 		t.Error("pickerDone 应收到取消结果")
+	}
+}
+
+// 活区 View 不含对话内容（对话经 tea.Println 定稿进 scrollback，View 只有活区）。
+func TestChatModel_ViewExcludesConversation(t *testing.T) {
+	m := NewChatModel()
+	m.Update(chatFinalMsg{content: "答案正文内容", totalTokens: 0})
+	if v := m.View(); strings.Contains(v, "答案正文内容") {
+		t.Errorf("View 不应包含对话内容（活区只有输入框/footer），实际:\n%s", v)
+	}
+	// 定稿内容记入转录 m.lines。
+	if len(m.lines) != 1 || !strings.Contains(m.lines[0].text, "答案正文内容") {
+		t.Errorf("final 内容应记入 m.lines，实际: %+v", m.lines)
 	}
 }

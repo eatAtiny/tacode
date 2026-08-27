@@ -16,7 +16,6 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
@@ -111,17 +110,15 @@ type chatLine struct {
 // ChatModel 全 tea 聊天界面模型。
 //
 // 结构（参照 j178/chatgpt ui.go）：
-//   - viewport 对话区：事件驱动追加 chatLine，scrollBottom 刷新 + 滚到底
 //   - textarea 输入区：Enter 提交（Alt+Enter 留待多行换行）
 //   - renderFooter 底部状态栏：占位提示（spinner/错误状态后续细化）
 //
-// 消息流：BubbleUI 事件方法 → Program.Send(msg) → Update 收到 → append line → 刷新。
+// 消息流：BubbleUI 事件方法 → Program.Send(msg) → Update 收到 → append line。
 // 用户输入：Enter → submitCh（Runner 从 channel 读，不直接持有 ChatModel）。
 type ChatModel struct {
 	width  int
 	height int
 
-	viewport viewport.Model        // 对话区（滚动）
 	textarea textarea.Model        // 输入框（单行）
 	renderer *glamour.TermRenderer // markdown 渲染
 
@@ -165,12 +162,10 @@ func NewChatModel() *ChatModel {
 	ta.SetHeight(1)
 	ta.ShowLineNumbers = false
 
-	vp := viewport.New(50, 10)
 	renderer, _ := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(100))
 
 	return &ChatModel{
 		textarea:   ta,
-		viewport:   vp,
 		renderer:   renderer,
 		submitCh:   make(chan string, 8),
 		pickerDone: make(chan string, 1),
@@ -218,17 +213,14 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textarea.Reset()
 				// 用户消息进对话区。
 				m.lines = append(m.lines, chatLine{text: m.renderUser(value)})
-				m.scrollBottom()
 			}
 			// 消费掉 Enter，避免 textarea 内插入换行。
 			return m, tea.Batch(cmds...)
 		}
 	}
-	// 更新子组件（textarea/viewport 各自处理鼠标、滚动等消息）。
+	// 更新子组件（textarea 处理按键、光标等消息）。
 	var cmd tea.Cmd
 	m.textarea, cmd = m.textarea.Update(msg)
-	cmds = append(cmds, cmd)
-	m.viewport, cmd = m.viewport.Update(msg)
 	cmds = append(cmds, cmd)
 
 	switch v := msg.(type) {
@@ -236,13 +228,8 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = v.Width
 		m.height = v.Height
 		m.textarea.SetWidth(v.Width)
-		m.viewport.Width = v.Width
-		// 2 = footer 预留高度（文本区 + footer 高度之和）。
-		m.viewport.Height = v.Height - m.textarea.Height() - 2
-		m.refresh()
 	case chatThinkMsg:
 		m.lines = append(m.lines, chatLine{text: styleThink.Render("⏳ 思考中...")})
-		m.scrollBottom()
 	case chatDeltaMsg:
 		m.appendStreaming(v.content)
 	case chatFinalMsg:
@@ -264,7 +251,6 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lines = append(m.lines, chatLine{text: m.renderAssistant() + rendered})
 			}
 		}
-		m.scrollBottom()
 		// 本轮 token 统计（精确值，来自 API usage；totalTokens 为 0 时跳过，
 		// 避免误导——API 未返回 usage）。
 		if v.totalTokens > 0 {
@@ -273,34 +259,23 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				v.totalTokens, v.inputTokens, v.outputTokens,
 			)
 			m.lines = append(m.lines, chatLine{text: styleMuted.Render(line)})
-			m.scrollBottom()
 		}
 	case chatToolCallMsg:
 		m.closeStreaming()
 		// 复用 box.go 的 toolCallBox 生成框线文本（尾 \n 由 multi-line 渲染处理）。
 		m.lines = append(m.lines, chatLine{text: toolCallBox(v.name, v.args)})
-		m.scrollBottom()
 	case chatToolResultMsg:
 		m.closeStreaming()
 		// 复用 box.go 的 toolResultBox 生成框线文本（>15 行截断 + 成功/失败标题）。
 		m.lines = append(m.lines, chatLine{text: toolResultBox(v.name, v.result, v.isError)})
-		m.scrollBottom()
 	case chatContinueMsg:
 		m.lines = append(m.lines, chatLine{text: styleThink.Render(fmt.Sprintf("🔄 继续推理 (iter %d)", v.iteration))})
-		m.scrollBottom()
 	case chatErrorMsg:
 		m.lines = append(m.lines, chatLine{text: styleError.Render(fmt.Sprintf("❌ Error: %v", v.err))})
-		m.scrollBottom()
 	case chatMessageMsg:
 		m.lines = append(m.lines, chatLine{text: v.content})
-		m.scrollBottom()
 	case chatWelcomeMsg:
-		// 欢迎界面：追加后滚到顶部（logo 在首屏顶部），而非滚到底部。
-		// 启动时 viewport 高度可能尚未由 WindowSizeMsg 校准（默认 10 行），
-		// GotoBottom 会把超出的顶部 logo 滚出视口——这是「要上滑才能看见」的根因。
 		m.lines = append(m.lines, chatLine{text: v.content})
-		m.refresh()
-		m.viewport.GotoTop()
 	case chatBalanceMsg:
 		// 余额进 footer 状态栏（常驻显示），不再追加对话行。
 		m.balance = v.balance
@@ -315,8 +290,6 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, e := range v.events {
 			m.lines = append(m.lines, chatLine{text: e.text, streaming: e.streaming})
 		}
-		m.refresh()
-		m.viewport.GotoBottom() // 历史滚到底部：展示最近一轮结果（而非最上面）
 	case chatPickerMsg:
 		// 启动会话选择器（/list）：创建 picker 模型，进入选择模式。
 		m.picker = session.NewSessionPickerModel(v.sessions, v.activeID)
@@ -354,13 +327,11 @@ func (m *ChatModel) appendStreaming(content string) {
 		last := &m.lines[len(m.lines)-1]
 		if last.streaming {
 			last.text += content
-			m.scrollBottom()
 			return
 		}
 	}
 	// 无进行中的流式行：新开一条（助手消息首行）。
 	m.lines = append(m.lines, chatLine{text: content, streaming: true})
-	m.scrollBottom()
 }
 
 // closeStreaming 关闭进行中的流式行（chatToolCall/chatToolResult 前调用）。
@@ -372,33 +343,9 @@ func (m *ChatModel) closeStreaming() {
 	}
 }
 
-// scrollBottom 刷新 viewport 内容并滚到底部。
-func (m *ChatModel) scrollBottom() {
-	m.refresh()
-	m.viewport.GotoBottom()
-}
-
-// refresh 从 lines 重新渲染 viewport 内容。
-// 每条 chatLine 独立追加，行内换行（框线/Markdown）保留；
-// 最后一条流式行末尾追加 "▌" 光标标记，指示输出进行中。
-func (m *ChatModel) refresh() {
-	var sb strings.Builder
-	for i, l := range m.lines {
-		text := l.text
-		// 流式行（正在累积增量）末尾追加光标标记；最后一行才标记，
-		// 避免中间行误带标记。
-		if i == len(m.lines)-1 && l.streaming && !strings.HasSuffix(text, "▌") {
-			text += "▌"
-		}
-		sb.WriteString(text)
-		sb.WriteString("\n")
-	}
-	m.viewport.SetContent(sb.String())
-}
-
-// View 渲染整屏。
+// View 渲染底部活区。
 // 选择器模式（picking）时渲染会话选择器；权限确认（permLayer）时在输入框上方
-// 渲染弹层；否则渲染对话区 + 输入框 + footer。
+// 渲染弹层；否则渲染输入框 + footer（对话内容不在 View 内）。
 func (m *ChatModel) View() string {
 	if m.picking && m.picker != nil {
 		return lipgloss.JoinVertical(lipgloss.Left,
@@ -406,7 +353,7 @@ func (m *ChatModel) View() string {
 			lipgloss.NewStyle().Height(1).Faint(true).Render("↑↓ 移动 · Enter 切换 · Esc 取消"),
 		)
 	}
-	parts := []string{m.viewport.View()}
+	parts := []string{}
 	if m.permLayer != nil {
 		parts = append(parts, m.renderPermissionLayer())
 	}
