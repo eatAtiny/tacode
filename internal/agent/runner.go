@@ -80,8 +80,7 @@ type Runner struct {
 	memoryPreamble string     // 记忆 preamble 缓存（<system-reminder> 内容，会话内字节稳定，仅切换/首轮重建）
 	compactor      *Compactor // s08 四步压缩管线（nil = 禁用）
 
-	showBalance      bool // 每轮结束是否展示余额（/balance 成功后开启）
-	balanceFailCount int  // 连续余额查询失败次数（达到阈值时提示一次，防止静默失效）
+	balanceFailCount atomic.Int32 // 连续余额查询失败次数（达到阈值时提示一次，防止静默失效）
 
 	// pendingInputs 查询运行中排队的用户输入（查询结束后自动作为下一轮处理）。
 	// 仅 Run() 主循环 goroutine 访问，无需锁。

@@ -162,6 +162,13 @@ type captureHandler struct {
 }
 
 func (h *captureHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 余额查询请求（每轮自动更新触发的 /user/balance）：
+	// 返回 500 让余额查询失败静默，不捕获进 bodies（避免污染 LLM 请求断言）。
+	if r.URL.Path == "/user/balance" {
+		http.Error(w, `{"error":"mock balance unavailable"}`, http.StatusInternalServerError)
+		return
+	}
+
 	body, _ := io.ReadAll(r.Body)
 	var parsed map[string]any
 	_ = json.Unmarshal(body, &parsed)

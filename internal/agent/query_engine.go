@@ -209,12 +209,10 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 				r.ui.UpdateContext(r.compactor.EstimateMessagesChars(finalMessages), r.compactor.Limit())
 			}
 
-			// 每轮结束展示余额（/balance 开启后生效，失败静默；连续失败达到阈值时提示一次）。
-			if r.showBalance {
-				go func() {
-					r.queryBalanceWith(r.queryBalance)
-				}()
-			}
+			// 每轮结束更新余额（每轮自动查询，失败静默；连续失败达到阈值时提示一次）。
+			go func() {
+				r.queryBalanceWith(r.queryBalance)
+			}()
 
 		case QueryEventError:
 			// 错误：通知 UI 并返回错误信息。

@@ -9,9 +9,6 @@ import (
 	"agentic/internal/llm"
 )
 
-// showBalance 是否每轮结束展示余额（/balance 成功后开启）。
-// 字段加在 runner.go 的 Runner struct 中（messages 字段附近）。
-
 // currencySymbol 货币符号映射（未知货币回退到币种代码）。
 var currencySymbol = map[string]string{"CNY": "¥", "USD": "$"}
 
@@ -78,15 +75,15 @@ type balanceQueryFunc func() (string, bool)
 const balanceFailThreshold = 3
 
 // queryBalanceWith 用指定的查询函数执行每轮余额查询（生产走 queryBalance，测试注入桩）。
+// balanceFailCount 用 atomic 保护：每轮查询在独立 goroutine 运行，可能并发读写。
 func (r *Runner) queryBalanceWith(query balanceQueryFunc) {
 	if _, ok := query(); !ok {
-		r.balanceFailCount++
-		if r.balanceFailCount == balanceFailThreshold {
+		if r.balanceFailCount.Add(1) == balanceFailThreshold {
 			r.ui.OnMessage(fmt.Sprintf("⚠️ 余额查询连续失败 %d 次，请检查网络或 API key", balanceFailThreshold))
 		}
 		return
 	}
-	r.balanceFailCount = 0
+	r.balanceFailCount.Store(0)
 }
 
 // balanceBaseURL 获取余额查询使用的 baseURL（复用 OpenAI client 的 BaseURL）。
@@ -95,12 +92,10 @@ func balanceBaseURL(c *llm.OpenAIClient) string {
 }
 
 // handleBalanceCommand 处理 /balance 命令。
-// 成功：展示余额并开启每轮展示；失败：展示原因（不开启）。
+// 手动查询余额并展示（每轮已自动更新，此命令用于立即刷新/排查）。
 func (r *Runner) handleBalanceCommand() {
 	line, ok := r.queryBalance()
 	if !ok {
 		r.ui.OnMessage(fmt.Sprintf("⚠️ 余额查询失败: %s", line))
-		return
 	}
-	r.showBalance = true
 }
