@@ -48,7 +48,9 @@ type TextUI struct {
 	//     "context"、"session_picker"、"history"
 	//   - data: 事件数据，类型因事件而异：
 	//     - think/continue: int（迭代次数）
-	//     - delta/final/message/balance: string（文本内容）
+	//     - delta/message/balance: string（文本内容）
+	//     - final: map[string]any{"answer": ..., "input_tokens": ...,
+	//       "output_tokens": ..., "total_tokens": ...}
 	//     - tool_call: map[string]string{"name": ..., "args": ...}
 	//     - tool_result: map[string]any{"name": ..., "result": ..., "is_error": ...}
 	//     - error: error
