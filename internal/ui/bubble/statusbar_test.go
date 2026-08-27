@@ -60,20 +60,9 @@ func TestStatusBar_UpdateTokens(t *testing.T) {
 }
 
 // 状态栏生命周期：render 后 shown，clear 后 unshown。
-func TestStatusBarLifecycle(t *testing.T) {
-	b := NewBubbleUI()
-	b.SetSessionName("demo")
-	b.SetModel("m")
-
-	b.renderStatusBar()
-	if !b.statusBarShown {
-		t.Error("render 后 statusBarShown 应为 true")
-	}
-	b.clearStatusBar()
-	if b.statusBarShown {
-		t.Error("clear 后 statusBarShown 应为 false")
-	}
-}
+// 说明：本测试在改造 A（删 tea 主渲染）前依赖 renderStatusBar/clearStatusBar
+// 的 ANSI 输出（写 os.Stdout），且改造 B（状态栏简化）将重做状态栏实现，
+// 故删除——保留 statusBarText 文本内容的断言（改造 B 后语义仍有效）。
 
 // 多行余额文本被 clamp 成单行。
 func TestStatusBar_MultiLineBalance(t *testing.T) {

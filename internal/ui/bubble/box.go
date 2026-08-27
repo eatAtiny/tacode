@@ -1,5 +1,6 @@
-// 框线渲染辅助：阶段 1（ANSI 直写）与 tea 模式共用的文本生成函数。
-// boxWidth 定义在 bubble.go（阶段 1 与 box.go 共用）。
+// 框线渲染辅助：追加式输出（bubble.go OnToolCall/OnToolResult/OnFinal）共用的
+// 文本生成函数。框线统一在此生成，bubble.go 不再内联绘制（消除双份逻辑）。
+// boxWidth 定义在 bubble.go（bubble.go 与 box.go 共用）。
 package bubble
 
 import (
@@ -8,11 +9,10 @@ import (
 	"strings"
 )
 
-// toolCallBox 生成工具调用框线文本（阶段 1 与 tea 模式共用）。
+// toolCallBox 生成工具调用框线文本（bubble.go OnToolCall 使用）。
 // 参数 JSON 格式化缩进显示，单行参数用紧凑格式。
 //
-// 结尾带 \n：tea 模式下 block 追加以 \n 结尾表示"闭合行"（见 tea_model.go 的
-// teaAppendMsg 合并语义），配合 Update 里的换行断开逻辑让工具框线在流式行后另起。
+// 结尾带 \n：追加式模型下直接 fmt.Print，尾换行保证框线闭合后另起一行。
 func toolCallBox(name, args string) string {
 	displayArgs := args
 	var parsed map[string]any
@@ -41,7 +41,7 @@ func toolCallBox(name, args string) string {
 	return sb.String()
 }
 
-// toolResultBox 生成工具执行结果框线文本（阶段 1 与 tea 模式共用）。
+// toolResultBox 生成工具执行结果框线文本（bubble.go OnToolResult 使用）。
 // 超过 15 行的输出会被截断。成功标题绿色 "✅ 结果"，失败红色 "❌ 错误"。
 // 结尾带 \n：语义同 toolCallBox。
 func toolResultBox(name, result string, isError bool) string {
@@ -83,8 +83,8 @@ func toolResultBox(name, result string, isError bool) string {
 	return sb.String()
 }
 
-// finalAnswerText 渲染最终回答文本（tea 模式用）：Glamour Markdown 渲染，
-// 失败回退纯文本，带 2 空格缩进，每行结尾带 \n（block 追加闭合语义）。
+// finalAnswerText 渲染最终回答文本（bubble.go OnFinal 使用）：Glamour Markdown 渲染，
+// 失败回退纯文本，带 2 空格缩进，每行结尾带 \n。
 // 不直接使用 b.glamour 字段读——渲染器初始化后只读，无并发写，直接读安全。
 func finalAnswerText(b *BubbleUI, answer string) string {
 	if b.glamour != nil {

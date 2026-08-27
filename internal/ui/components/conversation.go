@@ -37,7 +37,8 @@ import (
 //   - 用户上滚浏览历史时 SetFollow(false)：新内容追加但不再强制滚底
 //   - 滚回底部或提交输入时 SetFollow(true)：恢复跟随并滚到底部
 //
-// 使用场景（阶段 2）：teaUI 组合布局中的对话区主组件（见 internal/ui/bubble/tea_model.go）。
+// 使用场景：BubbleUI 持有的对话历史组件（internal/ui/bubble 的 conversation 字段，
+// 用于 /list 等交互场景的对话预览；主屏对话由追加式输出直接写终端）。
 type ConversationModel struct {
 	lines     []string              // 所有行（包括已渲染的 Markdown 和分隔线）
 	width     int                   // 组件宽度（列数）
@@ -67,7 +68,7 @@ func (m *ConversationModel) IsEmpty() bool {
 }
 
 // SetSize 设置组件的宽度和高度。高度即视口高度（不含状态栏/输入栏，
-// 它们由外部组合布局分配，见 teaUI.View 的 convHeight 计算）。
+// 它们由外部组合布局分配）。
 //
 // 尺寸变化后重算滚动偏移：追加时视口可能尚未设置（ViewportHeight 回退默认值），
 // 此时 scrollToBottom 计算的 scrollY 可能超过新视口下的最大偏移，
