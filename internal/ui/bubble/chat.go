@@ -101,7 +101,8 @@ type (
 
 // chatLine 对话区的一行（渲染后文本）。
 // text 是 lipgloss/glamour 渲染后的行文本，可能含换行（框线文本、Markdown 渲染）。
-// streaming 标记该行是否仍在累积流式增量（OnDelta 合并到 streaming 行的末尾）。
+// streaming 字段在流式改为「增量缓冲 + 换行切段定稿」后不再写入（保留字段，
+// 后续任务处理光标标记时可能复用）。
 type chatLine struct {
 	text      string
 	streaming bool
@@ -123,6 +124,11 @@ type ChatModel struct {
 	renderer *glamour.TermRenderer // markdown 渲染
 
 	lines []chatLine // 对话区累积行（事件驱动追加）
+
+	// streamBuf 未定稿的流式缓冲（无换行的增量累积）。
+	streamBuf string
+	// streamed 自最近一次 think 起是否有流式内容（final 判断是否重印全文）。
+	streamed bool
 
 	submitCh chan string // 用户提交桥接（BubbleUI → Runner）
 
@@ -229,41 +235,38 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = v.Height
 		m.textarea.SetWidth(v.Width)
 	case chatThinkMsg:
+		m.streamed = false
 		m.lines = append(m.lines, chatLine{text: styleThink.Render("⏳ 思考中...")})
 	case chatDeltaMsg:
-		m.appendStreaming(v.content)
+		if segs := m.appendStreaming(v.content); len(segs) > 0 {
+			cmds = append(cmds, m.commit(segs...))
+		}
 	case chatFinalMsg:
-		// 过渡实现：保留「final 原地替换流式行」语义（Task 4 重构为冲刷模型）。
-		// 被替换的流式行不能用 commit——commit 会再追加一条转录导致双份，
-		// 替换用直接赋值，打印用裸 tea.Println。
-		var text string
-		if v.content != "" {
-			text = m.renderAssistant() + finalAnswerText(m, v.content)
+		// 冲刷残余段落；有流式内容时 final 不重印全文（增量与最终回答同源）。
+		// 整个 case 只产生一次 commit（单次 Println）——残余/全文/token 行
+		// 合并为一个打印命令，避免 tea.Batch 内多 Cmd 并发不保序。
+		parts := m.flushBuf()
+		if !m.streamed && v.content != "" {
+			parts = append(parts, m.renderAssistant()+finalAnswerText(m, v.content))
 		}
-		if len(m.lines) > 0 && m.lines[len(m.lines)-1].streaming && text != "" {
-			m.lines[len(m.lines)-1] = chatLine{text: text}
-		} else if text != "" {
-			m.lines = append(m.lines, chatLine{text: text})
-		}
-		if text != "" {
-			cmds = append(cmds, tea.Println(text))
-		}
-		// 本轮 token 统计（精确值，来自 API usage；totalTokens 为 0 时跳过，
-		// 避免误导——API 未返回 usage）。
 		if v.totalTokens > 0 {
-			cmds = append(cmds, m.commit(styleMuted.Render(fmt.Sprintf(
+			parts = append(parts, styleMuted.Render(fmt.Sprintf(
 				"  ⚡ 本轮 %d tokens（输入 %d / 输出 %d）",
 				v.totalTokens, v.inputTokens, v.outputTokens,
-			))))
+			)))
 		}
+		if len(parts) > 0 {
+			cmds = append(cmds, m.commit(parts...))
+		}
+		m.streamed = false
 	case chatToolCallMsg:
-		m.closeStreaming()
-		// 复用 box.go 的 toolCallBox 生成框线文本（尾 \n 由 multi-line 渲染处理）。
-		cmds = append(cmds, m.commit(toolCallBox(v.name, v.args)))
+		// 先冲刷流式残余再接框线（同一次 commit 打印，保序）。
+		parts := append(m.flushBuf(), toolCallBox(v.name, v.args))
+		cmds = append(cmds, m.commit(parts...))
 	case chatToolResultMsg:
-		m.closeStreaming()
-		// 复用 box.go 的 toolResultBox 生成框线文本（>15 行截断 + 成功/失败标题）。
-		cmds = append(cmds, m.commit(toolResultBox(v.name, v.result, v.isError)))
+		// 先冲刷流式残余再接框线（同一次 commit 打印，保序）。
+		parts := append(m.flushBuf(), toolResultBox(v.name, v.result, v.isError))
+		cmds = append(cmds, m.commit(parts...))
 	case chatContinueMsg:
 		cmds = append(cmds, m.commit(styleThink.Render(fmt.Sprintf("🔄 继续推理 (iter %d)", v.iteration))))
 	case chatErrorMsg:
@@ -283,8 +286,8 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 切换会话后加载历史：先清空对话区，再经 commit 单次打印整段历史
 		// （多段合并为一个 tea.Println，保序——tea.Batch 内 Cmd 并发不保序）。
 		m.lines = nil
-		m.closeStreaming()
-		var parts []string
+		// 防御性冲刷：历史行接在流式残余之后（正常场景加载历史时无进行中流式）。
+		parts := m.flushBuf()
 		for _, e := range v.events {
 			parts = append(parts, e.text)
 		}
@@ -318,28 +321,34 @@ func (m *ChatModel) renderAssistant() string {
 	return styleMuted.Render("🧑 助手") + " "
 }
 
-// appendStreaming 追加流式增量文本（OnDelta）。
-// 增量合并到对话区最后一条助手消息的流式行上（不逐行 append），
-// 保证思考文本在一条 chatLine 内连续累积，渲染稳定。
-func (m *ChatModel) appendStreaming(content string) {
-	if len(m.lines) > 0 {
-		last := &m.lines[len(m.lines)-1]
-		if last.streaming {
-			last.text += content
-			return
-		}
+// appendStreaming 追加流式增量，返回可定稿段落（遇 \n 切段，保序）。
+// 本轮首个增量前注入助手前缀（进 streamBuf，随首次冲刷一起定稿）。
+func (m *ChatModel) appendStreaming(content string) []string {
+	if !m.streamed {
+		m.streamBuf += m.renderAssistant()
 	}
-	// 无进行中的流式行：新开一条（助手消息首行）。
-	m.lines = append(m.lines, chatLine{text: content, streaming: true})
+	m.streamBuf += content
+	m.streamed = true
+	var segs []string
+	for {
+		i := strings.IndexByte(m.streamBuf, '\n')
+		if i < 0 {
+			break
+		}
+		segs = append(segs, m.streamBuf[:i])
+		m.streamBuf = m.streamBuf[i+1:]
+	}
+	return segs
 }
 
-// closeStreaming 关闭进行中的流式行（chatToolCall/chatToolResult 前调用）。
-// 流式行仍是对话区的一部分（内容保留），只是停止累积增量。
-// 注意：chatFinalMsg 不再走此路径——它用渲染后的最终回答原地替换流式行（防双份显示）。
-func (m *ChatModel) closeStreaming() {
-	if len(m.lines) > 0 {
-		m.lines[len(m.lines)-1].streaming = false
+// flushBuf 取出残余缓冲（无残余返回 nil）。
+func (m *ChatModel) flushBuf() []string {
+	if m.streamBuf == "" {
+		return nil
 	}
+	s := m.streamBuf
+	m.streamBuf = ""
+	return []string{s}
 }
 
 // commit 定稿若干段：逐段记入转录 m.lines，并返回单次 tea.Println

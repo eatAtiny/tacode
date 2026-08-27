@@ -181,15 +181,18 @@ func TestChatModel_Events(t *testing.T) {
 }
 
 // totalTokens 为 0（API 未返回 usage）时不应展示 token 统计行。
+// 断言末条转录内容而非总行数（think 行在 Task 5 才移除，行数会变）。
 func TestChatModel_FinalNoTokens(t *testing.T) {
 	m := NewChatModel()
+	m.Update(chatThinkMsg{iteration: 1})
 	m.Update(chatFinalMsg{content: "ok", totalTokens: 0})
 
-	if len(m.lines) != 1 {
-		t.Fatalf("lines = %d, want 1（无 token 行）", len(m.lines))
+	last := m.lines[len(m.lines)-1]
+	if strings.Contains(last.text, "tokens") {
+		t.Errorf("totalTokens=0 不应渲染 token 行，实际: %q", last.text)
 	}
-	if strings.Contains(m.lines[0].text, "tokens") {
-		t.Errorf("totalTokens=0 不应渲染 token 行，实际: %q", m.lines[0].text)
+	if !strings.Contains(last.text, "ok") {
+		t.Errorf("final 行应含回答内容，实际: %q", last.text)
 	}
 }
 
@@ -243,36 +246,86 @@ func TestChatModel_HistoryAppended(t *testing.T) {
 	}
 }
 
-// 流式 delta 合并到最后一行（不逐条 append）。
-func TestChatModel_StreamingMerge(t *testing.T) {
+// 流式增量遇换行定稿：完整段落进 m.lines，残余留 streamBuf。
+func TestChatModel_StreamingFlushOnNewline(t *testing.T) {
 	m := NewChatModel()
-	m.Update(chatDeltaMsg{content: "你好"})
-	m.Update(chatDeltaMsg{content: "，世界"})
-	m.Update(chatDeltaMsg{content: "！"})
+	m.Update(chatThinkMsg{iteration: 1})
+	m.Update(chatDeltaMsg{content: "第一段"})
+	m.Update(chatDeltaMsg{content: "收尾\n第二段开头"})
+	// "…第一段收尾" 已定稿为一条转录（think 行仍在转录且占 1 行，Task 5 移除）。
+	if len(m.lines) != 2 {
+		t.Fatalf("lines = %d, want 2（思考行 + 换行前定稿段）", len(m.lines))
+	}
+	seg := m.lines[len(m.lines)-1]
+	if !strings.Contains(seg.text, "第一段收尾") {
+		t.Errorf("定稿段应含完整段落，实际: %q", seg.text)
+	}
+	if !strings.Contains(seg.text, "助手") {
+		t.Errorf("首个流式段应带助手前缀，实际: %q", seg.text)
+	}
+	// 残余未定稿。
+	if m.streamBuf != "第二段开头" {
+		t.Errorf("streamBuf = %q, want 第二段开头", m.streamBuf)
+	}
 
-	if len(m.lines) != 1 {
-		t.Fatalf("lines = %d, want 1（delta 应合并到同一行）", len(m.lines))
+	// final 冲刷残余 + 补 token 行。
+	m.Update(chatFinalMsg{content: "第二段开头", totalTokens: 100})
+	if m.streamBuf != "" {
+		t.Errorf("final 后 streamBuf 应清空，实际: %q", m.streamBuf)
 	}
-	if m.lines[0].text != "你好，世界！" {
-		t.Errorf("流式合并文本 = %q, want 你好，世界！", m.lines[0].text)
+	all := ""
+	for _, l := range m.lines {
+		all += l.text + "\n"
 	}
-	// streaming 标记保持 true（流式光标标记随打印管线在后续任务恢复）。
-	if !m.lines[0].streaming {
-		t.Error("流式行 streaming 标记应为 true")
+	if !strings.Contains(all, "第二段开头") || !strings.Contains(all, "100 tokens") {
+		t.Errorf("final 应冲刷残余并补统计行，实际:\n%s", all)
 	}
+}
 
-	// final 用渲染后的最终回答原地替换流式行（增量与最终回答同源，避免双份显示），
-	// streaming 标记关闭。
-	m.Update(chatFinalMsg{content: "回答", totalTokens: 0})
-	if m.lines[0].streaming {
-		t.Error("final 后流式行 streaming 标记应关闭")
+// final 不重印：有流式内容时 final 不再打印全文（避免双份显示）。
+func TestChatModel_FinalNoReprint(t *testing.T) {
+	m := NewChatModel()
+	m.Update(chatThinkMsg{iteration: 1})
+	m.Update(chatDeltaMsg{content: "答案内容完毕\n"})
+	m.Update(chatFinalMsg{content: "答案内容完毕", totalTokens: 0})
+
+	all := ""
+	for _, l := range m.lines {
+		all += l.text + "\n"
 	}
-	if len(m.lines) != 1 {
-		t.Fatalf("lines = %d, want 1（final 应替换流式行而非追加）", len(m.lines))
+	if got := strings.Count(all, "答案内容完毕"); got != 1 {
+		t.Errorf("答案应只出现 1 次（流式已定稿，final 不重印），实际 %d 次:\n%s", got, all)
 	}
-	// 流式文本已被最终回答替换（不再双份显示）。
-	if !strings.Contains(m.lines[0].text, "回答") {
-		t.Errorf("流式行应被最终回答替换，实际: %q", m.lines[0].text)
+}
+
+// 本轮无流式内容（模型直接答）时 final 打印 glamour 渲染全文。
+func TestChatModel_FinalWithoutStreamPrintsRendered(t *testing.T) {
+	m := NewChatModel()
+	m.Update(chatThinkMsg{iteration: 1})
+	m.Update(chatFinalMsg{content: "**加粗**回答", totalTokens: 0})
+
+	// think 行仍在转录且占 1 行（Task 5 移除），final 定稿一条 + 无 token 行。
+	if len(m.lines) != 2 {
+		t.Fatalf("lines = %d, want 2（思考行 + final 渲染全文，无 token 行）", len(m.lines))
+	}
+	last := m.lines[len(m.lines)-1]
+	if !strings.Contains(last.text, "加粗") || !strings.Contains(last.text, "助手") {
+		t.Errorf("final 应打印渲染全文 + 助手前缀，实际: %q", last.text)
+	}
+}
+
+// commit 契约：无参返回 nil；逐段按序记入转录（含空段，保留段落间空行语义）。
+func TestChatModel_CommitContract(t *testing.T) {
+	m := NewChatModel()
+	if cmd := m.commit(); cmd != nil {
+		t.Error("无段 commit 应返回 nil")
+	}
+	_ = m.commit("a", "", "b")
+	if len(m.lines) != 3 {
+		t.Fatalf("lines = %d, want 3（空段照记）", len(m.lines))
+	}
+	if m.lines[0].text != "a" || m.lines[1].text != "" || m.lines[2].text != "b" {
+		t.Errorf("转录应按序含 a/\"\"/b，实际: %+v", m.lines)
 	}
 }
 
