@@ -180,9 +180,10 @@ func NewChatModel() *ChatModel {
 // SubmitCh 返回用户提交 channel（Runner 从此读输入）。
 func (m *ChatModel) SubmitCh() <-chan string { return m.submitCh }
 
-// Init 初始命令：进入 alt screen（全屏渲染），并启动光标闪烁。
+// Init 初始命令：启动光标闪烁。
+// 不进 alt screen——inline 渲染，对话定稿后留在终端原生 scrollback。
 func (m *ChatModel) Init() tea.Cmd {
-	return tea.Batch(tea.EnterAltScreen, textarea.Blink)
+	return textarea.Blink
 }
 
 // Update 处理消息。签名满足 tea.Model 接口（返回 tea.Model）。

@@ -85,8 +85,9 @@ func (b *BubbleUI) Start(opts ...tea.ProgramOption) error {
 		return nil // 已启动，幂等
 	}
 	done := make(chan struct{})
-	// 启用鼠标（CellMotion：滚轮/移动事件），让 viewport 对话区支持滚轮滚动历史。
-	p := tea.NewProgram(b.chat, append([]tea.ProgramOption{tea.WithMouseCellMotion()}, opts...)...)
+	// 不开鼠标捕获、不进 alt screen（inline 渲染）：
+	// 终端原生选择/复制/滚轮滚动全部保留，对话经 tea.Println 流入原生 scrollback。
+	p := tea.NewProgram(b.chat, opts...)
 	b.program = p
 	b.runDone = done
 	b.uiMu.Unlock()
