@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	openai "github.com/sashabaranov/go-openai"
@@ -361,13 +362,28 @@ func (r *Registry) AfterHooks(toolName string, args string, result string, execE
 	}
 }
 
+// sortedTools 返回按名称字典序排列的工具列表。
+//
+// Registry 的清单类输出（Names/Descriptions/FunctionDefinitions）
+// 必须顺序稳定：直接 range map 顺序随机，会导致 system prompt
+// 中工具段落每轮字节不同，击穿前缀缓存。
+func (r *Registry) sortedTools() []Tool {
+	ts := make([]Tool, 0, len(r.tools))
+	for _, t := range r.tools {
+		ts = append(ts, t)
+	}
+	sort.Slice(ts, func(i, j int) bool { return ts[i].Name() < ts[j].Name() })
+	return ts
+}
+
 // FunctionDefinitions 生成 OpenAI function calling 所需的工具定义列表。
 //
 // 调用时机：QueryEngine 步骤 3（构建 prompt 时）。
 // 生成的 []openai.Tool 作为 ChatWithToolsStream 的 tools 参数传入。
+// 按名称字典序排列，保证 tools 参数跨轮字节稳定。
 func (r *Registry) FunctionDefinitions() []openai.Tool {
 	defs := make([]openai.Tool, 0, len(r.tools))
-	for _, t := range r.tools {
+	for _, t := range r.sortedTools() {
 		defs = append(defs, openai.Tool{
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
@@ -380,16 +396,18 @@ func (r *Registry) FunctionDefinitions() []openai.Tool {
 	return defs
 }
 
-// Names 返回所有已注册工具的名称列表。
+// Names 返回所有已注册工具的名称列表，按名称字典序排列。
 func (r *Registry) Names() []string {
 	names := make([]string, 0, len(r.tools))
 	for name := range r.tools {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
 
 // Descriptions 返回所有工具的可读描述，用于 prompt 拼接。
+// 清单按名称字典序输出（保证 system prompt 跨轮字节稳定，命中前缀缓存）。
 //
 // 调用时机：BuildReActSystemPrompt（生成 system prompt 中的 "## 可用工具" 部分）。
 //
@@ -404,7 +422,7 @@ func (r *Registry) Descriptions() string {
 		return "(无可用工具)"
 	}
 	var s string
-	for _, t := range r.tools {
+	for _, t := range r.sortedTools() {
 		params, _ := json.Marshal(t.Parameters())
 		s += fmt.Sprintf("- %s: %s\n  参数: %s\n", t.Name(), t.Description(), string(params))
 	}

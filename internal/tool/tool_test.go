@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -721,6 +723,68 @@ func TestRegistryGet(t *testing.T) {
 	}
 	if r.Get("nonexistent") != nil {
 		t.Error("should not find nonexistent tool")
+	}
+}
+
+// TestRegistryListingsSortedAndStable 验证工具清单输出的顺序稳定性。
+//
+// Names/Descriptions/FunctionDefinitions 若直接 range map，顺序随机，
+// system prompt 中工具段落每轮重建时字节不稳，会击穿 messages[0]
+// 「全静态、跨轮字节不变」的前缀缓存设计。
+func TestRegistryListingsSortedAndStable(t *testing.T) {
+	r := NewRegistry()
+	// 7 个真实工具 + 2 个名字分别排在字典序两端的 fake 工具，共 9 个。
+	r.Register(NewShellTool())
+	r.Register(NewFileTool())
+	r.Register(NewEditTool())
+	r.Register(NewGrepTool())
+	r.Register(NewListTool())
+	r.Register(NewGitTool())
+	r.Register(NewWebFetchTool())
+	r.Register(&aliasTestTool{name: "aaa_fake_head"})
+	r.Register(&aliasTestTool{name: "zzz_fake_tail"})
+
+	// ── Names()：连续 10 次调用结果完全相等，且为字典序 ──
+	var first []string
+	for i := 1; i <= 10; i++ {
+		got := r.Names()
+		if len(got) != 9 {
+			t.Fatalf("Names() 第 %d 次调用应返回 9 个工具, got %d: %v", i, len(got), got)
+		}
+		if !sort.StringsAreSorted(got) {
+			t.Fatalf("Names() 第 %d 次调用非字典序: %v", i, got)
+		}
+		if i == 1 {
+			first = got
+			continue
+		}
+		if !slices.Equal(first, got) {
+			t.Fatalf("Names() 第 %d 次调用与第 1 次结果不一致:\n第  1 次: %v\n第 %2d 次: %v", i, first, i, got)
+		}
+	}
+
+	// ── Descriptions()：每条首行工具名顺序与 Names() 一致 ──
+	var descNames []string
+	for _, line := range strings.Split(r.Descriptions(), "\n") {
+		if !strings.HasPrefix(line, "- ") {
+			continue
+		}
+		descNames = append(descNames, strings.SplitN(strings.TrimPrefix(line, "- "), ":", 2)[0])
+	}
+	if !slices.Equal(first, descNames) {
+		t.Errorf("Descriptions() 工具顺序与 Names() 不一致:\nNames:        %v\nDescriptions: %v", first, descNames)
+	}
+
+	// ── FunctionDefinitions()：name 序列与 Names() 一致 ──
+	var defNames []string
+	for _, def := range r.FunctionDefinitions() {
+		if def.Function == nil {
+			t.Fatal("FunctionDefinition.Function 不应为 nil")
+		}
+		defNames = append(defNames, def.Function.Name)
+	}
+	if !slices.Equal(first, defNames) {
+		t.Errorf("FunctionDefinitions() 的 name 序列与 Names() 不一致:\nNames: %v\nDefs:  %v", first, defNames)
 	}
 }
 
