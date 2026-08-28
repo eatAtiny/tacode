@@ -216,6 +216,8 @@ func buildUI(oneShotMode bool) ui.UI {
 // fatal 输出错误信息到 stderr 并以退出码 1 终止程序。
 // 注意：os.Exit 不执行 defer（如 MCP/沙箱/UI 的清理），与原内联
 // 「Fprintf + os.Exit(1)」写法行为一致，仅用于无需清理的失败路径。
+// 例外：main 中 one-shot 失败点在 defer 注册之后调用 fatal——为保持
+// 原 os.Exit 行为有意跳过已注册的清理，勿在新代码模仿。
 func fatal(msg string, err error) {
 	fmt.Fprintf(os.Stderr, "%s: %v\n", msg, err)
 	os.Exit(1)

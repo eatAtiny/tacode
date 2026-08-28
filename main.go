@@ -150,7 +150,8 @@ func main() {
 	runner.SetConfig(cfg)
 	// 注入全局 + 项目级记忆 store：extractMemory 按类型分流写入对应目录。
 	runner.SetMemoryStores(mem.globalMem, mem.projectMem)
-	// 注入 s08 四步压缩管线（transcript/tool-results 目录按会话隔离）。
+	// 注入 s08 压缩管线（Prepare 四步无损 + compactHistory LLM 摘要；
+	// transcript/tool-results 目录按会话隔离）。
 	compactor := agent.NewCompactor(client, filepath.Join(activeDir, "transcripts"), filepath.Join(activeDir, "tool-results"))
 	if cfg.ContextCharLimit != nil {
 		compactor.SetContextCharLimit(*cfg.ContextCharLimit)
