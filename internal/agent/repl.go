@@ -79,7 +79,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	var queryRunning bool                // 是否有查询正在运行
 	var round int                        // 当前轮次号
 	var currentInput string              // 当前查询的用户输入，用于保存记忆
-	var inputForward chan string         // 查询期间转发输入到此 channel（权限确认等）
+	var inputForward chan string         // 权限确认输入与控制命令（/interrupt、/retry）转发通道
 
 	// 排队输入重放 channel：查询结束时把 pendingInputs 弹出一条投递到此，
 	// 与 inputCh 走同一套分支 A 处理逻辑（空输入/exit/命令/查询）。
@@ -185,7 +185,7 @@ func (r *Runner) Run(ctx context.Context) error {
 //   - queryRunning:  是否有查询正在运行
 //   - round:         当前轮次号
 //   - currentInput:  当前查询的用户输入（保存记忆用）
-//   - inputForward:  权限确认期间转发输入（/interrupt 修复见后续 fix commit）
+//   - inputForward:  权限确认输入与控制命令（/interrupt、/retry）转发通道
 //   - pendingInputs: 查询运行中排队的输入
 //
 // 返回 true 表示退出（exit 命令或 EOF）。
@@ -217,9 +217,10 @@ func (r *Runner) handleInput(
 
 	// ── 查询运行中 ──
 	// 输入处理策略：
-	//   - /stop        → 取消当前查询
-	//   - 权限确认在等 → 转发给 query 侧（ConfirmPermission 阻塞读 inputForward）
-	//   - 其他          → 排队（pendingInputs），查询结束后自动作为下一轮输入
+	//   - /stop                 → 取消当前查询
+	//   - 权限确认在等           → 转发给 query 侧（ConfirmPermission 阻塞读 inputForward）
+	//   - /interrupt、/retry 前缀 → 控制命令，转发给 queryLoop（peekInterrupt 读取）
+	//   - 其他                   → 排队（pendingInputs），查询结束后自动作为下一轮输入
 	// 旧实现无条件 `inputForward <- input`：无权限确认时 channel 无人读，
 	// 第 2 条输入即阻塞冻结主循环（Bug 2 根因）。
 	if *queryRunning {
@@ -237,6 +238,15 @@ func (r *Runner) handleInput(
 			case *inputForward <- input:
 			default:
 				// 缓冲满（异常）：丢弃，避免阻塞。
+			}
+		} else if isControlCommand(input) {
+			// 控制命令：转发给 queryLoop（peekInterrupt 在串行工具执行间隙
+			// 非阻塞读取，中止剩余工具并注入中断提示让 LLM 调整策略）。
+			// 非阻塞发送：缓冲满（上一条未被消费）时丢弃，不冻结主循环。
+			select {
+			case *inputForward <- input:
+			default:
+				// 缓冲满（上一条命令未被消费）：丢弃，避免阻塞。
 			}
 		} else {
 			// 普通查询运行中：排队，查询结束后自动处理。
@@ -283,6 +293,14 @@ func (r *Runner) handleInput(
 	// queryResultCh 收到结果后触发分支 B。
 	*queryResultCh = r.runQueryAsync(queryCtx, *round, input, *inputForward)
 	return false
+}
+
+// isControlCommand 判断输入是否为查询控制命令（/interrupt、/retry 前缀）。
+// 与 tool_exec.go peekInterrupt 的识别规则一致：TrimSpace 后精确匹配
+// /interrupt，或以 /retry 为前缀（可携带参数）。
+func isControlCommand(input string) bool {
+	cmd := strings.TrimSpace(input)
+	return cmd == "/interrupt" || strings.HasPrefix(cmd, "/retry")
 }
 
 // printPrompt 打印主屏输入提示符 "> "（追加式模型：输入框即流末尾的提示符）。

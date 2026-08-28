@@ -401,8 +401,8 @@ func TestPullBackToPairStart(t *testing.T) {
 }
 
 func TestIsTooLongError(t *testing.T) {
-	if !isTooLongError(os.ErrNotExist) {
-		// 普通错误不是 too long
+	if isTooLongError(os.ErrNotExist) {
+		t.Fatalf("plain error should not be too long")
 	}
 	if !isTooLongError(errTooLong) {
 		t.Fatalf("prompt_too_long should be detected")
