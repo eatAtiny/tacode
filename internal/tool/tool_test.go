@@ -97,13 +97,65 @@ func TestShellIsConcurrencySafe_EdgeCases(t *testing.T) {
 		{"invalid json", `not json`, false},
 		{"empty command", `{"command": ""}`, false},
 		{"leading spaces", `{"command": "  ls -la"}`, true},
-		{"stderr redirect only (safe)", `{"command": "go vet 2>&1"}`, true}, // go vet is read-only, stderr redirect doesn't change that
+		// 行为收紧（P2③）：含 > 一律非只读，"go vet 2>&1" 这类纯 stderr
+		// 重定向的命令现在也需要确认，换取判定规则的可证明性。
+		{"stderr redirect (tightened)", `{"command": "go vet 2>&1"}`, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := s.IsConcurrencySafe(tt.args); got != tt.expected {
 				t.Errorf("IsConcurrencySafe(%s) = %v, want %v", tt.args, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestShellIsReadOnly_RedirectAndPipe 表驱动：重定向与管道的只读判定（P2③ 堵住绕过）。
+//
+// 旧实现两处击穿 fail-closed 承诺（已在 /tmp 实证）：
+//   - "cat a > b 2>&1"、"grep foo bar > out 2>/dev/null"：
+//     "> 检查 + 2> 豁免"按整串包含匹配，任意位置的 2> 都能豁免前面的写重定向
+//   - "cat f | tee g"：只校验命令首词，管道右侧的写文件工具不受任何校验
+//
+// 只读误判的真实增量 = 并发归类（进并发批失去逐工具中断检查与串行节奏）；
+// 权限确认由 isDangerousShellCommand 独立判定，非危险写命令本就免确认。
+func TestShellIsReadOnly_RedirectAndPipe(t *testing.T) {
+	s := NewShellTool()
+
+	tests := []struct {
+		name   string
+		args   string
+		wantRO bool
+	}{
+		// 含 > 一律 false（含 2>、2>&1、>>）：
+		{"2>&1 exempts write redirect (proved)", `{"command": "cat a > b 2>&1"}`, false},
+		{"2>/dev/null exempts write redirect (proved)", `{"command": "grep foo bar > out 2>/dev/null"}`, false},
+		{"pipe right side writes file (proved)", `{"command": "cat f | tee g"}`, false},
+		{"stderr discard only (tightened)", `{"command": "cat a 2>/dev/null"}`, false}, // 行为收紧：纯 stderr 丢弃现也需确认
+		{"plain write redirect", `{"command": "echo hi > f"}`, false},
+		{"append redirect", `{"command": "ls >> log"}`, false},
+		// 管道逐段白名单：
+		{"pipe both sides whitelisted", `{"command": "echo hi | grep foo"}`, true},
+		{"pipe multi segments whitelisted", `{"command": "git log --oneline | head -5"}`, true},
+		{"pipe right side not whitelisted", `{"command": "cat f | xargs rm"}`, false},
+		{"pipe empty segment", `{"command": "cat a |"}`, false},
+		// 基础白名单回归：
+		{"plain ls", `{"command": "ls"}`, true},
+		{"plain cat", `{"command": "cat a"}`, true},
+		{"git status", `{"command": "git status"}`, true},
+		{"pwd", `{"command": "pwd"}`, true},
+		{"cp writes file", `{"command": "cp a b"}`, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := s.IsReadOnly(tt.args); got != tt.wantRO {
+				t.Errorf("IsReadOnly(%s) = %v, want %v", tt.args, got, tt.wantRO)
+			}
+			// IsConcurrencySafe 与 IsReadOnly 同源（都走 isReadOnlyShellCommand），判定必须一致。
+			if got := s.IsConcurrencySafe(tt.args); got != tt.wantRO {
+				t.Errorf("IsConcurrencySafe(%s) = %v, want %v", tt.args, got, tt.wantRO)
 			}
 		})
 	}

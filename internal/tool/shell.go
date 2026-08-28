@@ -271,12 +271,21 @@ var readOnlyCommands = []string{
 
 // isReadOnlyShellCommand 检查 shell 命令是否为只读操作。
 //
-// 策略：
+// 策略（按序检查，任一命中 → false）：
 //  1. 解析 JSON 参数提取 command 字段
-//  2. 去掉前导空格
-//  3. 检查是否以只读命令前缀开头
+//  2. 命令串包含 ">"（任何重定向：>、>>、2>、2>&1）→ 一律 false。
+//     旧实现按整串包含做「含 2> 则豁免 > 检查」，被 "cat a > b 2>&1"
+//     类命令利用任意位置的 2> 绕过（已实证），故收紧为见 > 即非只读。
+//  3. 包含 "|" → 按 | 拆段，每段 TrimSpace 后必须命中白名单前缀，
+//     否则 false。旧实现只校验首段，管道右侧完全不受限，
+//     "cat f | tee g" 因此被误判只读（已实证）。
+//  4. 其余：整串按白名单前缀判断（与管道分段同一规则）。
 //
-// fail-closed：任何不确定的命令都返回 false（不安全）。
+// fail-closed：任何不确定的命令（解析失败、空段、白名单未命中、
+// 含重定向）都返回 false（不安全），并发绿色通道只在全部规则通过时
+// 开放。已知存量缺口（前缀白名单模型固有）：; / && / 换行命令链、
+// $() 与反引号命令替换、白名单命令自身的写参数（如 sort -o）不在
+// 本函数解析范围内。
 func isReadOnlyShellCommand(args string) bool {
 	var params map[string]interface{}
 	if err := parseArgs(args, &params); err != nil {
@@ -288,26 +297,43 @@ func isReadOnlyShellCommand(args string) bool {
 		return false
 	}
 
-	cmd := strings.TrimSpace(command)
-	cmdLower := strings.ToLower(cmd)
+	cmdLower := strings.ToLower(strings.TrimSpace(command))
 
+	// 任何重定向 → 一律非只读。纯 stderr 丢弃（2>/dev/null）实际无
+	// 副作用，此处一并收紧，换取判定规则的可证明性（整串包含式的
+	// 条件豁免已被实证可绕过，不再使用）。
+	if strings.Contains(cmdLower, ">") {
+		return false
+	}
+
+	// 管道：逐段白名单校验，任一段不命中 → 非只读。
+	if strings.Contains(cmdLower, "|") {
+		for _, seg := range strings.Split(cmdLower, "|") {
+			if !matchesReadOnlyPrefix(strings.TrimSpace(seg)) {
+				return false
+			}
+		}
+		return true
+	}
+
+	return matchesReadOnlyPrefix(cmdLower)
+}
+
+// matchesReadOnlyPrefix 检查单条裸命令段（不含重定向/管道）是否以
+// readOnlyCommands 白名单前缀开头。前缀后必须是串尾或空白字符，
+// 防止 "lsfoo" 误命中 "ls"。
+func matchesReadOnlyPrefix(cmdLower string) bool {
+	if cmdLower == "" {
+		return false
+	}
 	for _, safe := range readOnlyCommands {
 		if strings.HasPrefix(cmdLower, safe) {
-			// 额外的安全检查：避免误匹配
-			// 例如 "cat file" 是安全的，但 "cat file > other" 不是
 			remaining := cmdLower[len(safe):]
 			if remaining == "" || remaining[0] == ' ' || remaining[0] == '\t' {
-				// 检查是否有重定向或管道写入
-				if strings.Contains(cmdLower, ">") && !strings.Contains(cmdLower, "2>") {
-					// 有输出重定向（排除 stderr 重定向）→ 不是只读
-					// 但 "git log > /dev/null" 实际无副作用，此处简化处理
-					return false
-				}
 				return true
 			}
 		}
 	}
-
 	return false
 }
 
