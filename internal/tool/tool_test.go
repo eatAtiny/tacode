@@ -211,6 +211,38 @@ func TestGrepToolConcurrency(t *testing.T) {
 	}
 }
 
+// TestGrepExecute_ScanInterruptHint 验证超长行触发 bufio.ErrTooLong 时输出显式扫描中断提示。
+//
+// bufio.Scanner 默认 64KB 行上限：含 >64KB 单行且行内含匹配串的文件扫描到该行即中断。
+// 修复前错误被忽略，整个文件被静默丢弃（LLM 收到 "未找到匹配结果。"，无任何信号）；
+// 修复后应追加 "（该文件扫描中断: ...）" 提示行，明示该文件未被完整扫描。
+func TestGrepExecute_ScanInterruptHint(t *testing.T) {
+	g := NewGrepTool()
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "long_line.txt")
+
+	// 单行长度远超 64KB，且行中嵌入匹配串 "needle"。
+	// "needle" 位于 100_000 字节处 > 64KB(65536)，扫描到该行时必然 ErrTooLong，匹配不会被扫描到。
+	line := strings.Repeat("a", 100_000) + "needle" + strings.Repeat("a", 100_000)
+	if err := os.WriteFile(tmpFile, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	args := toJSON(map[string]any{
+		"pattern": "needle",
+		"path":    tmpFile,
+	})
+	out, err := g.Execute(args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 断言输出包含显式扫描中断提示（最清晰的信号，修复前为静默漏配）。
+	if !strings.Contains(out, "该文件扫描中断") {
+		t.Errorf("expected scan-interrupt hint in output, got: %s", out)
+	}
+}
+
 func TestListToolConcurrency(t *testing.T) {
 	l := NewListTool()
 
