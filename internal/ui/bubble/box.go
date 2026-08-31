@@ -68,7 +68,7 @@ func toolCallBox(name, args string) string {
 	for _, line := range strings.Split(displayArgs, "\n") {
 		body = append(body, styleMuted.Render(line))
 	}
-	return drawBox(styleToolPrefix, "🔧 "+name, width-len(name)-6, body, width)
+	return drawBox(styleToolPrefix, "🔧 "+name, width-lipgloss.Width(name)-6, body, width)
 }
 
 // toolResultBox 生成工具执行结果框线文本（chat.go chatToolResultMsg 使用）。
@@ -90,7 +90,7 @@ func toolResultBox(name, result string, isError bool) string {
 	if totalLines > 15 {
 		lines = append(lines, styleMuted.Render(fmt.Sprintf("... (共 %d 行，已截断)", totalLines)))
 	}
-	return drawBox(titleStyle, titleText, width-len(titleText)+2, lines, width)
+	return drawBox(titleStyle, titleText, width-lipgloss.Width(titleText)+2, lines, width)
 }
 
 // indentLines 给 s 的每一行加 2 空格前缀，行尾补 \n。
