@@ -99,7 +99,7 @@ func TestParallelToolExecution(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCallsHelper(toolCalls, 0)
+		lc.executeToolCalls(toolCalls, 0)
 	}()
 
 	results, _ := collectEvents(events, &wg, 2*time.Second, false)
@@ -164,7 +164,7 @@ func TestParallelExecutionIsFaster(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCallsHelper(toolCalls, 0)
+		lc.executeToolCalls(toolCalls, 0)
 	}()
 
 	collectEvents(events, &wg, 2*time.Second, false)
@@ -215,7 +215,7 @@ func TestMixedConcurrentAndSerial(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCallsHelper(toolCalls, 0)
+		lc.executeToolCalls(toolCalls, 0)
 	}()
 
 	// autoApprove=true: 统一事件处理器自动批准权限 → file write 不会阻塞。
@@ -265,7 +265,7 @@ func TestLargeResultPersistence(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCallsHelper(toolCalls, 0)
+		lc.executeToolCalls(toolCalls, 0)
 	}()
 
 	results, _ := collectEvents(events, &wg, 2*time.Second, false)
@@ -308,7 +308,7 @@ func TestPermissionBlocksConcurrent(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCallsHelper(toolCalls, 0)
+		lc.executeToolCalls(toolCalls, 0)
 	}()
 
 	// autoApprove=true 解除阻塞，同时记录权限事件。
@@ -322,52 +322,109 @@ func TestPermissionBlocksConcurrent(t *testing.T) {
 }
 
 // ──────────────────────────────────────────────────────────
-// executeToolCallsHelper
+// P0: 并发分类必须尊重全局禁止列表与全局权限检查器
 // ──────────────────────────────────────────────────────────
 
-func (lc *queryLoopContext) executeToolCallsHelper(toolCalls []llm.ToolCall, iter int) bool {
-	type execItem struct {
-		tc         llm.ToolCall
-		t          tool.Tool
-		concurrent bool
+// denyAllChecker 拒绝所有权限的测试用 checker。
+type denyAllChecker struct{}
+
+func (denyAllChecker) CheckPermission(string, string) bool { return false }
+
+// TestForbiddenToolBlocksConcurrentClassification 验证：
+// 自报 IsConcurrencySafe+IsReadOnly+CheckPermission.Allow 的工具被列入
+// ForbiddenTools 后，必须落入串行路径（被禁止检查拦截），而非并发执行。
+//
+// 直接调用生产 executeToolCalls，确保覆盖真实分类逻辑（而非测试副本）。
+func TestForbiddenToolBlocksConcurrentClassification(t *testing.T) {
+	reg := tool.NewRegistry()
+	reg.Register(&sleepTool{name: "forbidden_safe", delay: 0})
+
+	// 追加到全局禁止列表（测试后恢复，避免污染其他测试）。
+	origForbidden := ForbiddenTools
+	ForbiddenTools = append(ForbiddenTools, "forbidden_safe")
+	t.Cleanup(func() { ForbiddenTools = origForbidden })
+
+	events := make(chan QueryEvent, 100)
+	lc := &queryLoopContext{
+		ctx:          context.Background(),
+		toolRegistry: reg,
+		messages:     make([]llm.ChatMessage, 0),
+		events:       events,
+		fileReads:    make(map[string]time.Time),
 	}
 
-	var concurrentItems []execItem
-	var serialItems []execItem
-
-	for _, tc := range toolCalls {
-		t := lc.toolRegistry.Get(tc.Name)
-		item := execItem{tc: tc, t: t}
-
-		if t != nil && t.IsConcurrencySafe(tc.Arguments) && t.IsReadOnly(tc.Arguments) {
-			if perm := t.CheckPermission(tc.Arguments); perm.Allow {
-				item.concurrent = true
-				concurrentItems = append(concurrentItems, item)
-				continue
-			}
-		}
-		serialItems = append(serialItems, item)
+	toolCalls := []llm.ToolCall{
+		{ID: "c1", Name: "forbidden_safe", Arguments: `{}`},
 	}
 
-	if len(concurrentItems) > 0 {
-		concurrentTCs := make([]llm.ToolCall, len(concurrentItems))
-		for i, item := range concurrentItems {
-			concurrentTCs[i] = item.tc
-		}
-		lc.executeConcurrentTools(concurrentTCs, iter)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		lc.executeToolCalls(toolCalls, 0)
+	}()
+
+	results, _ := collectEvents(events, &wg, 2*time.Second, false)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !results[0].IsError {
+		t.Fatalf("expected forbidden tool to be blocked (IsError=true), got: %+v", results[0])
+	}
+	if !strings.Contains(results[0].ToolResult, "工具已被禁止使用") {
+		t.Errorf("expected forbidden error message, got: %q", results[0].ToolResult)
+	}
+	if len(lc.messages) != 1 || !strings.Contains(lc.messages[0].Content, "工具已被禁止使用") {
+		t.Errorf("expected 1 forbidden error message in history, got %d: %+v", len(lc.messages), lc.messages)
+	}
+}
+
+// TestGlobalPermissionCheckerBlocksConcurrentClassification 验证：
+// 全局权限检查器拒绝时，即使工具自报并发安全+只读+自身权限放行，
+// 也必须落入串行路径（被全局检查器拦截），而非并发执行。
+func TestGlobalPermissionCheckerBlocksConcurrentClassification(t *testing.T) {
+	reg := tool.NewRegistry()
+	reg.Register(&sleepTool{name: "global_blocked", delay: 0})
+
+	// 注入全局权限检查器：一律拒绝（测试后恢复 nil）。
+	SetPermissionChecker(denyAllChecker{})
+	t.Cleanup(func() { SetPermissionChecker(nil) })
+
+	events := make(chan QueryEvent, 100)
+	lc := &queryLoopContext{
+		ctx:          context.Background(),
+		toolRegistry: reg,
+		messages:     make([]llm.ChatMessage, 0),
+		events:       events,
+		fileReads:    make(map[string]time.Time),
 	}
 
-	for _, item := range serialItems {
-		if cmd := lc.peekInterrupt(); cmd != "" {
-			lc.injectInterruptNotice(item.tc, iter, cmd)
-			return true
-		}
-		if !lc.executeSingleTool(item.tc, iter) {
-			return false
-		}
+	toolCalls := []llm.ToolCall{
+		{ID: "c1", Name: "global_blocked", Arguments: `{}`},
 	}
 
-	return true
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		lc.executeToolCalls(toolCalls, 0)
+	}()
+
+	results, _ := collectEvents(events, &wg, 2*time.Second, false)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !results[0].IsError {
+		t.Fatalf("expected global checker to block (IsError=true), got: %+v", results[0])
+	}
+	if !strings.Contains(results[0].ToolResult, "全局权限策略拒绝执行") {
+		t.Errorf("expected global permission error message, got: %q", results[0].ToolResult)
+	}
+	if len(lc.messages) != 1 || !strings.Contains(lc.messages[0].Content, "全局权限策略拒绝执行") {
+		t.Errorf("expected 1 global-permission error message in history, got %d: %+v", len(lc.messages), lc.messages)
+	}
 }
 
 // ──────────────────────────────────────────────────────────

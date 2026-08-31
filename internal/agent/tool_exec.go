@@ -17,8 +17,8 @@ import (
 // executeToolCalls 执行工具调用列表。
 //
 // 重构后支持并行执行：
-//  1. 分类：并发安全工具（IsConcurrencySafe + IsReadOnly + Allow permission）
-//     → 用 goroutine 并行执行
+//  1. 分类：并发安全工具（IsConcurrencySafe + IsReadOnly + 权限放行，
+//     且不在全局禁止列表、不被全局权限检查器拒绝）→ 用 goroutine 并行执行
 //  2. 其余工具 → 串行执行
 //
 // 并发批内按原始顺序 yield 事件和推入消息（并发批整体先于串行批）。
@@ -42,9 +42,11 @@ func (lc *queryLoopContext) executeToolCalls(toolCalls []llm.ToolCall, iter int)
 	//
 	// 并发安全条件（以下条件同时满足）：
 	//   1. 工具存在
-	//   2. IsConcurrencySafe(args) == true
-	//   3. IsReadOnly(args) == true
-	//   4. CheckPermission(args).Allow == true（避免并发弹窗）
+	//   2. 不在全局禁止列表（isToolForbidden）
+	//   3. IsConcurrencySafe(args) == true
+	//   4. IsReadOnly(args) == true
+	//   5. 权限放行（与串行路径 checkToolPermission 同源：
+	//      全局权限检查器非 nil 时以其判定为准；否则用工具自身 CheckPermission）
 	type execItem struct {
 		tc         llm.ToolCall
 		t          tool.Tool
@@ -58,8 +60,14 @@ func (lc *queryLoopContext) executeToolCalls(toolCalls []llm.ToolCall, iter int)
 		t := lc.toolRegistry.Get(tc.Name)
 		item := execItem{tc: tc, t: t}
 
-		if t != nil && t.IsConcurrencySafe(tc.Arguments) && t.IsReadOnly(tc.Arguments) {
-			if perm := t.CheckPermission(tc.Arguments); perm.Allow {
+		if t != nil && !isToolForbidden(t.Name()) && t.IsConcurrencySafe(tc.Arguments) && t.IsReadOnly(tc.Arguments) {
+			allowed := false
+			if globalPermissionChecker != nil {
+				allowed = globalPermissionChecker.CheckPermission(tc.Name, tc.Arguments)
+			} else {
+				allowed = t.CheckPermission(tc.Arguments).Allow
+			}
+			if allowed {
 				item.concurrent = true
 				concurrentItems = append(concurrentItems, item)
 				continue
