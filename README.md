@@ -6,7 +6,7 @@
 
 - **ReAct 推理循环** — 自动判断是否需要调用工具，循环执行直到获得足够信息
 - **流式输出** — 实时显示 LLM 思考过程和增量文本（支持 OpenAI Stream API）
-- **三层记忆系统** — L1 原始对话日志 / L2 摘要 / L3 结构化记忆，自动提取和压缩
+- **三层记忆系统** — L1 原始对话日志 / L2 摘要（预留层）/ L3 结构化记忆，自动提取和压缩
 - **异步事件驱动** — QueryEngine 层协调，queryLoop 通过 channel yield 中间事件
 - **可插拔 UI** — `ui.UI` 接口，内置 BubbleUI（终端美化）和 TextUI（headless 模式）
 - **权限系统** — 危险工具（shell/file）需用户确认，支持自定义权限检查器
@@ -17,18 +17,22 @@
 
 ```text
 agentic/
-  main.go                              # 入口：初始化组件并启动 Agent
+  main.go                              # 入口：flag 解析 → 配置加载 → 装配（bootstrap.go）→ 模式分支（REPL / one-shot）
+  bootstrap.go                         # 依赖装配：buildMemoryStack / buildTools / buildUI / fatal
   go.mod
   internal/
     agent/
-      runner.go                        # Runner：REPL 主循环 + 异步查询调度
+      runner.go                        # Runner：REPL 主循环 + 异步查询调度 + 跨轮消息累积
+      repl.go                          # REPL 主循环：select 模型 + 输入排队/转发协议（/interrupt、/retry）
       query_engine.go                  # QueryEngine：上下文构建、提示词组装、事件消费
       query_loop.go                    # queryLoop：核心 ReAct 循环（异步生成器模式）
+      tool_exec.go                     # 工具调用执行：并发/串行分类、权限确认、中断注入
+      oneshot.go                       # headless 单次查询入口（RunOnce，配合 TextUI / 子 agent）
       types.go                         # QueryEvent / QueryResult 类型定义
-      permission.go                    # 工具权限检查（deny/allow/confirm）
+      permission.go                    # 权限：工具自检 CheckPermission + 全局注入点 + ForbiddenTools
       memory.go                        # 记忆提取和手动管理（/memory /compress）
       session.go                       # 会话命令处理 + 临时会话持久化
-      compactor.go                     # s08 四步压缩管线（Go 移植，配对保护）
+      compactor.go                     # s08 五步压缩管线（4 无损 + LLM 摘要，Go 移植，配对保护）
       compact_tool.go                  # 模型主动 compact 工具
       balance.go                       # /balance 命令：余额查询辅助 + 格式化 + 每轮展示
     llm/
@@ -38,20 +42,35 @@ agentic/
     memory/
       types.go                         # MemoryEntry / Summary / Record / Event 类型
       history.go                       # L1 HistoryStore：原始对话 JSONL 存储
-      summary_store.go                 # L2 SummaryStore：对话摘要存储
+      summary_store.go                 # L2 SummaryStore：对话摘要存储（预留层）
       store.go                         # L3 MemoryStore：结构化记忆文件（.md + frontmatter）
       event.go                         # EventStore：全量事件日志（真相源，永不截断）
       extractor.go                     # Extractor：LLM 驱动记忆提取
-      retriever.go                     # Retriever：三层检索 + 上下文构建 + 自动压缩
+      retriever.go                     # Retriever：三层检索 + 记忆 preamble（首轮/切换注入）
     prompt/
       prompt.go                        # ReAct System/User 提示词模板
     session/
       session.go                       # SessionManager：会话 CRUD + manifest 管理
       picker.go                        # 交互式会话选择器（Bubble Tea）
     tool/
-      tool.go                          # Tool 接口 + Registry（生成 Function Calling 定义）
-      shell.go                         # Shell 工具（执行 bash 命令，30s 超时）
+      tool.go                          # Tool 接口（10 方法）+ Registry（生成 Function Calling 定义）
+      shell.go                         # Shell 工具（执行 bash 命令，30s 超时，危险命令检测）
       file.go                          # File 工具（读写文件，8KB 读取上限）
+      edit.go                          # Edit 工具（search-and-replace，diff 输出）
+      grep.go                          # Grep 工具（结构化文本搜索，纯只读）
+      list.go                          # List 工具（结构化目录列表，纯只读）
+      git.go                           # Git 工具（status/diff/log/show/branch 只读 + 写操作需确认）
+      webfetch.go                      # WebFetch 工具（GET → Markdown + 元信息）
+    config/
+      config.go                        # 运行时配置（-config YAML 加载）
+    sandbox/
+      sandbox.go                       # 沙箱抽象（网络/文件系统隔离）
+      linux.go                         # Linux 实现
+      macos.go                         # macOS 实现（seatbelt 临时 profile）
+      sandbox_other.go                 # 其他平台（noop 回退）
+    mcp/
+      client.go                        # MCP Manager + stdio 客户端（连接外部 MCP server）
+      adapter.go                       # MCP 工具 → tool.Tool 适配器
     ui/
       ui.go                            # UI 接口定义（ReadInput / OnThink / OnDelta / OnToolCall ...）
       bubble/
@@ -81,7 +100,7 @@ export OPENAI_API_KEY="你的APIKey"
 # 可选：
 # export OPENAI_BASE_URL="https://api.openai.com/v1"
 # export OPENAI_MODEL="gpt-4o-mini"
-# export OPENAI_CONTEXT_LIMIT=128000
+# export OPENAI_CONTEXT_LIMIT=128000  # 预留，当前无生效路径（压缩判断已改用 Compactor 字符口径）
 ```
 
 **方式二：`.env` 文件**
@@ -118,16 +137,17 @@ go run . -env .env                    # 自定义 env 文件路径
 ### 依赖关系
 
 ```
-main.go
-  └─ internal/agent  (runner.go, query_engine.go, query_loop.go, types.go, permission.go,
-  │                    memory.go, session.go, compactor.go, compact_tool.go, balance.go) — REPL 循环 + ReAct 编排
+main.go + bootstrap.go   (bootstrap.go: buildMemoryStack / buildTools / buildUI / fatal)
+  └─ internal/agent  (runner.go, repl.go, query_engine.go, query_loop.go, tool_exec.go,
+  │                    oneshot.go, types.go, permission.go, memory.go, session.go,
+  │                    compactor.go, compact_tool.go, balance.go) — REPL 循环 + ReAct 编排
        ├─ internal/llm        (openai.go, balance.go, retry.go) — OpenAI 客户端（流式 + 非流式）+ 余额查询 + 重试
        ├─ internal/memory     (7 个文件) — 三层记忆存储 + 检索 + 提取
        ├─ internal/prompt     (prompt.go) — ReAct 提示词模板
        ├─ internal/session    (session.go, picker.go) — 会话管理 + 选择器
-       ├─ internal/tool       (tool.go, shell.go, file.go) — 工具注册 + 实现
+       ├─ internal/tool       (8 个文件) — 工具注册 + 实现
        └─ internal/ui         (ui.go) — UI 接口
-            ├─ ui/bubble/     — BubbleUI 全 tea 聊天界面（chat.go + bubble.go + box.go）
+            ├─ ui/bubble/     — BubbleUI 全 tea 聊天界面（chat.go + bubble.go + box.go + welcome.go）
             └─ ui/text/       — TextUI headless 实现
 ```
 
@@ -135,7 +155,7 @@ main.go
 
 ```
 QueryEngine 层 (query_engine.go)
-  ├── 构建上下文（三层记忆检索 + 自动压缩）
+  ├── 构建上下文（记忆 preamble 首轮/切换注入 + Compactor 字符压缩管线）
   ├── 构建 System/User Prompt
   ├── 调用 queryLoop 获取 event channel
   ├── 消费事件 → 通知 UI + 记录事件日志
@@ -155,28 +175,30 @@ queryLoop 层 (query_loop.go)
 | 层级 | 存储 | 文件 | 说明 |
 |------|------|------|------|
 | L1 | HistoryStore | `history.jsonl` | 原始对话记录，保留最近 50 轮 |
-| L2 | SummaryStore | `summaries.jsonl` | LLM 提取的对话摘要，支持自动压缩合并 |
+| L2 | SummaryStore | `summaries.jsonl` | 预留层：当前无生产写入路径，仅 `/compress` 手动路径读写 |
 | L3 | MemoryStore | `memory/*.md` | 结构化长期记忆（frontmatter + 正文），按重要性排序 |
 
-**记忆检索流程**：
+**记忆检索流程**（`Retriever.BuildContext` 预留路径，当前无生产调用）：
 1. L3 记忆索引 + 高重要性记忆内容
 2. L2 最近 10 条摘要
 3. L2 为空时降级到 EventStore（事件日志摘要）→ HistoryStore（原始日志摘要）
 
-**自动压缩**：当上下文 token 用量超过模型窗口的 80%，自动调用 LLM 合并旧摘要。
+> 现行生产路径是 `Retriever.BuildContextFallback`：仅首轮/会话切换时注入记忆 preamble（项目指令 + L3 记忆，无 L2/摘要），对话细节由跨轮累积消息承载。
+
+**自动压缩**：由 `Compactor` 字符口径管线驱动——上下文超过 `context_char_limit`（默认 50K 字符）时触发 5 步管线（大结果转存→消息归档→微压缩→LLM 历史摘要）。旧的 token 阈值（`compress_threshold` / `OPENAI_CONTEXT_LIMIT`）为预留字段，当前无生效路径。
 
 ### ReAct 推理流程
 
 ```
 用户输入
-  → QueryEngine 构建上下文（三层记忆检索）
+  → QueryEngine 构建上下文（记忆 preamble 仅首轮/会话切换注入，消息跨轮累积）
   → queryLoop 异步执行：
      1. 调用 LLM（流式），实时 yield 增量文本
      2. 如果没有工具调用 → 返回最终答案
      3. 如果有工具调用 → 权限检查 → 执行工具 → yield 结果
      4. 结果反馈给 LLM → 重复步骤 1（最多 10 轮）
   → QueryEngine 消费事件，通知 UI
-  → 后台提取 L2 摘要和 L3 记忆
+  → 后台保存 L1 历史、提取 L3 记忆（L2 摘要当前无生产写入路径）
   → 首次对话后临时会话自动落盘
 ```
 
@@ -186,8 +208,14 @@ queryLoop 层 (query_loop.go)
 |------|------|------|
 | `shell` | 执行 bash 命令 | 30 秒超时，危险命令需确认 |
 | `file` | 读写文件 | 读取上限 8KB，写操作需确认 |
+| `edit` | search-and-replace 编辑 | diff 输出，编辑需确认 |
+| `grep` | 结构化文本搜索 | 纯只读，默认放行 |
+| `list` | 结构化目录列表 | 纯只读，默认放行 |
+| `git` | 结构化 git 操作 | status/diff/log/show/branch 只读；add/commit/stash/checkout 需确认 |
+| `webfetch` | 网页抓取（GET → Markdown + 元信息） | 30 秒超时，默认放行 |
+| `compact` | 模型主动上下文压缩 | 整批工具执行后运行 |
 
-添加新工具：实现 `tool.Tool` 接口，在 `main.go` 中注册。
+添加新工具：实现 `tool.Tool` 接口，在 `bootstrap.go` 的 `buildTools()` 中注册。
 
 ## 交互说明
 
@@ -210,7 +238,7 @@ queryLoop 层 (query_loop.go)
 | `/delete <ID>` | 删除指定会话（不能删除当前活跃的） |
 | `/rename <名称>` | 重命名当前会话 |
 | `/current` | 显示当前会话信息 |
-| `/compress` | 手动触发摘要压缩（合并旧摘要） |
+| `/compress` | 手动触发摘要压缩（合并旧摘要；当前无 L2 写入路径，实际为空操作；L2 层预留） |
 | `/balance` | 查询 DeepSeek 账户余额；成功后每轮对话结束自动展示剩余额度 |
 | `/memory` | 列出所有 L3 记忆 |
 | `/memory add <内容>` | 手动添加一条记忆 |
@@ -245,9 +273,9 @@ data/sessions/
 
 ## 权限系统
 
-- 默认权限检查器将 `shell` 和 `file` 标记为危险工具，需要用户确认
+- 权限内聚在工具自身（`Tool.CheckPermission`）：`shell`/`file` 的写操作、`edit` 等高风险操作触发确认；`grep`/`list`/`webfetch` 等只读操作默认放行
 - 高风险操作（如 `rm -rf`、`chmod 777`、文件写操作）标记为需要确认
-- 可通过 `SetPermissionChecker` 注入自定义权限策略
+- 可通过 `SetPermissionChecker` 注入自定义权限策略（覆盖所有工具判定；另有 `ForbiddenTools` 全局禁止列表）
 - 权限确认通过 UI 接口的 `ConfirmPermission` 方法完成
 
 ## 常见问题
