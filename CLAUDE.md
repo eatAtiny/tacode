@@ -20,7 +20,7 @@ go run . -sandbox on                  # 启用 shell 沙箱（网络/文件系�
 go run . -config config.yaml          # 加载配置文件（temperature/max_iterations/result_limit/context_char_limit 生效；compress_threshold/context_limit 为预留字段，参考 config.example.yaml）
 go run . -mcp-server "fetch@npx -y @modelcontextprotocol/server-fetch"   # 连接 MCP server（WebFetch）
 go vet ./...                            # 静态检查
-gofmt -l .                              # 检查 gofmt 格式（无输出即通过）
+gofmt -l .                              # 检查 gofmt 格式（基线存在既有格式偏差文件，要求零新增漂移）
 go test ./...                           # run all tests
 ```
 

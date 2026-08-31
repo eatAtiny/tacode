@@ -12,7 +12,7 @@
 
 **基线:** 分支 `refactor/module-cleanup`（自 master 3904a0a 切出），全测试绿。所有死代码结论均经审查 agent grep 全仓验证（含测试文件）。
 
-**执行状态（2026-08-28 更新）:** Task 1-15 已完成并逐任务通过 spec+质量双重审查（每个实现 commit 后附独立审查：字节级移动比对 / helper 逐行等价论证 / TDD 先红后绿 / T15 含攻防测试）。累计 22 个 commit（含 4 个审查返工打磨 commit）。剩余：Task 16-19（fix ④⑤⑥⑦）+ Task 20（文档同步与最终整体审查）。执行期新发现的 7 条已知问题见文末「T20 需一并记录的已知问题」。
+**执行状态（2026-08-30 更新）:** Task 1-20 全部完成并逐任务通过 spec+质量双重审查（每个实现 commit 后附独立审查：字节级移动比对 / helper 逐行等价论证 / TDD 先红后绿 / T15 含攻防测试）。累计 28 个 commit（含审查返工打磨与 2 个文档修正 commit）。最终整体审查结论：Ready to merge——无 Critical、无未解决 Important；2 个 plan-mandated 行为决策点（Task 16 并发分类 `t.Name()` vs `tc.Name`、Task 19 框线右端对齐受 out-of-scope 常量限制）记录在案，建议后续任务处理。执行期新发现的 7 条已知问题见文末「T20 需一并记录的已知问题」，未在本计划修复（记录在案）。
 
 **用户决策（已确认）:**
 1. L2 层：保持现状，只修注释 —— `summary_store.go`、`BuildContext`、`CheckAndCompress`、`SetCompressThreshold`、config 的 `compress_threshold` 字段、`/compress` 命令、extractor 的 `Summary` 字段**全部保留**，仅把注释改为如实描述（"预留/当前无生产写入路径"）。
@@ -502,11 +502,11 @@ git commit -m "fix(tool): shell 只读判定堵住重定向与管道绕过
 - Modify: `internal/agent/tool_exec.go`（executeToolCalls 分类处）
 - Test: `internal/agent/query_loop_test.go`
 
-- [ ] **Step 1: 写失败测试**：向 `ForbiddenTools` 追加一个自报 IsConcurrencySafe+IsReadOnly=true 的工具，断言其落入串行路径（现状：进并发）。
+- [x] **Step 1: 写失败测试**：向 `ForbiddenTools` 追加一个自报 IsConcurrencySafe+IsReadOnly=true 的工具，断言其落入串行路径（现状：进并发）。
 
-- [ ] **Step 2: 确认失败** → **Step 3: 实现**：并发分类条件补 `!isToolForbidden(t.Name())` 与 `globalPermissionChecker.CheckPermission(...).Allow`（与串行路径 661/763 行同一判定来源）。注意测试后清理全局切片。
+- [x] **Step 2: 确认失败** → **Step 3: 实现**：并发分类条件补 `!isToolForbidden(t.Name())` 与 `globalPermissionChecker.CheckPermission(...).Allow`（与串行路径 661/763 行同一判定来源）。注意测试后清理全局切片。
 
-- [ ] **Step 4: 全量验证** + **Commit**
+- [x] **Step 4: 全量验证** + **Commit**
 
 ```bash
 git add internal/agent/
@@ -524,11 +524,11 @@ git commit -m "fix(agent): 并发工具分类补 ForbiddenTools 与全局权限�
 - Modify: `internal/tool/grep.go`
 - Test: `internal/tool/tool_test.go`
 
-- [ ] **Step 1: 写失败测试**：构造含 >64KB 单行且行内含匹配串的文件，断言输出包含匹配或明确的扫描错误提示（现状：静默漏配）。
+- [x] **Step 1: 写失败测试**：构造含 >64KB 单行且行内含匹配串的文件，断言输出包含匹配或明确的扫描错误提示（现状：静默漏配）。
 
-- [ ] **Step 2: 确认失败** → **Step 3: 实现**：`searchFile` 循环后检查 `scanner.Err()`，非 nil 时向结果追加 `（该文件扫描中断: %v）` 提示行。
+- [x] **Step 2: 确认失败** → **Step 3: 实现**：`searchFile` 循环后检查 `scanner.Err()`，非 nil 时向结果追加 `（该文件扫描中断: %v）` 提示行。
 
-- [ ] **Step 4: 全量验证** + **Commit**
+- [x] **Step 4: 全量验证** + **Commit**
 
 ```bash
 git add internal/tool/
@@ -546,11 +546,11 @@ bufio.Scanner 默认 64KB 行上限，超限文件扫描中断且无提示。
 - Modify: `internal/tool/list.go`
 - Test: `internal/tool/tool_test.go`
 
-- [ ] **Step 1: 写失败测试**：构造 150 条目目录 + max_entries=50，断言输出明示截断（现状显示「共 100 个条目」失真——maxEntries*2 上限）。
+- [x] **Step 1: 写失败测试**：构造 150 条目目录 + max_entries=50，断言输出明示截断（现状显示「共 100 个条目」失真——maxEntries*2 上限）。
 
-- [ ] **Step 2: 确认失败** → **Step 3: 实现**：`collectEntries` 返回 `(entries, truncated bool)`（Walk 中因上限提前终止时置位）；输出截断时显示「共 %d 个条目（已达扫描上限，可能不完整）」，并给 `maxEntries*2` 双倍采集补动机注释（排序前留余量）。
+- [x] **Step 2: 确认失败** → **Step 3: 实现**：`collectEntries` 返回 `(entries, truncated bool)`（Walk 中因上限提前终止时置位）；输出截断时显示「共 %d 个条目（已达扫描上限，可能不完整）」，并给 `maxEntries*2` 双倍采集补动机注释（排序前留余量）。
 
-- [ ] **Step 4: 全量验证** + **Commit**
+- [x] **Step 4: 全量验证** + **Commit**
 
 ```bash
 git add internal/tool/
@@ -568,13 +568,13 @@ git commit -m "fix(tool): list 目录条目计数明示截断
 - Modify: `internal/ui/bubble/box.go`
 - Test: `internal/ui/bubble/statusbar_test.go` 或新用例
 
-- [ ] **Step 1: 写失败测试**：`toolResultBox("✅ 结果", ...)`（中文标题）断言标题行补线长度按显示宽计算（`lipgloss.Width`），框线右端对齐。
+- [x] **Step 1: 写失败测试**：`toolResultBox("✅ 结果", ...)`（中文标题）断言标题行补线长度按显示宽计算（`lipgloss.Width`），框线右端对齐。
 
-- [ ] **Step 2: 确认失败**（现状按字节数补线，中文标题多画约 3 个 `─`）
+- [x] **Step 2: 确认失败**（现状按字节数补线，中文标题多画约 3 个 `─`）
 
-- [ ] **Step 3: 实现**：46/81 行 `len(name)`/`len(titleText)` 改 `lipgloss.Width(...)`（与 boxWidth 的 rune 口径统一）。
+- [x] **Step 3: 实现**：46/81 行 `len(name)`/`len(titleText)` 改 `lipgloss.Width(...)`（与 boxWidth 的 rune 口径统一）。
 
-- [ ] **Step 4: 全量验证** + **Commit**
+- [x] **Step 4: 全量验证** + **Commit**
 
 ```bash
 git add internal/ui/bubble/
@@ -590,7 +590,7 @@ git commit -m "fix(ui): 框线标题补线改用显示宽度，中文标题不�
 **Files:**
 - Modify: `CLAUDE.md`、`README.md`（若有相同过时描述）
 
-- [ ] **Step 1: CLAUDE.md 更新**：
+- [x] **Step 1: CLAUDE.md 更新**：
 - File Map：agent 包补 `tool_exec.go`/`repl.go`/`oneshot.go`，main.go 补 `bootstrap.go`，文件数与实际一致（含此前未记录的 mcp/config/sandbox 包补全）
 - 删除 permission.go 的 `DefaultPermissionChecker` 表述（代码中已不存在该类型）
 - `/compress` 命令描述补「当前无 L2 写入路径，实际为空操作（L2 层预留）」
@@ -598,7 +598,7 @@ git commit -m "fix(ui): 框线标题补线改用显示宽度，中文标题不�
 - ReAct Flow 与 Memory 章节对齐「消息跨轮累积 + Compactor 字符管线 + preamble 仅首轮注入」的现行架构；`/interrupt` 描述对齐 fix ② 后行为
 - 补记 `go vet`/`gofmt` 到验证命令
 
-- [ ] **Step 2: 全量验证** + **Commit**
+- [x] **Step 2: 全量验证** + **Commit**
 
 ```bash
 git add CLAUDE.md README.md
