@@ -254,6 +254,41 @@ func TestListToolConcurrency(t *testing.T) {
 	}
 }
 
+// TestListExecute_TruncationHint 验证大目录下 list 输出明示扫描截断与不完整。
+//
+// 150 个条目 + max_entries=50：collectEntries 双倍采集至 maxEntries*2=100 后
+// 提前终止。修复前输出「共 100 个条目」且无任何不完整提示，该数字易被误读为
+// 真实总数（实际 150）。修复后应追加「已达扫描上限，可能不完整」的显式提示。
+func TestListExecute_TruncationHint(t *testing.T) {
+	l := NewListTool()
+	tmpDir := t.TempDir()
+
+	// 构造 150 个文件条目（单一目录内，无子目录，保证双倍采集在顶层即触顶）。
+	for i := 0; i < 150; i++ {
+		p := filepath.Join(tmpDir, fmt.Sprintf("file_%03d.txt", i))
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	args := toJSON(map[string]any{
+		"path":        tmpDir,
+		"max_entries": 50,
+	})
+	out, err := l.Execute(args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 断言输出明示扫描已达上限、结果可能不完整（修复前无此信号）。
+	if !strings.Contains(out, "已达扫描上限") {
+		t.Errorf("expected scan-cap hint in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "可能不完整") {
+		t.Errorf("expected incompleteness hint in output, got:\n%s", out)
+	}
+}
+
 // ──────────────────────────────────────────────────────────
 // Edit replace_all 测试
 // ──────────────────────────────────────────────────────────
