@@ -290,6 +290,30 @@ data/sessions/
    - 直接打开 `data/sessions/<id>/events.jsonl` 查看全量事件日志
    - 或打开 `data/sessions/<id>/history.jsonl` 查看原始对话
 
+## 待改进（TODO）
+
+以下为模块化清理计划（`docs/superpowers/plans/2026-08-27-module-cleanup.md`）完成后记录在案的后续项，尚未修复。
+
+**行为决策点（plan-mandated，需先拍板）**
+
+- [ ] 统一并发分类的禁止列表判定（`internal/agent/tool_exec.go`）：并发路径用 `t.Name()` 查 `ForbiddenTools`，串行路径用 `tc.Name`——若接线 `ForbiddenTools` 且工具存在别名，两者判定不一致（当前 `ForbiddenTools` 恒空，潜伏缺口）。建议接线时统一为 `tc.Name`。
+- [ ] 工具框线右端对齐（`internal/ui/bubble/box.go`）：`toolResultBox` 标题行比底边宽 4 列、`toolCallBox` 窄 1 列，源于计划范围外的 `+2`/`-6` 常量。建议统一常量、让 `drawBox` 负责对齐。
+
+**已知问题（执行期审查发现）**
+
+- [ ] shell 只读判定绕过：命令链（`;`/`&&`/换行）、`$()`/反引号命令替换、`find -exec`/`-delete`、`command <cmd>` 内建、白名单命令写参数（`sort -o out`、`git branch -D`）。建议命令链套用管道同款逐段校验 + 白名单收敛。
+- [ ] 危险命令表 `"rm "` 尾随空格匹配不到串尾裸 `rm`（如 `cat f | xargs rm` 不触发危险判定）。
+- [ ] `/interrupt` 在纯文本轮（无工具调用）静默蒸发——控制命令随查询结束被丢弃，无用户反馈。
+- [ ] `inputForward` 连续两条控制命令后者被静默丢弃（容量 1 + default），无提示。
+- [ ] `peekInterrupt` 吞掉 `permWaiting` 清除后迟到的权限应答（存量边界）。
+- [ ] 上下文窗口推断近似：`gpt-3.5-turbo` 实际 4K 但推断返回 16K；claude 兜底把 `claude-2` 判 200K（存量）。
+- [ ] `buildTools` 内 panic 时沙箱临时 profile 不再被 unwind 清理（T11 panic 路径理论差异）。
+
+**其他待办**
+
+- [ ] `boxWidth` 改显示宽度口径（`internal/ui/bubble/box.go`）：当前按 rune 计宽，与标题行已改的 `lipgloss.Width` 口径不一致。
+- [ ] 本文件「目录结构」节测试文件计数统一：只列了 `bubble_test.go`，省略其他测试文件，与其他目录的计数约定不一致。
+
 ## 后续可扩展方向
 
 - 增加非交互模式（传入初始任务自动多轮执行）
