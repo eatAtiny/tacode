@@ -164,7 +164,7 @@ Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncat
 | `/delete <id>` | Delete session (not active one) |
 | `/rename <name>` | Rename current session |
 | `/current` | Show current session info |
-| `/compress` | Manual summary compression（当前无 L2 写入路径，实际为空操作；L2 层预留） |
+| `/compress` | Manual summary compression（L2 唯一手动读写路径；摘要 ≤3 条时为空操作；L2 层预留） |
 | `/balance` | 查询 DeepSeek 账户余额；成功后每轮对话结束自动展示剩余额度 |
 | `/reload` | Reload AGENTS.md project instructions |
 | `/memory` | List L3 memories |
@@ -189,8 +189,8 @@ On each user input:
 - **Async generator pattern** — `queryLoop` returns `<-chan QueryEvent`, decoupling core loop from UI/event logging.
 - **Channel-based main loop** — `select` over input channel and query result channel, enabling `/stop` mid-query cancellation.
 - **Temporary sessions** — lazy persistence avoids empty sessions in manifest.
-- **Hardcoded temperature** — `0.2` in `internal/llm/openai.go`.
-- **Hardcoded max iterations** — `10` in `internal/agent/runner.go`.
+- **Default temperature** — `0.2` in `internal/llm/openai.go`（可经 config `temperature` 覆盖）.
+- **Default max iterations** — `10` in `internal/agent/runner.go`（可经 config `max_iterations` 覆盖）.
 - **All code comments and README are in Chinese.**
 
 ## File Map
