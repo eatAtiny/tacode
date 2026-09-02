@@ -10,8 +10,8 @@ func TestWelcomeBanner(t *testing.T) {
 	b := welcomeBanner("deepseek-v4-flash", "v0.1", "/tmp/proj")
 
 	for _, want := range []string{
-		"agentic",           // ASCII logo 文本
-		"欢迎使用 agentic",      // 欢迎语
+		"████████╗",         // ASCII logo（TACODE 首行字形）
+		"欢迎使用 Tacode",       // 欢迎语
 		"v0.1",              // 版本
 		"deepseek-v4-flash", // 模型
 		"/tmp/proj",         // 目录
@@ -27,7 +27,7 @@ func TestWelcomeBanner(t *testing.T) {
 // welcomeBanner 空值场景：空 model/ver/cwd 不应 panic，仍含欢迎语。
 func TestWelcomeBanner_Empty(t *testing.T) {
 	b := welcomeBanner("", "", "")
-	if !strings.Contains(b, "欢迎使用 agentic") {
+	if !strings.Contains(b, "欢迎使用 Tacode") {
 		t.Errorf("空参数时仍应有欢迎语，实际:\n%s", b)
 	}
 }

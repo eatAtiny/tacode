@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"agentic/internal/llm"
-	"agentic/internal/tool"
+	"tacode/internal/llm"
+	"tacode/internal/tool"
 )
 
 // ──────────────────────────────────────────────────────────

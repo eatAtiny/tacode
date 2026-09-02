@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"agentic/internal/session"
+	"tacode/internal/session"
 )
 
 // TestSyncCompactorPaths_SessionSwitch 验证切换会话后 Compactor 路径跟随更新。

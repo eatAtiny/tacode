@@ -22,7 +22,7 @@ import (
 	"io"
 	"strings"
 
-	"agentic/internal/tool"
+	"tacode/internal/tool"
 
 	mcpgo "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -74,7 +74,7 @@ func (m *Manager) Connect(ctx context.Context, cfg ServerConfig) ([]tool.Tool, e
 	// ── 握手（必须最先调用） ──
 	initReq := mcp.InitializeRequest{}
 	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	initReq.Params.ClientInfo = mcp.Implementation{Name: "agentic", Version: "0.1"}
+	initReq.Params.ClientInfo = mcp.Implementation{Name: "tacode", Version: "0.1"}
 	if _, err := c.Initialize(ctx, initReq); err != nil {
 		c.Close()
 		return nil, fmt.Errorf("initialize mcp server %s: %w", name, err)

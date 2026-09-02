@@ -10,9 +10,9 @@ import (
 	"sync"
 	"testing"
 
-	"agentic/internal/memory"
-	"agentic/internal/tool"
-	"agentic/internal/ui/text"
+	"tacode/internal/memory"
+	"tacode/internal/tool"
+	"tacode/internal/ui/text"
 )
 
 // newTestSSEServer 启动一个返回固定 SSE 流的 mock server。

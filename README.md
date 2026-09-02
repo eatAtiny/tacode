@@ -1,4 +1,4 @@
-# agentic
+# Tacode
 
 一个 Go ReAct Agent，具备三层记忆系统、流式 LLM 交互、可插拔 UI 和多会话管理。
 
@@ -16,7 +16,7 @@
 ## 目录结构
 
 ```text
-agentic/
+tacode/
   main.go                              # 入口：flag 解析 → 配置加载 → 装配（bootstrap.go）→ 模式分支（REPL / one-shot）
   bootstrap.go                         # 依赖装配：buildMemoryStack / buildTools / buildUI / fatal
   go.mod

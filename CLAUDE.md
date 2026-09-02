@@ -10,7 +10,7 @@ A Go ReAct agent with interactive REPL, three-layer memory, streaming LLM, plugg
 
 ```bash
 go mod tidy                              # install dependencies
-go build -o agentic .                    # build binary
+go build -o tacode .                    # build binary
 go run .                                 # run (requires OPENAI_API_KEY)
 go run . -sessions ./data/sessions       # custom sessions directory
 go run . -session <id>                   # resume a specific session

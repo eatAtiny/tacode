@@ -4,13 +4,13 @@ import (
 	"context"
 	"sync/atomic"
 
-	"agentic/internal/config"
-	"agentic/internal/llm"
-	"agentic/internal/memory"
-	"agentic/internal/session"
-	"agentic/internal/tool"
-	"agentic/internal/ui"
-	"agentic/internal/ui/bubble"
+	"tacode/internal/config"
+	"tacode/internal/llm"
+	"tacode/internal/memory"
+	"tacode/internal/session"
+	"tacode/internal/tool"
+	"tacode/internal/ui"
+	"tacode/internal/ui/bubble"
 )
 
 // ReAct 最大循环次数，防止无限循环。

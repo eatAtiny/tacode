@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"agentic/internal/llm"
+	"tacode/internal/llm"
 )
 
 // newTestCompactor 构造使用临时目录的 Compactor（llmClient = nil，跳过摘要）。

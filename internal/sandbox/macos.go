@@ -34,7 +34,7 @@ func newMacOSSandbox(cfg Config) *MacOSSandbox {
 		s.workDir, _ = os.Getwd()
 	}
 	// 生成临时 profile（Close 时删除）。
-	if f, err := os.CreateTemp("", "agentic-sandbox-*.sb"); err == nil {
+	if f, err := os.CreateTemp("", "tacode-sandbox-*.sb"); err == nil {
 		fmt.Fprint(f, s.buildProfile())
 		f.Close()
 		s.profilePath = f.Name()

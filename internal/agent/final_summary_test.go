@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"agentic/internal/llm"
+	"tacode/internal/llm"
 
 	openai "github.com/sashabaranov/go-openai"
 )

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"agentic/internal/llm"
-	"agentic/internal/tool"
+	"tacode/internal/llm"
+	"tacode/internal/tool"
 )
 
 // drainEvents 排空 channel 中剩余的事件（非阻塞）。
@@ -436,15 +436,19 @@ type sleepTool struct {
 	delay time.Duration
 }
 
-func (t *sleepTool) Name() string                                   { return t.name }
-func (t *sleepTool) Aliases() []string                              { return nil }
-func (t *sleepTool) Description() string                            { return "sleep tool for testing" }
-func (t *sleepTool) Parameters() map[string]any                     { return map[string]any{"type": "object", "properties": map[string]any{}} }
-func (t *sleepTool) PromptGuide() string                            { return "" }
-func (t *sleepTool) ResultLimit() int                               { return 1000 }
-func (t *sleepTool) CheckPermission(args string) tool.PermissionResult { return tool.PermissionResult{Allow: true} }
-func (t *sleepTool) IsConcurrencySafe(args string) bool             { return true }
-func (t *sleepTool) IsReadOnly(args string) bool                    { return true }
+func (t *sleepTool) Name() string        { return t.name }
+func (t *sleepTool) Aliases() []string   { return nil }
+func (t *sleepTool) Description() string { return "sleep tool for testing" }
+func (t *sleepTool) Parameters() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (t *sleepTool) PromptGuide() string { return "" }
+func (t *sleepTool) ResultLimit() int    { return 1000 }
+func (t *sleepTool) CheckPermission(args string) tool.PermissionResult {
+	return tool.PermissionResult{Allow: true}
+}
+func (t *sleepTool) IsConcurrencySafe(args string) bool { return true }
+func (t *sleepTool) IsReadOnly(args string) bool        { return true }
 func (t *sleepTool) Execute(args string) (string, error) {
 	time.Sleep(t.delay)
 	return "done:" + t.name, nil

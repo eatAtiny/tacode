@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"agentic/internal/memory"
-	"agentic/internal/session"
+	"tacode/internal/memory"
+	"tacode/internal/session"
 )
 
 // ──────────────────────────────────────────────────────────

@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"agentic/internal/llm"
-	"agentic/internal/memory"
-	"agentic/internal/prompt"
+	"tacode/internal/llm"
+	"tacode/internal/memory"
+	"tacode/internal/prompt"
 )
 
 // ──────────────────────────────────────────────────────────

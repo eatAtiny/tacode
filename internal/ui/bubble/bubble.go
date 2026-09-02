@@ -31,8 +31,8 @@ import (
 	"strings"
 	"sync"
 
-	"agentic/internal/memory"
-	"agentic/internal/session"
+	"tacode/internal/memory"
+	"tacode/internal/session"
 
 	tea "github.com/charmbracelet/bubbletea"
 )

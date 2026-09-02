@@ -9,14 +9,14 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"agentic/internal/llm"
+	"tacode/internal/llm"
 )
 
 // 默认配置。
 const (
-	defaultSummaryCount = 10  // 默认加载最近 10 条摘要
-	maxMemoryEntries    = 10  // 默认最多加载 10 条记忆
-	minImportance       = 2   // 默认最低重要性（1-5，>=2 才会注入 prompt）
+	defaultSummaryCount      = 10  // 默认加载最近 10 条摘要
+	maxMemoryEntries         = 10  // 默认最多加载 10 条记忆
+	minImportance            = 2   // 默认最低重要性（1-5，>=2 才会注入 prompt）
 	defaultCompressThreshold = 0.8 // 默认 token 使用率阈值（超过触发压缩）
 )
 
@@ -267,7 +267,8 @@ func (r *Retriever) BuildContextFallback(query string) (string, error) {
 // 预留路径：当前无生产调用。
 //
 // 判断逻辑：
-//   currentUsage / tokenLimit > 80% → 触发压缩
+//
+//	currentUsage / tokenLimit > 80% → 触发压缩
 //
 // tokenLimit 是模型的上下文窗口大小，currentUsage 是当前已用 token。
 // 返回 true 表示已触发压缩，上层应重新构建上下文。
@@ -287,12 +288,12 @@ func (r *Retriever) CheckAndCompress(ctx context.Context, client *llm.OpenAIClie
 // CompressSummaries 使用 LLM 合并旧摘要，保留最近几条不动。
 //
 // 流程：
-//   1. 加载所有 L2 摘要
-//   2. 如果 <= 3 条，无需压缩
-//   3. 保留最近 3 条不动，压缩其余的（toCompress）
-//   4. 构建压缩 prompt：将 toCompress 格式化为列表
-//   5. 调用 LLM 合并为一段综合摘要
-//   6. 用压缩后的摘要替换旧的（1 条综合摘要 + 3 条最近摘要）
+//  1. 加载所有 L2 摘要
+//  2. 如果 <= 3 条，无需压缩
+//  3. 保留最近 3 条不动，压缩其余的（toCompress）
+//  4. 构建压缩 prompt：将 toCompress 格式化为列表
+//  5. 调用 LLM 合并为一段综合摘要
+//  6. 用压缩后的摘要替换旧的（1 条综合摘要 + 3 条最近摘要）
 //
 // 压缩后的摘要前缀 "[压缩摘要]" 标记。
 func (r *Retriever) CompressSummaries(ctx context.Context, client *llm.OpenAIClient) error {

@@ -9,10 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"agentic/internal/agent"
-	"agentic/internal/config"
-	"agentic/internal/llm"
-	"agentic/internal/session"
+	"tacode/internal/agent"
+	"tacode/internal/config"
+	"tacode/internal/llm"
+	"tacode/internal/session"
 )
 
 // loadEnvFile 从 .env 文件加载环境变量。

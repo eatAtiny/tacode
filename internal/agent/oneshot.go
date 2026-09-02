@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"agentic/internal/memory"
+	"tacode/internal/memory"
 )
 
 // RunOnce 执行一次查询并返回最终答案（one-shot / headless 模式）。

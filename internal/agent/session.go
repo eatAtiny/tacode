@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"agentic/internal/llm"
-	"agentic/internal/memory"
-	"agentic/internal/session"
+	"tacode/internal/llm"
+	"tacode/internal/memory"
+	"tacode/internal/session"
 )
 
 // ──────────────────────────────────────────────────────────

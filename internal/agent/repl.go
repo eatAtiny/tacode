@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"agentic/internal/memory"
+	"tacode/internal/memory"
 )
 
 // Run 进入交互循环：读用户输入 -> QueryEngine -> 保存记忆。

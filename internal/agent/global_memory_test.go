@@ -8,9 +8,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"agentic/internal/llm"
-	"agentic/internal/memory"
-	"agentic/internal/ui/text"
+	"tacode/internal/llm"
+	"tacode/internal/memory"
+	"tacode/internal/ui/text"
 )
 
 // ──────────────────────────────────────────────────────────
@@ -70,16 +70,16 @@ func TestExtractMemory_RoutesGlobalAndProject(t *testing.T) {
 	})
 
 	r := &Runner{
-		llm:       client,
-		history:   history,
-		summary:   summary,
-		memStore:  sessionMem,
-		globalMem: globalMem,
+		llm:        client,
+		history:    history,
+		summary:    summary,
+		memStore:   sessionMem,
+		globalMem:  globalMem,
 		projectMem: projectMem,
-		events:    events,
-		retriever: retriever,
-		extractor: memory.NewExtractor(client),
-		ui:        text.NewTextUI(),
+		events:     events,
+		retriever:  retriever,
+		extractor:  memory.NewExtractor(client),
+		ui:         text.NewTextUI(),
 	}
 
 	r.extractMemory(context.Background(), 1, "帮我写代码", "好的")

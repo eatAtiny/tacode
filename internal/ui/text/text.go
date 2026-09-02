@@ -18,8 +18,8 @@ package text
 import (
 	"fmt"
 
-	"agentic/internal/memory"
-	"agentic/internal/session"
+	"tacode/internal/memory"
+	"tacode/internal/session"
 )
 
 // TextUI 是 UI 接口的 headless 实现。

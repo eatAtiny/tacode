@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"agentic/internal/llm"
-	"agentic/internal/tool"
+	"tacode/internal/llm"
+	"tacode/internal/tool"
 
 	openai "github.com/sashabaranov/go-openai"
 )
@@ -30,22 +30,22 @@ const defaultResultLimit = 8000
 type queryLoopContext struct {
 	ctx               context.Context
 	llmClient         *llm.OpenAIClient
-	messages          []llm.ChatMessage      // 完整消息历史（system + user + assistant + tool）
-	tools             []openai.Tool          // 工具定义列表（OpenAI function calling 格式）
-	toolRegistry      *tool.Registry         // 工具注册表，用于查找和执行工具
-	maxIter           int                    // 最大迭代次数
-	resultLimit       int                    // 结果截断上限（字符数，默认 8000）
-	inputForward      <-chan string          // 权限确认输入与控制命令（/interrupt、/retry）转发通道，nil = 不启用
-	events            chan<- QueryEvent      // 事件输出 channel（yield 事件到此）
-	seenToolCalls     map[string]bool        // 已见过的工具调用签名（用于重复检测）
-	totalInputTokens  int                    // 累计输入 token 数
-	totalOutputTokens int                    // 累计输出 token 数
-	lastInputTokens   int                    // 暂存每次调用的输入 token 数
-	lastOutputTokens  int                    // 暂存每次调用的输出 token 数
-	fileReads         map[string]time.Time   // 已读文件的 mtime（key=绝对路径，用于 read-before-edit 检测）
-	compactor         *Compactor             // s08 四步压缩管线（nil = 禁用）
-	activeRequest     string                 // 当前轮用户请求（压缩时注入 [Compacted] 消息用）
-	reactiveRetries   int                    // prompt_too_long 补救重试次数（上限 MAX_REACTIVE_RETRIES）
+	messages          []llm.ChatMessage    // 完整消息历史（system + user + assistant + tool）
+	tools             []openai.Tool        // 工具定义列表（OpenAI function calling 格式）
+	toolRegistry      *tool.Registry       // 工具注册表，用于查找和执行工具
+	maxIter           int                  // 最大迭代次数
+	resultLimit       int                  // 结果截断上限（字符数，默认 8000）
+	inputForward      <-chan string        // 权限确认输入与控制命令（/interrupt、/retry）转发通道，nil = 不启用
+	events            chan<- QueryEvent    // 事件输出 channel（yield 事件到此）
+	seenToolCalls     map[string]bool      // 已见过的工具调用签名（用于重复检测）
+	totalInputTokens  int                  // 累计输入 token 数
+	totalOutputTokens int                  // 累计输出 token 数
+	lastInputTokens   int                  // 暂存每次调用的输入 token 数
+	lastOutputTokens  int                  // 暂存每次调用的输出 token 数
+	fileReads         map[string]time.Time // 已读文件的 mtime（key=绝对路径，用于 read-before-edit 检测）
+	compactor         *Compactor           // s08 四步压缩管线（nil = 禁用）
+	activeRequest     string               // 当前轮用户请求（压缩时注入 [Compacted] 消息用）
+	reactiveRetries   int                  // prompt_too_long 补救重试次数（上限 MAX_REACTIVE_RETRIES）
 }
 
 // queryLoop 是纯粹的 Agent Loop 核心循环，使用异步生成器模式。
@@ -169,15 +169,15 @@ type queryLoopOptions struct {
 //
 // 循环体（每次迭代）：
 //
-//	1. 检查 ctx 是否被取消（支持 /stop）
-//	2. 运行压缩管线（字符用量超过 contextCharLimit 时压缩，默认上限 50K）
-//	3. 调用 LLM 流式接口 → 收集 content + toolCalls
-//	4. 累计 token 用量
-//	5. 推入 assistant 消息到历史
-//	6. 如果无 toolCalls → 任务完成，yield Final + return
-//	7. 执行工具调用（含权限检查）
-//	8. 检测重复调用并警告
-//	9. yield Continue → 回到步骤 1
+//  1. 检查 ctx 是否被取消（支持 /stop）
+//  2. 运行压缩管线（字符用量超过 contextCharLimit 时压缩，默认上限 50K）
+//  3. 调用 LLM 流式接口 → 收集 content + toolCalls
+//  4. 累计 token 用量
+//  5. 推入 assistant 消息到历史
+//  6. 如果无 toolCalls → 任务完成，yield Final + return
+//  7. 执行工具调用（含权限检查）
+//  8. 检测重复调用并警告
+//  9. yield Continue → 回到步骤 1
 func (lc *queryLoopContext) runLoop() {
 	for iter := 0; iter < lc.maxIter; iter++ {
 		// ── 步骤 1: 检查上下文是否被取消 ──
@@ -284,13 +284,13 @@ func (lc *queryLoopContext) hasCompactRequest(toolCalls []llm.ToolCall) bool {
 // callLLMStream 调用 LLM 流式接口，收集响应。
 //
 // 流程：
-//   1. yield Think 事件（通知上层开始思考）
-//   2. 调用 llmClient.ChatWithToolsStream() → 获取 stream channel
-//   3. 遍历 stream channel：
-//      - StreamEventDelta → 累加 fullContent + yield Delta 事件
-//      - StreamEventDone → 提取 toolCalls 和 token 信息
-//      - StreamEventError → yield Error 事件
-//   4. 暂存 token 信息供后续累计
+//  1. yield Think 事件（通知上层开始思考）
+//  2. 调用 llmClient.ChatWithToolsStream() → 获取 stream channel
+//  3. 遍历 stream channel：
+//     - StreamEventDelta → 累加 fullContent + yield Delta 事件
+//     - StreamEventDone → 提取 toolCalls 和 token 信息
+//     - StreamEventError → yield Error 事件
+//  4. 暂存 token 信息供后续累计
 //
 // 返回：
 //   - content: 完整的文本内容（LLM 在工具调用前的思考文本）
@@ -432,10 +432,10 @@ func singleCallSignature(tc llm.ToolCall) string {
 // generateFinalSummary 达到最大迭代次数时，生成最终总结。
 //
 // 流程：
-//   1. 注入 user 消息："请根据已有信息直接给出回答"
-//   2. 再次调用 LLM 流式接口（不带工具调用能力）
-//   3. 收集最终文本内容
-//   4. yield Final 事件
+//  1. 注入 user 消息："请根据已有信息直接给出回答"
+//  2. 再次调用 LLM 流式接口（不带工具调用能力）
+//  3. 收集最终文本内容
+//  4. yield Final 事件
 func (lc *queryLoopContext) generateFinalSummary() {
 	lc.messages = append(lc.messages, llm.ChatMessage{
 		Role:    "user",

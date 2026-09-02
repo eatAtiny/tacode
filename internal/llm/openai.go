@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"agentic/internal/config"
+	"tacode/internal/config"
 
 	openai "github.com/sashabaranov/go-openai"
 )

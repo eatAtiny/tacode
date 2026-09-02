@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"agentic/internal/session"
+	"tacode/internal/session"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -27,7 +27,7 @@ func TestChatModel_View(t *testing.T) {
 	if !strings.Contains(v, "输入消息") {
 		t.Errorf("View 应包含输入框 placeholder，实际:\n%s", v)
 	}
-	if !strings.Contains(v, "agentic") {
+	if !strings.Contains(v, "tacode") {
 		t.Errorf("View 应包含 footer，实际:\n%s", v)
 	}
 }
@@ -197,7 +197,7 @@ func TestChatModel_WelcomePrinted(t *testing.T) {
 	if len(m.lines) != 1 {
 		t.Fatalf("lines = %d, want 1", len(m.lines))
 	}
-	if !strings.Contains(m.lines[0].text, "agentic") {
+	if !strings.Contains(m.lines[0].text, "████████╗") {
 		t.Errorf("欢迎行应含 logo，实际: %q", m.lines[0].text)
 	}
 }

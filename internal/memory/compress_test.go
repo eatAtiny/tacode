@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"agentic/internal/llm"
+	"tacode/internal/llm"
 )
 
 // ──────────────────────────────────────────────────────────

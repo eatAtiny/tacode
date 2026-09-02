@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"agentic/internal/llm"
+	"tacode/internal/llm"
 )
 
 // currencySymbol 货币符号映射（未知货币回退到币种代码）。

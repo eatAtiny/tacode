@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"agentic/internal/llm"
+	"tacode/internal/llm"
 )
 
 // ──────────────────────────────────────────────────────────
@@ -39,12 +39,12 @@ func NewExtractor(client *llm.OpenAIClient) *Extractor {
 // Extract 一次 LLM 调用，同时提取对话摘要和记忆操作。
 //
 // 流程：
-//   1. 构建 system prompt（记忆提取器的角色说明 + JSON 输出格式）
-//   2. 构建 user prompt（用户输入 + 助手回复）
-//   3. 调用 llm.Chat()（非流式，等待完整响应）
-//   4. 清理响应（去除 markdown 代码块标记）
-//   5. 解析 JSON → ExtractionResult
-//   6. JSON 解析失败 → 降级为截断摘要
+//  1. 构建 system prompt（记忆提取器的角色说明 + JSON 输出格式）
+//  2. 构建 user prompt（用户输入 + 助手回复）
+//  3. 调用 llm.Chat()（非流式，等待完整响应）
+//  4. 清理响应（去除 markdown 代码块标记）
+//  5. 解析 JSON → ExtractionResult
+//  6. JSON 解析失败 → 降级为截断摘要
 //
 // 返回的 ExtractionResult：
 //   - Summary: 本轮对话的简要摘要（1-2 句中文），始终不为空（预留，当前无消费者）
@@ -122,8 +122,10 @@ func buildExtractPrompt() string {
 
 // cleanJSONResponse 清理 LLM 返回的 JSON，去除可能的 markdown 代码块标记。
 // 输入可能是：
-//   ```json\n{...}\n```
-//   { ... }
+//
+//	```json\n{...}\n```
+//	{ ... }
+//
 // 输出：纯 JSON 字符串。
 func cleanJSONResponse(s string) string {
 	s = strings.TrimSpace(s)

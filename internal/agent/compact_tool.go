@@ -1,7 +1,7 @@
 package agent
 
 import (
-	"agentic/internal/tool"
+	"tacode/internal/tool"
 )
 
 // ──────────────────────────────────────────────────────────

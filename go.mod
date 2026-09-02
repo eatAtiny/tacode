@@ -1,4 +1,4 @@
-module agentic
+module tacode
 
 go 1.26.4
 

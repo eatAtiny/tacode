@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"agentic/internal/memory"
+	"tacode/internal/memory"
 )
 
 // ──────────────────────────────────────────────────────────
@@ -27,12 +27,12 @@ import (
 // extractMemory 调用 LLM 提取结构化记忆（L3）。
 //
 // 流程（每次对话后执行一次）：
-//   1. 调用 extractor.Extract(userInput, assistantOutput)
-//      → LLM 分析对话，返回 ExtractionResult{Summary, Memories[]}
-//      （Summary 字段当前无消费者（预留），仅 Memories 被处理）
-//   2. 处理 L3 记忆操作：
-//      - create/update → memStore.SaveEntry()（写入 .md 文件 + 更新 MEMORY.md）
-//      - delete → memStore.DeleteEntry()（删除 .md 文件 + 更新 MEMORY.md）
+//  1. 调用 extractor.Extract(userInput, assistantOutput)
+//     → LLM 分析对话，返回 ExtractionResult{Summary, Memories[]}
+//     （Summary 字段当前无消费者（预留），仅 Memories 被处理）
+//  2. 处理 L3 记忆操作：
+//     - create/update → memStore.SaveEntry()（写入 .md 文件 + 更新 MEMORY.md）
+//     - delete → memStore.DeleteEntry()（删除 .md 文件 + 更新 MEMORY.md）
 //
 // 不再保存 L2 摘要：跨轮累积架构下对话细节由累积 messages 承载，
 // L2 只在压缩（compactHistory）时作为兜底写入。
@@ -94,9 +94,9 @@ func (r *Runner) extractMemory(ctx context.Context, round int, userInput, assist
 // handleCompress 手动触发摘要压缩（/compress 命令）。
 //
 // 流程：
-//   1. 调用 Retriever.CompressSummaries()
-//   2. LLM 合并旧摘要 → 保留最近 3 条 + 1 条综合摘要
-//   3. 显示压缩后的摘要数量
+//  1. 调用 Retriever.CompressSummaries()
+//  2. LLM 合并旧摘要 → 保留最近 3 条 + 1 条综合摘要
+//  3. 显示压缩后的摘要数量
 func (r *Runner) handleCompress() {
 	r.ui.OnMessage("🗜️ 正在压缩摘要...")
 

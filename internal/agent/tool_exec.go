@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	"agentic/internal/llm"
-	"agentic/internal/tool"
+	"tacode/internal/llm"
+	"tacode/internal/tool"
 )
 
 // executeToolCalls 执行工具调用列表。

@@ -15,8 +15,8 @@
 package ui
 
 import (
-	"agentic/internal/memory"
-	"agentic/internal/session"
+	"tacode/internal/memory"
+	"tacode/internal/session"
 )
 
 // UI 定义了 Agent 与用户交互的接口。

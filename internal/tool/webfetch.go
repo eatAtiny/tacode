@@ -104,7 +104,7 @@ func (t *WebFetchTool) fetch(url string, maxChars int) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid request: %w", err)
 	}
-	req.Header.Set("User-Agent", "agentic-webfetch/1.0")
+	req.Header.Set("User-Agent", "tacode-webfetch/1.0")
 
 	resp, err := t.client.Do(req)
 	if err != nil {

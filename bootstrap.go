@@ -12,16 +12,16 @@ import (
 	"strings"
 	"time"
 
-	"agentic/internal/agent"
-	"agentic/internal/config"
-	"agentic/internal/llm"
-	"agentic/internal/mcp"
-	"agentic/internal/memory"
-	"agentic/internal/sandbox"
-	"agentic/internal/tool"
-	"agentic/internal/ui"
-	"agentic/internal/ui/bubble"
-	"agentic/internal/ui/text"
+	"tacode/internal/agent"
+	"tacode/internal/config"
+	"tacode/internal/llm"
+	"tacode/internal/mcp"
+	"tacode/internal/memory"
+	"tacode/internal/sandbox"
+	"tacode/internal/tool"
+	"tacode/internal/ui"
+	"tacode/internal/ui/bubble"
+	"tacode/internal/ui/text"
 )
 
 // memoryStack 是 buildMemoryStack 的装配结果：三层记忆体系 + 全局/项目记忆

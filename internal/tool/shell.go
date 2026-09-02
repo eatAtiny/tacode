@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"agentic/internal/sandbox"
+	"tacode/internal/sandbox"
 )
 
 // defaultCmdTimeout 命令执行默认超时（shell/git 工具共享）。

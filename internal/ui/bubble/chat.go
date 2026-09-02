@@ -22,7 +22,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
-	"agentic/internal/session"
+	"tacode/internal/session"
 )
 
 // ──────────────────────────────────────────────────────────
@@ -423,7 +423,7 @@ func (m *ChatModel) renderPermissionLayer() string {
 }
 
 // renderFooter 底部状态栏。
-// 格式：agentic │ 上下文 15K/50K (30%) │ 💰 余额（有则显示）│ ctrl+c 退出
+// 格式：tacode │ 上下文 15K/50K (30%) │ 💰 余额（有则显示）│ ctrl+c 退出
 func (m *ChatModel) renderFooter() string {
 	var parts []string
 
@@ -442,7 +442,7 @@ func (m *ChatModel) renderFooter() string {
 	parts = append(parts, "ctrl+c 退出")
 
 	style := lipgloss.NewStyle().Height(1).Faint(true)
-	return style.Render("agentic │ " + strings.Join(parts, " │ "))
+	return style.Render("tacode │ " + strings.Join(parts, " │ "))
 }
 
 // formatChars 格式化字符数（<1000 原样，>=1000 显示 "1.2k"）。
