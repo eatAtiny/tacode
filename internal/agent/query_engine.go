@@ -24,8 +24,8 @@ import (
 //	步骤 2: 自动压缩检查 — 上下文超过阈值时压缩旧消息
 //	步骤 3: 构建 System/User Prompt — 组合 ReAct 提示词 + 工具描述
 //	步骤 4: 启动 queryLoop — 获取 event channel，开始异步生成器
-//	步骤 5: 消费事件 — 从 channel 实时读取事件并转发到 UI + EventStore
-//	步骤 6: 返回最终结果 — 将 final answer + 完整消息数组返回给 Runner
+//	步骤 5-6: 消费事件 + 返回最终结果 — 委派给 dispatch
+//	          （逐事件转发 UI + EventStore，聚合 final answer 与完整消息数组）
 //
 // 设计：
 //   - 分离关注点：queryLoop 可独立测试和复用
@@ -122,20 +122,39 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 	})
 
 	// ═══════════════════════════════════════════════════════
-	// 步骤 5: 消费事件（实时转发到 UI + EventStore）
+	// 步骤 5-6: 消费事件 + 返回最终结果（已抽取到 dispatch）
 	// ═══════════════════════════════════════════════════════
-	// 事件类型和对应的处理：
-	//   - think      → UI.OnThink()      显示思考状态
-	//   - delta      → UI.OnDelta()      流式输出增量文本
-	//   - tool_call  → EventStore + UI   记录工具调用 + 显示框线
-	//   - tool_result→ EventStore + UI   记录执行结果 + 显示结果框
-	//   - permission → UI.ConfirmPermission()  阻塞等待用户确认
-	//   - continue   → UI.OnContinue()   显示继续推理
-	//   - final      → UI.OnFinal()      渲染最终回答（Markdown）
-	//   - error      → UI.OnError()      显示错误并返回
-	var finalAnswer string
-	var finalMessages []llm.ChatMessage // 查询结束后的完整消息数组（跨轮累积）
+	return r.dispatch(ctx, eventChan, round, inputForward)
+}
 
+// dispatch 消费 queryLoop 的事件流，转发到 UI + EventStore，并聚合最终结果。
+//
+// 四种收束情形全部表达为普通控制流，无需结果 struct：
+//   - 继续消费：循环体自然结束本次迭代
+//   - 收到 Final：写入命名返回值，channel 关闭后随 range 退出
+//   - 静默取消：LoopError 分支内返回 ("", nil, nil)
+//   - 真实错误：LoopError 分支内返回真实 error
+//
+// 事件类型和对应的处理：
+//   - think      → UI.OnThink()      显示思考状态
+//   - delta      → UI.OnDelta()      流式输出增量文本
+//   - tool_call  → EventStore + UI   记录工具调用 + 显示框线
+//   - tool_result→ EventStore + UI   记录执行结果 + 显示结果框
+//   - permission → UI.ConfirmPermission()  阻塞等待用户确认
+//   - continue   → UI.OnContinue()   显示继续推理
+//   - final      → UI.OnFinal()      渲染最终回答（Markdown）
+//   - error      → UI.OnError()      显示错误并返回
+//
+// 返回：
+//   - finalAnswer: 最终回答文本（跨轮累积用）
+//   - finalMessages: 查询结束后的完整消息数组（跨轮累积用）
+//   - err: 真实错误；("", nil, nil) 表示 ctx 主动取消（静默，非错误）
+func (r *Runner) dispatch(
+	ctx context.Context,
+	eventChan <-chan QueryEvent,
+	round int,
+	inputForward <-chan string,
+) (finalAnswer string, finalMessages []llm.ChatMessage, err error) {
 	for event := range eventChan {
 		switch event.Type {
 		case QueryEventThink:
@@ -222,8 +241,5 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 		}
 	}
 
-	// ═══════════════════════════════════════════════════════
-	// 步骤 6: 返回最终结果
-	// ═══════════════════════════════════════════════════════
 	return finalAnswer, finalMessages, nil
 }
