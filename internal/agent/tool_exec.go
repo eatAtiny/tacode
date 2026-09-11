@@ -29,8 +29,7 @@ import (
 //   - false: 发生错误，需要退出
 func (lc *queryLoopContext) executeToolCalls(toolCalls []llm.ToolCall, iter int) bool {
 	// yield: 工具调用请求（含完整 toolCalls 列表和 token 统计）。
-	lc.events <- QueryEvent{
-		Type:         QueryEventToolCall,
+	lc.events <- ToolCallEvent{
 		ToolCalls:    toolCalls,
 		Iteration:    iter + 1,
 		InputTokens:  lc.lastInputTokens,
@@ -128,8 +127,7 @@ func (lc *queryLoopContext) injectInterruptNotice(tc llm.ToolCall, iter int, cmd
 		Role:    "user",
 		Content: notice,
 	})
-	lc.events <- QueryEvent{
-		Type:       QueryEventToolResult,
+	lc.events <- ToolResultEvent{
 		ToolName:   tc.Name,
 		ToolResult: notice,
 		IsError:    true,
@@ -237,8 +235,7 @@ func (lc *queryLoopContext) executeConcurrentTools(toolCalls []llm.ToolCall, ite
 	for i, tc := range toolCalls {
 		r := results[i]
 
-		lc.events <- QueryEvent{
-			Type:       QueryEventToolResult,
+		lc.events <- ToolResultEvent{
 			ToolName:   tc.Name,
 			ToolResult: r.result,
 			IsError:    r.isError,
@@ -336,8 +333,7 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 	lc.toolRegistry.AfterHooks(tc.Name, tc.Arguments, result, execErr)
 
 	// ── 子步骤 7: yield 工具执行结果 ──
-	lc.events <- QueryEvent{
-		Type:       QueryEventToolResult,
+	lc.events <- ToolResultEvent{
 		ToolName:   tc.Name,
 		ToolResult: result,
 		IsError:    execErr != nil,
@@ -391,13 +387,12 @@ func (lc *queryLoopContext) checkToolPermission(tc llm.ToolCall, t tool.Tool, it
 
 	// ── 需要确认 ──
 	ch := make(chan bool, 1)
-	lc.events <- QueryEvent{
-		Type:             QueryEventPermission,
-		PermissionTool:   tc.Name,
-		PermissionArgs:   tc.Arguments,
-		PermissionReason: perm.Reason,
-		PermissionCh:     ch,
-		Iteration:        iter + 1,
+	lc.events <- PermissionRequest{
+		Tool:      tc.Name,
+		Args:      tc.Arguments,
+		Reason:    perm.Reason,
+		Reply:     ch,
+		Iteration: iter + 1,
 	}
 
 	// 阻塞等待用户确认。

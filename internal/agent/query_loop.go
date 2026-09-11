@@ -262,8 +262,7 @@ func (lc *queryLoopContext) prepareIfNeeded(iter int) bool {
 	lc.messages = lc.compactor.Prepare(lc.messages, lc.activeRequest)
 	if len(lc.messages) != before {
 		// yield: 压缩事件（供 UI 提示）。
-		lc.events <- QueryEvent{
-			Type:      QueryEventThink,
+		lc.events <- ThinkEvent{
 			Content:   "🗜️ 上下文接近上限，正在压缩...",
 			Iteration: iter + 1,
 		}
@@ -298,8 +297,7 @@ func (lc *queryLoopContext) hasCompactRequest(toolCalls []llm.ToolCall) bool {
 //   - ok: 是否成功
 func (lc *queryLoopContext) callLLMStream(iter int) (string, []llm.ToolCall, bool) {
 	// yield: 思考中。
-	lc.events <- QueryEvent{
-		Type:      QueryEventThink,
+	lc.events <- ThinkEvent{
 		Iteration: iter + 1,
 	}
 
@@ -340,8 +338,7 @@ func (lc *queryLoopContext) drainStream(streamChan <-chan llm.StreamEvent, iter 
 		case llm.StreamEventDelta:
 			// 增量文本：追加到 fullContent 并实时 yield 给上层。
 			*fullContent += streamEvent.Content
-			lc.events <- QueryEvent{
-				Type:         QueryEventDelta,
+			lc.events <- DeltaEvent{
 				Content:      streamEvent.Content,
 				Iteration:    iter + 1,
 				InputTokens:  streamEvent.InputTokens,
@@ -445,8 +442,7 @@ func (lc *queryLoopContext) generateFinalSummary() {
 	// yield: 思考中（总结轮）。与 callLLMStream 开头的 Think 对齐：
 	// inline UI 依赖 Think 重置流式状态（streamed），否则上一轮迭代的 delta
 	// 会让 final 的 glamour 重印分支被跳过，总结文本不上屏。
-	lc.events <- QueryEvent{
-		Type:      QueryEventThink,
+	lc.events <- ThinkEvent{
 		Iteration: lc.maxIter,
 	}
 
@@ -482,18 +478,16 @@ func (lc *queryLoopContext) generateFinalSummary() {
 
 // yieldError yield 错误事件（通过 event channel 发送给上层）。
 func (lc *queryLoopContext) yieldError(content string, err error) {
-	lc.events <- QueryEvent{
-		Type:    QueryEventError,
+	lc.events <- LoopError{
 		Content: content,
-		Error:   err,
+		Err:     err,
 	}
 }
 
 // yieldFinal yield 最终回答事件（通过 event channel 发送给上层）。
 // 包含完整的 token 统计和查询结束后的完整消息数组（跨轮累积用）。
 func (lc *queryLoopContext) yieldFinal(content string, iter int) {
-	lc.events <- QueryEvent{
-		Type:         QueryEventFinal,
+	lc.events <- FinalEvent{
 		Content:      content,
 		Iteration:    iter,
 		InputTokens:  lc.totalInputTokens,
@@ -505,8 +499,7 @@ func (lc *queryLoopContext) yieldFinal(content string, iter int) {
 
 // yieldToolError yield 工具错误事件并推入 tool 消息到历史。
 func (lc *queryLoopContext) yieldToolError(tc llm.ToolCall, errMsg string, iter int) {
-	lc.events <- QueryEvent{
-		Type:       QueryEventToolResult,
+	lc.events <- ToolResultEvent{
 		ToolName:   tc.Name,
 		ToolResult: errMsg,
 		IsError:    true,
@@ -523,8 +516,7 @@ func (lc *queryLoopContext) yieldToolError(tc llm.ToolCall, errMsg string, iter 
 // yieldContinue yield 继续推理事件（通过 event channel 发送给上层）。
 // 包含当前累计的 token 统计。
 func (lc *queryLoopContext) yieldContinue(iter int) {
-	lc.events <- QueryEvent{
-		Type:         QueryEventContinue,
+	lc.events <- ContinueEvent{
 		Iteration:    iter,
 		InputTokens:  lc.totalInputTokens,
 		OutputTokens: lc.totalOutputTokens,

@@ -10,7 +10,7 @@ import (
 // ──────────────────────────────────────────────────────────
 // 每轮对话后的 token 统计展示
 //
-// 1. yieldFinal 的 QueryEventFinal 携带累计 input/output/total tokens
+// 1. yieldFinal 的 FinalEvent 携带累计 input/output/total tokens
 // 2. TextUI.OnFinal 把 token 转发给 OnEvent（headless/子 agent 可用）
 // ──────────────────────────────────────────────────────────
 
@@ -31,19 +31,20 @@ func TestYieldFinal_CarriesTokens(t *testing.T) {
 	default:
 	}
 	if !ok {
-		t.Fatal("expected a QueryEventFinal event")
+		t.Fatal("expected a FinalEvent event")
 	}
-	if evt.Type != QueryEventFinal {
-		t.Fatalf("expected final event, got %v", evt.Type)
+	fe, isFinal := evt.(FinalEvent)
+	if !isFinal {
+		t.Fatalf("expected final event, got %T", evt)
 	}
-	if evt.InputTokens != 100 {
-		t.Errorf("input tokens = %d, want 100", evt.InputTokens)
+	if fe.InputTokens != 100 {
+		t.Errorf("input tokens = %d, want 100", fe.InputTokens)
 	}
-	if evt.OutputTokens != 50 {
-		t.Errorf("output tokens = %d, want 50", evt.OutputTokens)
+	if fe.OutputTokens != 50 {
+		t.Errorf("output tokens = %d, want 50", fe.OutputTokens)
 	}
-	if evt.TotalTokens != 150 {
-		t.Errorf("total tokens = %d, want 150", evt.TotalTokens)
+	if fe.TotalTokens != 150 {
+		t.Errorf("total tokens = %d, want 150", fe.TotalTokens)
 	}
 }
 
