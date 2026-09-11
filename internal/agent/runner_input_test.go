@@ -50,6 +50,78 @@ func TestHandleInput_QueryRunningQueuesInput(t *testing.T) {
 	}
 }
 
+// handleInput 查询运行中（非权限确认）输入 /interrupt 应转发 inputForward，
+// 而非排队 pendingInputs——queryLoop 的 peekInterrupt 在串行工具执行间隙
+// 从 inputForward 读中断命令，排队会让 mid-loop 中断不可达。
+func TestHandleInput_QueryRunningForwardsInterrupt(t *testing.T) {
+	r := newTestRunner(t)
+	ctx := context.Background()
+
+	var (
+		queryResultCh <-chan queryResult
+		queryCancel   context.CancelFunc
+		queryRunning  bool
+		round         int
+		currentInput  string
+		inputForward  chan string
+		pendingInputs []string
+	)
+
+	// 模拟查询运行中、无权限确认（permWaiting 默认 false）。
+	queryRunning = true
+	inputForward = make(chan string, 1)
+
+	if exit := r.handleInput("/interrupt", ctx, &queryResultCh, &queryCancel, &queryRunning, &round, &currentInput, &inputForward, &pendingInputs); exit {
+		t.Fatal("不应退出")
+	}
+	if len(pendingInputs) != 0 {
+		t.Errorf("/interrupt 不应排队，pendingInputs = %v", pendingInputs)
+	}
+	select {
+	case got := <-inputForward:
+		if got != "/interrupt" {
+			t.Errorf("inputForward = %q, want /interrupt", got)
+		}
+	default:
+		t.Error("inputForward 应收到 /interrupt（mid-loop 中断转发，而非排队）")
+	}
+}
+
+// handleInput 查询运行中输入 /retry 前缀命令（含参数）同样转发 inputForward。
+func TestHandleInput_QueryRunningForwardsRetry(t *testing.T) {
+	r := newTestRunner(t)
+	ctx := context.Background()
+
+	var (
+		queryResultCh <-chan queryResult
+		queryCancel   context.CancelFunc
+		queryRunning  bool
+		round         int
+		currentInput  string
+		inputForward  chan string
+		pendingInputs []string
+	)
+
+	queryRunning = true
+	inputForward = make(chan string, 1)
+
+	retryCmd := `/retry {"command":"ls"}`
+	if exit := r.handleInput(retryCmd, ctx, &queryResultCh, &queryCancel, &queryRunning, &round, &currentInput, &inputForward, &pendingInputs); exit {
+		t.Fatal("不应退出")
+	}
+	if len(pendingInputs) != 0 {
+		t.Errorf("/retry 不应排队，pendingInputs = %v", pendingInputs)
+	}
+	select {
+	case got := <-inputForward:
+		if got != retryCmd {
+			t.Errorf("inputForward = %q, want %q", got, retryCmd)
+		}
+	default:
+		t.Error("inputForward 应收到 /retry 命令（mid-loop 转发，而非排队）")
+	}
+}
+
 // handleInput 权限确认在等（permWaiting=true）时应转发 inputForward（非阻塞）。
 func TestHandleInput_PermissionForwardsInput(t *testing.T) {
 	r := newTestRunner(t)

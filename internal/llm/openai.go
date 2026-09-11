@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"agentic/internal/config"
+	"tacode/internal/config"
 
 	openai "github.com/sashabaranov/go-openai"
 )
@@ -14,7 +14,7 @@ import (
 // 默认模型，可通过 OPENAI_MODEL 覆盖。
 const defaultModel = openai.GPT4oMini
 
-// defaultTemperature 默认采样温度（硬编码 0.2 的旧值，可通过 config 覆盖）。
+// defaultTemperature 默认采样温度（可被 config 覆盖）。
 const defaultTemperature = 0.2
 
 // unknownModelContextLimit 未识别模型的保守上下文窗口默认值（32k）。
@@ -30,13 +30,9 @@ const unknownModelContextLimit = 32_000
 //       → 返回 <-chan StreamEvent（流式事件 channel）
 //       → 内部 goroutine 读取 OpenAI 流式响应并 yield 事件
 //
-//   Extractor.Extract()
+//   Extractor.Extract() / Retriever.CompressSummaries() / Compactor 压缩摘要
 //     → llmClient.Chat(ctx, systemPrompt, userPrompt)
-//       → 返回完整文本（非流式，用于记忆提取）
-//
-//   Retriever.CompressSummaries()
-//     → llmClient.Chat(ctx, systemPrompt, userPrompt)
-//       → 返回压缩后的摘要文本
+//       → 返回完整文本（非流式，用于记忆提取/摘要压缩）
 // ──────────────────────────────────────────────────────────
 
 // OpenAIClient 对 go-openai 做一层轻量封装。
@@ -45,7 +41,7 @@ type OpenAIClient struct {
 	model        string         // 模型名称（如 gpt-4o-mini）
 	apiKey       string         // API key（余额查询复用）
 	baseURL      string         // API Base URL（余额查询 host 推导）
-	contextLimit int            // 模型上下文窗口大小（token 数），用于压缩判断
+	contextLimit int            // 模型上下文窗口大小（token 数）。预留：当前无消费方（压缩判断已改用 compactor 字符口径）
 	temperature  float64        // 采样温度，默认 0.2（可由 config 覆盖）
 }
 
@@ -59,16 +55,13 @@ func NewOpenAIClientFromEnv() (*OpenAIClient, error) {
 	}
 
 	// 默认走官方地址；如果配置了代理地址则替换。
+	// 去掉尾部斜杠后同时用于 API 网关与余额查询 host 推导
+	// （空表示未配置自定义网关，余额查询走官方地址）。
 	config := openai.DefaultConfig(apiKey)
 	baseURL := strings.TrimSpace(os.Getenv("OPENAI_BASE_URL"))
 	if baseURL != "" {
-		config.BaseURL = strings.TrimRight(baseURL, "/")
-	}
-
-	// baseURLForBalance 余额查询 host 推导用：有自定义网关才传，否则空（走官方地址）。
-	baseURLForBalance := ""
-	if baseURL != "" {
-		baseURLForBalance = strings.TrimRight(baseURL, "/")
+		baseURL = strings.TrimRight(baseURL, "/")
+		config.BaseURL = baseURL
 	}
 
 	model := strings.TrimSpace(os.Getenv("OPENAI_MODEL"))
@@ -83,7 +76,7 @@ func NewOpenAIClientFromEnv() (*OpenAIClient, error) {
 		client:       openai.NewClientWithConfig(config),
 		model:        model,
 		apiKey:       apiKey,
-		baseURL:      baseURLForBalance,
+		baseURL:      baseURL,
 		contextLimit: contextLimit,
 		temperature:  defaultTemperature,
 	}, nil
@@ -94,7 +87,7 @@ func NewOpenAIClientFromEnv() (*OpenAIClient, error) {
 // ──────────────────────────────────────────────────────────
 
 // Chat 执行一次最小对话请求（system + user），返回完整文本。
-// temperature 默认 0.2（可由 config 覆盖）。用于 Extractor 和 Retriever 的 LLM 调用。
+// temperature 默认 0.2（可由 config 覆盖）。用于 Extractor/Retriever/Compactor 的 LLM 调用。
 func (c *OpenAIClient) Chat(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
 	// 带重试的对话请求：429/5xx/网络错误自动重试（最多 defaultMaxRetries 次）。
 	resp, err := withRetry(ctx, defaultMaxRetries, func() (openai.ChatCompletionResponse, error) {
@@ -140,19 +133,11 @@ type ToolCall struct {
 	Arguments string `json:"arguments"` // JSON 格式的调用参数
 }
 
-// ChatResponse 表示 LLM 的非流式响应（ChatWithTools 返回）。
-type ChatResponse struct {
-	Content   string     // 文本内容（最终回答时非空）
-	ToolCalls []ToolCall // 工具调用请求（需要执行工具时非空）
-	Finish    bool       // true 表示不需要再调用工具，本轮结束
-}
-
 // StreamEventType 流式事件类型。
 type StreamEventType string
 
 const (
 	StreamEventDelta StreamEventType = "delta" // 增量文本（实时输出）
-	StreamEventTool  StreamEventType = "tool"  // 工具调用（预留）
 	StreamEventDone  StreamEventType = "done"  // 流式完成（含完整 toolCalls 和 token 统计）
 	StreamEventError StreamEventType = "error" // 流式错误
 )
@@ -173,75 +158,6 @@ type StreamEvent struct {
 // 流式对话（核心接口，queryLoop 使用）
 // ──────────────────────────────────────────────────────────
 
-// ChatWithTools 支持 Function Calling 的多轮对话（非流式，已较少使用）。
-//
-// messages: 完整的消息历史（system + user + assistant + tool）
-// tools: 工具定义列表（OpenAI function calling 格式）
-func (c *OpenAIClient) ChatWithTools(ctx context.Context, messages []ChatMessage, tools []openai.Tool) (*ChatResponse, error) {
-	msgs := make([]openai.ChatCompletionMessage, len(messages))
-	for i, m := range messages {
-		msgs[i] = openai.ChatCompletionMessage{
-			Role:       m.Role,
-			Content:    m.Content,
-			ToolCallID: m.ToolCallID,
-		}
-		if len(m.ToolCalls) > 0 {
-			msgs[i].ToolCalls = make([]openai.ToolCall, len(m.ToolCalls))
-			for j, tc := range m.ToolCalls {
-				msgs[i].ToolCalls[j] = openai.ToolCall{
-					ID:   tc.ID,
-					Type: openai.ToolTypeFunction,
-					Function: openai.FunctionCall{
-						Name:      tc.Name,
-						Arguments: tc.Arguments,
-					},
-				}
-			}
-		}
-	}
-
-	req := openai.ChatCompletionRequest{
-		Model:       c.model,
-		Messages:    msgs,
-		Temperature: float32(c.temperature),
-	}
-	if len(tools) > 0 {
-		req.Tools = tools
-	}
-
-	// 带重试的对话请求：429/5xx/网络错误自动重试（最多 defaultMaxRetries 次）。
-	resp, err := withRetry(ctx, defaultMaxRetries, func() (openai.ChatCompletionResponse, error) {
-		return c.client.CreateChatCompletion(ctx, req)
-	})
-	if err != nil {
-		return nil, fmt.Errorf("openai chat completion failed: %w", err)
-	}
-	if len(resp.Choices) == 0 {
-		return nil, fmt.Errorf("empty choices")
-	}
-
-	choice := resp.Choices[0]
-	result := &ChatResponse{
-		Content: strings.TrimSpace(choice.Message.Content),
-	}
-
-	if len(choice.Message.ToolCalls) > 0 {
-		result.ToolCalls = make([]ToolCall, len(choice.Message.ToolCalls))
-		for i, tc := range choice.Message.ToolCalls {
-			result.ToolCalls[i] = ToolCall{
-				ID:        tc.ID,
-				Name:      tc.Function.Name,
-				Arguments: tc.Function.Arguments,
-			}
-		}
-		result.Finish = false
-	} else {
-		result.Finish = true
-	}
-
-	return result, nil
-}
-
 // Model 返回当前使用的模型名称。
 func (c *OpenAIClient) Model() string {
 	return c.model
@@ -255,9 +171,8 @@ func (c *OpenAIClient) BaseURL() string { return c.baseURL }
 
 // ChatWithToolsStream 支持 Function Calling 的流式对话。
 //
-// 这是 queryLoop 调用的核心接口。与 ChatWithTools 的区别：
-//   - ChatWithTools：等待完整响应后一次性返回
-//   - ChatWithToolsStream：实时通过 channel 推送增量事件（流式）
+// 这是 queryLoop 调用的核心接口：实时通过 channel 推送增量事件，
+// 不等待完整响应。
 //
 // 调用链：
 //
@@ -443,14 +358,9 @@ func (c *OpenAIClient) ChatWithToolsStream(ctx context.Context, messages []ChatM
 }
 
 // ContextLimit 返回模型的上下文窗口大小（token 数）。
-// 用于 queryLoop 的上下文压缩判断（80% 阈值）。
+// 预留接口：当前无消费方（压缩判断已改用 compactor 字符口径）。
 func (c *OpenAIClient) ContextLimit() int {
 	return c.contextLimit
-}
-
-// Temperature 返回当前采样温度。
-func (c *OpenAIClient) Temperature() float64 {
-	return c.temperature
 }
 
 // SetConfig 应用 config 中的 LLM 相关设置。
@@ -473,10 +383,14 @@ func (c *OpenAIClient) SetConfig(cfg *config.Config) {
 // 未识别的模型使用保守默认值（32k）——乐观假设大窗口会导致压缩过晚，
 // 保守值牺牲一点容量换取安全（配合 config 的 context_limit 可精确覆盖）。
 //
-// 支持的模型家族：
-//   - MiMo (小米): mimo-v2.5-pro → 1M, mimo-v2-omni → 256k
-//   - OpenAI: gpt-4o-mini → 128k, gpt-4-turbo → 128k, gpt-4 → 8k
-//   - Anthropic: claude-sonnet-4 → 200k, claude-opus-4 → 200k
+// 支持的模型家族（子串匹配，具体型号由同族分支覆盖）：
+//   - MiMo (小米): mimo-v2.5* / mimo-v2-pro → 1M, 其余 mimo → 256k
+//   - OpenAI: gpt-4o* → 128k, gpt-4-turbo → 128k, gpt-4-32k → 32k,
+//     gpt-4 → 8k, gpt-3.5-turbo* → 16k
+//   - Anthropic: claude* → 200k
+//   - DeepSeek: deepseek-v4-flash → 1M, 其余 deepseek → 128k
+//
+// 分支顺序敏感：特异型号分支必须先于家族兜底分支（子串包含关系）。
 func inferContextLimit(model string) int {
 	// 环境变量覆盖优先。
 	if v := strings.TrimSpace(os.Getenv("OPENAI_CONTEXT_LIMIT")); v != "" {
@@ -488,22 +402,16 @@ func inferContextLimit(model string) int {
 
 	model = strings.ToLower(model)
 
-	// MiMo 模型（小米）。
+	// MiMo 模型（小米）。注意 mimo-v2-pro 不含 "mimo-v2.5" 子串，需单列。
 	switch {
-	case strings.Contains(model, "mimo-v2.5-pro"), strings.Contains(model, "mimo-v2-pro"):
+	case strings.Contains(model, "mimo-v2-pro"):
 		return 1_000_000 // 1M
 	case strings.Contains(model, "mimo-v2.5"):
 		return 1_000_000 // 1M
-	case strings.Contains(model, "mimo-v2-omni"):
-		return 256_000
-	case strings.Contains(model, "mimo-v2-flash"):
-		return 256_000
 	case strings.Contains(model, "mimo"):
 		return 256_000
 
 	// OpenAI 模型。
-	case strings.Contains(model, "gpt-4o-mini"):
-		return 128_000
 	case strings.Contains(model, "gpt-4o"):
 		return 128_000
 	case strings.Contains(model, "gpt-4-turbo"):
@@ -512,18 +420,10 @@ func inferContextLimit(model string) int {
 		return 32_000
 	case strings.Contains(model, "gpt-4"):
 		return 8_192
-	case strings.Contains(model, "gpt-3.5-turbo-16k"):
-		return 16_384
 	case strings.Contains(model, "gpt-3.5-turbo"):
 		return 16_384
 
 	// Anthropic 模型。
-	case strings.Contains(model, "claude-3.5-sonnet"), strings.Contains(model, "claude-sonnet-4"):
-		return 200_000
-	case strings.Contains(model, "claude-3-opus"), strings.Contains(model, "claude-opus-4"):
-		return 200_000
-	case strings.Contains(model, "claude-3-haiku"), strings.Contains(model, "claude-haiku-4"):
-		return 200_000
 	case strings.Contains(model, "claude"):
 		return 200_000
 

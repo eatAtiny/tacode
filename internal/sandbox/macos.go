@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
@@ -35,7 +34,7 @@ func newMacOSSandbox(cfg Config) *MacOSSandbox {
 		s.workDir, _ = os.Getwd()
 	}
 	// 生成临时 profile（Close 时删除）。
-	if f, err := os.CreateTemp("", "agentic-sandbox-*.sb"); err == nil {
+	if f, err := os.CreateTemp("", "tacode-sandbox-*.sb"); err == nil {
 		fmt.Fprint(f, s.buildProfile())
 		f.Close()
 		s.profilePath = f.Name()
@@ -89,6 +88,3 @@ func (s *MacOSSandbox) Close() error {
 
 // 确保沙箱在 darwin 下可用（编译期断言）。
 var _ Sandbox = (*MacOSSandbox)(nil)
-
-// filepath 引用（避免误删 import）。
-var _ = filepath.Join

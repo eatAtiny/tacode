@@ -4,8 +4,8 @@ import (
 	"sync"
 	"testing"
 
-	"agentic/internal/llm"
-	"agentic/internal/ui/text"
+	"tacode/internal/llm"
+	"tacode/internal/ui/text"
 )
 
 func TestFormatBalanceLine_CNY(t *testing.T) {

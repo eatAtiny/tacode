@@ -22,7 +22,7 @@ import (
 	"io"
 	"strings"
 
-	"agentic/internal/tool"
+	"tacode/internal/tool"
 
 	mcpgo "github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -39,12 +39,11 @@ type ServerConfig struct {
 type serverConn struct {
 	cfg    ServerConfig
 	client *mcpgo.Client
-	tools  []tool.Tool // 该 server 暴露的工具适配器
 }
 
 // Manager 管理 MCP server 子进程和工具适配。
 type Manager struct {
-	conns []*serverConn
+	conns []*serverConn // 已连接的 server 列表（非并发安全：当前 main 顺序连接使用）
 }
 
 // New 创建 Manager（不启动任何 server）。
@@ -75,7 +74,7 @@ func (m *Manager) Connect(ctx context.Context, cfg ServerConfig) ([]tool.Tool, e
 	// ── 握手（必须最先调用） ──
 	initReq := mcp.InitializeRequest{}
 	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	initReq.Params.ClientInfo = mcp.Implementation{Name: "agentic", Version: "0.1"}
+	initReq.Params.ClientInfo = mcp.Implementation{Name: "tacode", Version: "0.1"}
 	if _, err := c.Initialize(ctx, initReq); err != nil {
 		c.Close()
 		return nil, fmt.Errorf("initialize mcp server %s: %w", name, err)
@@ -100,17 +99,8 @@ func (m *Manager) Connect(ctx context.Context, cfg ServerConfig) ([]tool.Tool, e
 		})
 	}
 
-	m.conns = append(m.conns, &serverConn{cfg: cfg, client: c, tools: adapters})
+	m.conns = append(m.conns, &serverConn{cfg: cfg, client: c})
 	return adapters, nil
-}
-
-// Tools 返回所有已连接的 MCP 工具适配器。
-func (m *Manager) Tools() []tool.Tool {
-	var all []tool.Tool
-	for _, conn := range m.conns {
-		all = append(all, conn.tools...)
-	}
-	return all
 }
 
 // Close 关闭所有 server 子进程。

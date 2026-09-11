@@ -22,10 +22,7 @@ func TestMigrateLegacyMemory_FromSessionDirs(t *testing.T) {
 	// 构造一个带旧记忆的会话目录。
 	sessionDir := filepath.Join(sessionsRoot, "sess-1")
 	os.MkdirAll(filepath.Join(sessionDir, "memory"), 0o755)
-	sessStore, err := NewMemoryStore(sessionDir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	sessStore := NewMemoryStore(sessionDir)
 	// project 类 + user 类各一条。
 	if err := sessStore.SaveEntry(MemoryEntry{
 		Name: "old-project-mem", Type: "project", Importance: 3, Content: "p",
@@ -38,8 +35,8 @@ func TestMigrateLegacyMemory_FromSessionDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	globalStore, _ := NewMemoryStore(filepath.Join(dataRoot, "global-memory"))
-	projectStore, _ := NewMemoryStore(filepath.Join(dataRoot, "project-memory"))
+	globalStore := NewMemoryStore(filepath.Join(dataRoot, "global-memory"))
+	projectStore := NewMemoryStore(filepath.Join(dataRoot, "project-memory"))
 
 	n := MigrateLegacyMemory(globalStore, projectStore, sessionsRoot)
 	if n != 2 {
@@ -65,14 +62,14 @@ func TestMigrateLegacyMemory_FromLegacyGlobalDir(t *testing.T) {
 	os.MkdirAll(sessionsRoot, 0o755)
 
 	// 旧全局目录里混着 project 类（应移到项目级）。
-	globalStore, _ := NewMemoryStore(filepath.Join(dataRoot, "global-memory"))
+	globalStore := NewMemoryStore(filepath.Join(dataRoot, "global-memory"))
 	if err := globalStore.SaveEntry(MemoryEntry{
 		Name: "legacy-project", Type: "project", Importance: 3, Content: "p",
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	projectStore, _ := NewMemoryStore(filepath.Join(dataRoot, "project-memory"))
+	projectStore := NewMemoryStore(filepath.Join(dataRoot, "project-memory"))
 
 	n := MigrateLegacyMemory(globalStore, projectStore, sessionsRoot)
 	if n != 1 {
@@ -92,11 +89,11 @@ func TestMigrateLegacyMemory_Idempotent(t *testing.T) {
 
 	sessionDir := filepath.Join(sessionsRoot, "sess-1")
 	os.MkdirAll(filepath.Join(sessionDir, "memory"), 0o755)
-	sessStore, _ := NewMemoryStore(sessionDir)
+	sessStore := NewMemoryStore(sessionDir)
 	_ = sessStore.SaveEntry(MemoryEntry{Name: "m1", Type: "project", Importance: 3, Content: "x"})
 
-	globalStore, _ := NewMemoryStore(filepath.Join(dataRoot, "global-memory"))
-	projectStore, _ := NewMemoryStore(filepath.Join(dataRoot, "project-memory"))
+	globalStore := NewMemoryStore(filepath.Join(dataRoot, "global-memory"))
+	projectStore := NewMemoryStore(filepath.Join(dataRoot, "project-memory"))
 
 	// 第一次迁移。
 	n1 := MigrateLegacyMemory(globalStore, projectStore, sessionsRoot)

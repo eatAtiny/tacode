@@ -3,8 +3,8 @@ package ui
 import (
 	"testing"
 
-	"agentic/internal/ui/bubble"
-	"agentic/internal/ui/text"
+	"tacode/internal/ui/bubble"
+	"tacode/internal/ui/text"
 )
 
 // TestImplementsUIInterface 验证 BubbleUI 实现了 UI 接口。

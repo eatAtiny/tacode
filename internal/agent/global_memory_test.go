@@ -8,9 +8,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"agentic/internal/llm"
-	"agentic/internal/memory"
-	"agentic/internal/ui/text"
+	"tacode/internal/llm"
+	"tacode/internal/memory"
+	"tacode/internal/ui/text"
 )
 
 // ──────────────────────────────────────────────────────────
@@ -53,11 +53,11 @@ func TestExtractMemory_RoutesGlobalAndProject(t *testing.T) {
 	globalDir := t.TempDir()
 	projectDir := t.TempDir()
 
-	history, _ := memory.NewHistoryStore(sessionDir)
-	summary, _ := memory.NewSummaryStore(sessionDir)
-	sessionMem, _ := memory.NewMemoryStore(sessionDir)
-	globalMem, _ := memory.NewMemoryStore(globalDir)
-	projectMem, _ := memory.NewMemoryStore(projectDir)
+	history := memory.NewHistoryStore(sessionDir)
+	summary := memory.NewSummaryStore(sessionDir)
+	sessionMem := memory.NewMemoryStore(sessionDir)
+	globalMem := memory.NewMemoryStore(globalDir)
+	projectMem := memory.NewMemoryStore(projectDir)
 	events := memory.NewEventStore(sessionDir)
 	retriever := memory.NewRetriever(history, summary, sessionMem, events)
 
@@ -70,16 +70,16 @@ func TestExtractMemory_RoutesGlobalAndProject(t *testing.T) {
 	})
 
 	r := &Runner{
-		llm:       client,
-		history:   history,
-		summary:   summary,
-		memStore:  sessionMem,
-		globalMem: globalMem,
+		llm:        client,
+		history:    history,
+		summary:    summary,
+		memStore:   sessionMem,
+		globalMem:  globalMem,
 		projectMem: projectMem,
-		events:    events,
-		retriever: retriever,
-		extractor: memory.NewExtractor(client),
-		ui:        text.NewTextUI(),
+		events:     events,
+		retriever:  retriever,
+		extractor:  memory.NewExtractor(client),
+		ui:         text.NewTextUI(),
 	}
 
 	r.extractMemory(context.Background(), 1, "帮我写代码", "好的")
@@ -107,9 +107,9 @@ func TestExtractMemory_RoutesGlobalAndProject(t *testing.T) {
 func TestExtractMemory_NoStores_AllInSession(t *testing.T) {
 	// 未启用全局/项目 store：所有记忆写入会话 store（保持旧行为）。
 	sessionDir := t.TempDir()
-	history, _ := memory.NewHistoryStore(sessionDir)
-	summary, _ := memory.NewSummaryStore(sessionDir)
-	sessionMem, _ := memory.NewMemoryStore(sessionDir)
+	history := memory.NewHistoryStore(sessionDir)
+	summary := memory.NewSummaryStore(sessionDir)
+	sessionMem := memory.NewMemoryStore(sessionDir)
 	events := memory.NewEventStore(sessionDir)
 	retriever := memory.NewRetriever(history, summary, sessionMem, events)
 

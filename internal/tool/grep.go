@@ -23,7 +23,7 @@ func NewGrepTool() *GrepTool { return &GrepTool{} }
 
 // ── Tool 接口：基础方法 ──
 
-func (t *GrepTool) Name() string    { return "grep" }
+func (t *GrepTool) Name() string      { return "grep" }
 func (t *GrepTool) Aliases() []string { return nil }
 
 func (t *GrepTool) Description() string {
@@ -64,7 +64,7 @@ func (t *GrepTool) Execute(args string) (string, error) {
 		CaseSensitive bool   `json:"case_sensitive"`
 	}
 	if err := parseArgs(args, &params); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
+		return "", err
 	}
 
 	if strings.TrimSpace(params.Pattern) == "" {
@@ -210,6 +210,12 @@ func searchFile(path string, re *regexp.Regexp) []string {
 		if re.MatchString(line) {
 			results = append(results, fmt.Sprintf("%s:%d: %s", path, lineNum, strings.TrimSpace(line)))
 		}
+	}
+	// bufio.Scanner 默认 64KB 行上限：单行超限（如压缩后的长行）时 Scan 提前结束。
+	// 若不检查 Err，整个文件会被静默丢弃（匹配可能漏报）。此处追加显式中断提示，
+	// 让 LLM 知道该文件未被完整扫描。
+	if err := scanner.Err(); err != nil {
+		results = append(results, fmt.Sprintf("%s: （该文件扫描中断: %v）", path, err))
 	}
 	return results
 }

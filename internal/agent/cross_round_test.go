@@ -10,9 +10,9 @@ import (
 	"sync"
 	"testing"
 
-	"agentic/internal/memory"
-	"agentic/internal/tool"
-	"agentic/internal/ui/text"
+	"tacode/internal/memory"
+	"tacode/internal/tool"
+	"tacode/internal/ui/text"
 )
 
 // newTestSSEServer 启动一个返回固定 SSE 流的 mock server。
@@ -46,9 +46,9 @@ func TestQueryEngine_CrossRoundAccumulation(t *testing.T) {
 
 	// 组装 Runner 所需的最小依赖。
 	dir := t.TempDir()
-	history, _ := memory.NewHistoryStore(dir)
-	summary, _ := memory.NewSummaryStore(dir)
-	memStore, _ := memory.NewMemoryStore(dir)
+	history := memory.NewHistoryStore(dir)
+	summary := memory.NewSummaryStore(dir)
+	memStore := memory.NewMemoryStore(dir)
 	events := memory.NewEventStore(dir)
 	extractor := memory.NewExtractor(client)
 	retriever := memory.NewRetriever(history, summary, memStore, events)
@@ -190,9 +190,9 @@ func TestQueryEngine_CancelledSilencesError(t *testing.T) {
 	client := newLLMClientViaEnv(t, srv.URL)
 
 	dir := t.TempDir()
-	history, _ := memory.NewHistoryStore(dir)
-	summary, _ := memory.NewSummaryStore(dir)
-	memStore, _ := memory.NewMemoryStore(dir)
+	history := memory.NewHistoryStore(dir)
+	summary := memory.NewSummaryStore(dir)
+	memStore := memory.NewMemoryStore(dir)
 	events := memory.NewEventStore(dir)
 	extractor := memory.NewExtractor(client)
 	retriever := memory.NewRetriever(history, summary, memStore, events)

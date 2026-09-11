@@ -9,7 +9,7 @@
 //	queryLoop.executeSingleTool() → tool.Execute(args)   ← 执行工具
 //
 // 添加新工具的步骤：
-//  1. 实现 Tool 接口（6 个方法）
+//  1. 实现 Tool 接口（10 个方法）
 //  2. 在 main.go 中调用 Registry.Register(newTool)
 package tool
 
@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	openai "github.com/sashabaranov/go-openai"
@@ -26,9 +27,10 @@ import (
 
 // parseArgs 将 JSON 字符串参数解析到目标结构体。
 // 工具实现中使用此函数解析 Execute(args) 的 args 参数。
+// 解析失败返回带统一前缀的完整错误，调用方无需再包装。
 func parseArgs(raw string, dst any) error {
 	if err := json.Unmarshal([]byte(raw), dst); err != nil {
-		return fmt.Errorf("invalid JSON args: %w", err)
+		return fmt.Errorf("解析参数失败: %w", err)
 	}
 	return nil
 }
@@ -49,7 +51,7 @@ type PermissionResult struct {
 }
 
 // ──────────────────────────────────────────────────────────
-// Tool 接口（重构后 — 6 个方法）
+// Tool 接口（重构后 — 10 个方法）
 // ──────────────────────────────────────────────────────────
 
 // Tool 定义一个可被 Agent 调用的工具。
@@ -360,13 +362,28 @@ func (r *Registry) AfterHooks(toolName string, args string, result string, execE
 	}
 }
 
+// sortedTools 返回按名称字典序排列的工具列表。
+//
+// Registry 的清单类输出（Names/Descriptions/FunctionDefinitions）
+// 必须顺序稳定：直接 range map 顺序随机，会导致 system prompt
+// 中工具段落每轮字节不同，击穿前缀缓存。
+func (r *Registry) sortedTools() []Tool {
+	ts := make([]Tool, 0, len(r.tools))
+	for _, t := range r.tools {
+		ts = append(ts, t)
+	}
+	sort.Slice(ts, func(i, j int) bool { return ts[i].Name() < ts[j].Name() })
+	return ts
+}
+
 // FunctionDefinitions 生成 OpenAI function calling 所需的工具定义列表。
 //
 // 调用时机：QueryEngine 步骤 3（构建 prompt 时）。
 // 生成的 []openai.Tool 作为 ChatWithToolsStream 的 tools 参数传入。
+// 按名称字典序排列，保证 tools 参数跨轮字节稳定。
 func (r *Registry) FunctionDefinitions() []openai.Tool {
 	defs := make([]openai.Tool, 0, len(r.tools))
-	for _, t := range r.tools {
+	for _, t := range r.sortedTools() {
 		defs = append(defs, openai.Tool{
 			Type: openai.ToolTypeFunction,
 			Function: &openai.FunctionDefinition{
@@ -379,31 +396,33 @@ func (r *Registry) FunctionDefinitions() []openai.Tool {
 	return defs
 }
 
-// Names 返回所有已注册工具的名称列表。
+// Names 返回所有已注册工具的名称列表，按名称字典序排列。
 func (r *Registry) Names() []string {
 	names := make([]string, 0, len(r.tools))
 	for name := range r.tools {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
 
 // Descriptions 返回所有工具的可读描述，用于 prompt 拼接。
+// 清单按名称字典序输出（保证 system prompt 跨轮字节稳定，命中前缀缓存）。
 //
 // 调用时机：BuildReActSystemPrompt（生成 system prompt 中的 "## 可用工具" 部分）。
 //
 // 输出格式：
 //
-//	- shell: 执行 bash 命令并返回输出结果
-//	  参数: {"type":"object","properties":{"command":{"type":"string"}},...}
-//	- file: 读取或写入文件
-//	  参数: {"type":"object","properties":{"action":{"type":"string"},...},...}
+//   - shell: 执行 bash 命令并返回输出结果
+//     参数: {"type":"object","properties":{"command":{"type":"string"}},...}
+//   - file: 读取或写入文件
+//     参数: {"type":"object","properties":{"action":{"type":"string"},...},...}
 func (r *Registry) Descriptions() string {
 	if len(r.tools) == 0 {
 		return "(无可用工具)"
 	}
 	var s string
-	for _, t := range r.tools {
+	for _, t := range r.sortedTools() {
 		params, _ := json.Marshal(t.Parameters())
 		s += fmt.Sprintf("- %s: %s\n  参数: %s\n", t.Name(), t.Description(), string(params))
 	}

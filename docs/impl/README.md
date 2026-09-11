@@ -1,4 +1,4 @@
-# Agentic 实现文档
+# Tacode 实现文档
 
 Go ReAct Agent 的设计与实现文档。参照 Claude Code 的设计模式，用 Go 语言实现。
 
@@ -19,8 +19,8 @@ Claude Code 参考文档在 `docs/learn/`，实现文档在 `docs/impl/`：
 |------------------|---------|
 | 01-agent-loop.md | `internal/agent/runner.go` + `query_engine.go` + `query_loop.go` |
 | 02-tools.md | `internal/tool/tool.go` + 5 个工具文件 |
-| (N/A) | `internal/memory/` — 三层记忆（Agentic 特有） |
-| (N/A) | `internal/ui/` — 可插拔 UI（Agentic 特有） |
+| (N/A) | `internal/memory/` — 三层记忆（Tacode 特有） |
+| (N/A) | `internal/ui/` — 可插拔 UI（Tacode 特有） |
 
 ## 项目结构
 

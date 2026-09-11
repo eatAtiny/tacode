@@ -22,7 +22,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
-	"agentic/internal/session"
+	"tacode/internal/session"
 )
 
 // ──────────────────────────────────────────────────────────
@@ -79,21 +79,16 @@ type (
 	chatWelcomeMsg struct{ content string }
 	// chatBalanceMsg 账户余额（ShowBalance）。
 	chatBalanceMsg struct{ balance string }
-	// chatContextMsg 上下文窗口占用（UpdateContext）。
-	chatContextMsg struct{ usedTokens, contextLimit int }
+	// chatContextMsg 上下文窗口占用（UpdateContext，字符口径）。
+	chatContextMsg struct{ usedChars, contextLimit int }
 	// chatHistoryMsg 会话历史（ShowHistory，切换会话后加载）。
-	chatHistoryMsg struct{ events []chatHistoryEvent }
-	// chatHistoryEvent 历史中的一条记录（已渲染文本）。
-	chatHistoryEvent struct {
-		text string // 渲染后的对话行（用户消息/助手回答/工具框线）
-	}
+	// events 为已渲染的历史文本行（用户消息/助手回答/工具框线）。
+	chatHistoryMsg struct{ events []string }
 	// chatPickerMsg 启动会话选择器（/list）。
 	chatPickerMsg struct {
 		sessions []session.SessionMeta
 		activeID string
 	}
-	// chatPickerResultMsg 选择器结果（选中会话 ID 或空=取消）。
-	chatPickerResultMsg struct{ selected string }
 	// chatPermissionMsg 权限确认弹层（ConfirmPermission 触发，工具执行前）。
 	chatPermissionMsg struct{ tool, args, reason string }
 	// chatPermissionDoneMsg 权限确认完成（用户已输入 y/N，清除弹层）。
@@ -132,8 +127,8 @@ type ChatModel struct {
 
 	// balance 账户余额展示文本（footer 状态栏显示，空=不显示）。
 	balance string
-	// contextUsedTokens 上下文已用 token 数（footer 显示）。
-	contextUsedTokens int
+	// contextUsedChars 上下文已用字符数（footer 显示）。
+	contextUsedChars int
 	// contextLimit 模型上下文窗口大小（footer 显示，0=未知）。
 	contextLimit int
 
@@ -302,27 +297,20 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// 余额进 footer 状态栏（常驻显示），不再追加对话行。
 		m.balance = v.balance
 	case chatContextMsg:
-		// 上下文占用进 footer（已用/总/百分比）。
-		m.contextUsedTokens = v.usedTokens
+		// 上下文占用进 footer（已用/总/百分比，字符口径）。
+		m.contextUsedChars = v.usedChars
 		m.contextLimit = v.contextLimit
 	case chatHistoryMsg:
 		// 切换会话后加载历史：先清空对话区，再经 commit 单次打印整段历史
 		// （多段合并为一个 tea.Println，保序——tea.Batch 内 Cmd 并发不保序）。
 		m.lines = nil
 		// 防御性冲刷：历史行接在流式残余之后（正常场景加载历史时无进行中流式）。
-		parts := m.flushBuf()
-		for _, e := range v.events {
-			parts = append(parts, e.text)
-		}
+		parts := append(m.flushBuf(), v.events...)
 		cmds = append(cmds, m.commit(parts...))
 	case chatPickerMsg:
 		// 启动会话选择器（/list）：创建 picker 模型，进入选择模式。
 		m.picker = session.NewSessionPickerModel(v.sessions, v.activeID)
 		m.picking = true
-	case chatPickerResultMsg:
-		// 选择结果（理论不经此消息，结果走 pickerDone channel；保留兜底）。
-		m.picking = false
-		m.picker = nil
 	case chatPermissionMsg:
 		// 权限确认弹层：工具执行前显示（覆盖在输入框上方）。
 		m.permLayer = &permissionLayer{tool: v.tool, args: v.args, reason: v.reason}
@@ -435,15 +423,15 @@ func (m *ChatModel) renderPermissionLayer() string {
 }
 
 // renderFooter 底部状态栏。
-// 格式：agentic │ 上下文 15K/50K (30%) │ 💰 余额（有则显示）│ ctrl+c 退出
+// 格式：tacode │ 上下文 15K/50K (30%) │ 💰 余额（有则显示）│ ctrl+c 退出
 func (m *ChatModel) renderFooter() string {
 	var parts []string
 
 	// 上下文占用（limit>0 时显示；used 可为 0——启动时初始显示 0/50.0k (0%)）。
 	if m.contextLimit > 0 {
 		parts = append(parts, fmt.Sprintf("上下文 %s/%s (%d%%)",
-			formatToken(m.contextUsedTokens), formatToken(m.contextLimit),
-			m.contextUsedTokens*100/m.contextLimit))
+			formatChars(m.contextUsedChars), formatChars(m.contextLimit),
+			m.contextUsedChars*100/m.contextLimit))
 	}
 
 	// 余额（非空时显示）。
@@ -454,11 +442,11 @@ func (m *ChatModel) renderFooter() string {
 	parts = append(parts, "ctrl+c 退出")
 
 	style := lipgloss.NewStyle().Height(1).Faint(true)
-	return style.Render("agentic │ " + strings.Join(parts, " │ "))
+	return style.Render("tacode │ " + strings.Join(parts, " │ "))
 }
 
-// formatToken 格式化 token 数（<1000 原样，>=1000 显示 "1.2k"）。
-func formatToken(n int) string {
+// formatChars 格式化字符数（<1000 原样，>=1000 显示 "1.2k"）。
+func formatChars(n int) string {
 	if n < 1000 {
 		return fmt.Sprintf("%d", n)
 	}

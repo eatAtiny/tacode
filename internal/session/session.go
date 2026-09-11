@@ -47,7 +47,7 @@ func NewSessionManager(dir string) (*SessionManager, error) {
 			return nil, fmt.Errorf("read manifest failed: %w", err)
 		}
 		// 首次运行：创建默认会话
-		id, err := generateID()
+		id, err := GenerateID()
 		if err != nil {
 			return nil, fmt.Errorf("generate session id failed: %w", err)
 		}
@@ -85,7 +85,7 @@ func NewSessionManager(dir string) (*SessionManager, error) {
 
 // Create 创建一个新会话并自动切换过去，返回会话 ID。
 func (m *SessionManager) Create(name string) (string, error) {
-	id, err := generateID()
+	id, err := GenerateID()
 	if err != nil {
 		return "", fmt.Errorf("generate session id failed: %w", err)
 	}
@@ -185,29 +185,9 @@ func (m *SessionManager) ActiveSessionDir() string {
 	return m.SessionDir(m.data.Active)
 }
 
-// MemoryDir 返回指定会话的 memory/ 子目录路径。
-func (m *SessionManager) MemoryDir(id string) string {
-	return filepath.Join(m.dir, id, "memory")
-}
-
-// ActiveMemoryDir 返回当前活跃会话的 memory/ 子目录路径。
-func (m *SessionManager) ActiveMemoryDir() string {
-	return m.MemoryDir(m.data.Active)
-}
-
-// ActivePath 返回当前活跃会话的 history.jsonl 文件路径。
-func (m *SessionManager) ActivePath() string {
-	return m.SessionPath(m.data.Active)
-}
-
 // SessionPath 返回指定会话的 history.jsonl 文件路径。
 func (m *SessionManager) SessionPath(id string) string {
 	return filepath.Join(m.dir, id, "history.jsonl")
-}
-
-// TempPath 返回临时会话的 history.jsonl 文件路径（不在 manifest 中）。
-func (m *SessionManager) TempPath(tempID string) string {
-	return filepath.Join(m.dir, tempID, "history.jsonl")
 }
 
 // FindMeta 根据 ID 前缀查找会话元数据，找不到返回 nil。
@@ -300,9 +280,4 @@ func GenerateID() (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%s-%x", time.Now().Format("20060102-150405"), b), nil
-}
-
-// generateID 内部别名，保持兼容。
-func generateID() (string, error) {
-	return GenerateID()
 }

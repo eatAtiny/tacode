@@ -16,8 +16,8 @@ type MemoryStore struct {
 }
 
 // NewMemoryStore 构造 MemoryStore，不立即创建目录（惰性创建）。
-func NewMemoryStore(sessionDir string) (*MemoryStore, error) {
-	return &MemoryStore{dir: filepath.Join(sessionDir, "memory")}, nil
+func NewMemoryStore(sessionDir string) *MemoryStore {
+	return &MemoryStore{dir: filepath.Join(sessionDir, "memory")}
 }
 
 // SetPath 切换 memory/ 目录路径（用于会话切换），不立即创建目录。
@@ -215,10 +215,7 @@ func MigrateLegacyMemory(globalStore, projectStore *MemoryStore, sessionsRoot st
 			continue
 		}
 		sessionDir := filepath.Join(sessionsRoot, d.Name())
-		store, err := NewMemoryStore(sessionDir) // dir = <sessionDir>/memory
-		if err != nil {
-			continue
-		}
+		store := NewMemoryStore(sessionDir) // dir = <sessionDir>/memory
 		entries, err := store.ListEntries()
 		if err != nil || len(entries) == 0 {
 			continue
@@ -255,9 +252,10 @@ func (s *MemoryStore) parseEntry(content string) MemoryEntry {
 
 	// 查找 frontmatter 边界。
 	if !strings.HasPrefix(content, "---") {
-		// 没有 frontatter，整段作为 content。
+		// 没有 frontmatter，整段作为 content。
 		entry.Content = content
-		// 从文件名推断 name（调用方应设置）。
+		// 此时（以及 frontmatter 缺 name 时）entry.Name 为空，
+		// SaveEntry 会写出空名 .md 文件——手工编辑旧记忆文件时的已知隐患。
 		return entry
 	}
 

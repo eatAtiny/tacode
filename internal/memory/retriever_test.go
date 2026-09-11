@@ -250,10 +250,7 @@ func TestRetriever_BuildContext_ProjectMemory(t *testing.T) {
 
 	// 项目级记忆 store 指向独立目录，写入一条 project 类记忆。
 	projectRoot := t.TempDir()
-	projectMem, err := NewMemoryStore(projectRoot)
-	if err != nil {
-		t.Fatalf("NewMemoryStore failed: %v", err)
-	}
+	projectMem := NewMemoryStore(projectRoot)
 	if err := projectMem.SaveEntry(MemoryEntry{
 		Name:        "project-convention",
 		Description: "项目约定：用中文注释",
@@ -291,10 +288,7 @@ func TestRetriever_BuildContext_GlobalMemory(t *testing.T) {
 
 	// 全局记忆 store 指向独立目录，写入一条 user 类记忆。
 	globalRoot := t.TempDir()
-	globalMem, err := NewMemoryStore(globalRoot)
-	if err != nil {
-		t.Fatalf("NewMemoryStore failed: %v", err)
-	}
+	globalMem := NewMemoryStore(globalRoot)
 	if err := globalMem.SaveEntry(MemoryEntry{
 		Name:        "user-language-pref",
 		Description: "用户偏好：中文回答",
@@ -328,12 +322,12 @@ func TestRetriever_BuildContext_MemoryLayersOrder(t *testing.T) {
 	r := newTestRetriever(t, root)
 
 	// 项目记忆。
-	projectMem, _ := NewMemoryStore(t.TempDir())
+	projectMem := NewMemoryStore(t.TempDir())
 	_ = projectMem.SaveEntry(MemoryEntry{Name: "p1", Description: "项目约定", Type: "project", Importance: 4, Content: "x"})
 	r.SetProjectMemory(projectMem)
 
 	// 全局记忆。
-	globalMem, _ := NewMemoryStore(t.TempDir())
+	globalMem := NewMemoryStore(t.TempDir())
 	_ = globalMem.SaveEntry(MemoryEntry{Name: "g1", Description: "用户偏好", Type: "user", Importance: 4, Content: "y"})
 	r.SetGlobalMemory(globalMem)
 
@@ -410,18 +404,9 @@ func TestLoadProjectInstructions_Refresh(t *testing.T) {
 // newTestRetriever 构造一个 store 指向 root 的 Retriever（不建真实会话）。
 func newTestRetriever(t *testing.T, root string) *Retriever {
 	t.Helper()
-	history, err := NewHistoryStore(root)
-	if err != nil {
-		t.Fatalf("NewHistoryStore failed: %v", err)
-	}
-	summary, err := NewSummaryStore(root)
-	if err != nil {
-		t.Fatalf("NewSummaryStore failed: %v", err)
-	}
-	memStore, err := NewMemoryStore(root)
-	if err != nil {
-		t.Fatalf("NewMemoryStore failed: %v", err)
-	}
+	history := NewHistoryStore(root)
+	summary := NewSummaryStore(root)
+	memStore := NewMemoryStore(root)
 	events := NewEventStore(root)
 	return NewRetriever(history, summary, memStore, events)
 }

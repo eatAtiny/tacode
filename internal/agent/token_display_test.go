@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"agentic/internal/ui/text"
+	"tacode/internal/ui/text"
 )
 
 // ──────────────────────────────────────────────────────────

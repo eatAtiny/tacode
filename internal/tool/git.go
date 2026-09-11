@@ -8,15 +8,12 @@ import (
 	"time"
 )
 
-// gitTimeout git 命令默认执行超时。
-const gitTimeout = 30 * time.Second
-
 // GitTool 提供结构化的 git 版本控制操作。
 //
 // 与 shell 手搓 git 命令的区别：
 //   - action 参数限定操作集合（只读 5 个 + 写 4 个），避免 LLM 拼错 git 子命令
 //   - 只读操作自动放行并可并行执行；写操作（add/commit/stash/checkout）需要用户确认
-//   - status/log/branch 输出格式化为 LLM 易读的紧凑格式
+//   - 仅 status 经 formatStatus 格式化为分组紧凑格式；log 靠 --format 参数，branch 原样返回
 //
 // 高危操作（reset、rebase、branch -d 等）首版不开放。
 type GitTool struct {
@@ -26,12 +23,12 @@ type GitTool struct {
 
 // NewGitTool 创建 git 工具，默认超时 30 秒。
 func NewGitTool() *GitTool {
-	return &GitTool{timeout: gitTimeout}
+	return &GitTool{timeout: defaultCmdTimeout}
 }
 
 // NewGitToolIn 创建 git 工具并固定执行目录（测试或子目录场景使用）。
 func NewGitToolIn(dir string) *GitTool {
-	return &GitTool{timeout: gitTimeout, dir: dir}
+	return &GitTool{timeout: defaultCmdTimeout, dir: dir}
 }
 
 // ── Tool 接口：基础方法 ──
@@ -103,7 +100,7 @@ func (t *GitTool) Execute(args string) (string, error) {
 		StashAction string `json:"stash_action"`
 	}
 	if err := parseArgs(args, &params); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
+		return "", err
 	}
 
 	params.Action = strings.TrimSpace(params.Action)
@@ -147,24 +144,13 @@ func (t *GitTool) Execute(args string) (string, error) {
 func (t *GitTool) runGit(ctx context.Context, args ...string) (string, error) {
 	// core.quotePath=false 保证中文文件名原样输出；
 	// color.status=never 禁用 status 颜色（git status 不支持 --no-color，用配置项兼容所有版本）。
-	args = append([]string{"-c", "core.quotePath=false", "-c", "color.status=never"}, args...)
-	cmd := exec.CommandContext(ctx, "git", args...)
+	fullArgs := append([]string{"-c", "core.quotePath=false", "-c", "color.status=never"}, args...)
+	cmd := exec.CommandContext(ctx, "git", fullArgs...)
 	if t.dir != "" {
 		cmd.Dir = t.dir
 	}
-	output, err := cmd.CombinedOutput()
-	result := strings.TrimSpace(string(output))
-
-	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("git 命令超时 (%s): git %s", gitTimeout, strings.Join(args, " "))
-		}
-		if result != "" {
-			return "", fmt.Errorf("git 命令失败 (退出码 %d):\n%s", exitCodeOf(err), result)
-		}
-		return "", fmt.Errorf("git 命令失败 (退出码 %d)，无输出", exitCodeOf(err))
-	}
-	return result, nil
+	// 超时错误回显用户请求的命令，不包含内部注入的 -c 参数。
+	return runCmd(ctx, cmd, "git 命令", "git "+strings.Join(args, " "), t.timeout)
 }
 
 // exitCodeOf 提取命令退出码，无法提取时返回 -1。

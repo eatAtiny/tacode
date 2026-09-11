@@ -15,7 +15,7 @@ func NewFileTool() *FileTool { return &FileTool{} }
 
 // ── Tool 接口：基础方法 ──
 
-func (t *FileTool) Name() string    { return "file" }
+func (t *FileTool) Name() string      { return "file" }
 func (t *FileTool) Aliases() []string { return nil }
 
 func (t *FileTool) Description() string {
@@ -51,7 +51,7 @@ func (t *FileTool) Execute(args string) (string, error) {
 		Content string `json:"content"`
 	}
 	if err := parseArgs(args, &params); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
+		return "", err
 	}
 
 	params.Path = strings.TrimSpace(params.Path)

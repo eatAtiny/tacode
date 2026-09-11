@@ -114,43 +114,7 @@ func (s *EventStore) ReadAll() ([]Event, error) {
 	return s.readAll()
 }
 
-// ReadRound 读取指定轮次的所有事件。
-func (s *EventStore) ReadRound(round int) ([]Event, error) {
-	all, err := s.readAll()
-	if err != nil {
-		return nil, err
-	}
-	var result []Event
-	for _, e := range all {
-		if e.Round == round {
-			result = append(result, e)
-		}
-	}
-	return result, nil
-}
-
-// RecentEvents 返回最近 n 条事件。
-func (s *EventStore) RecentEvents(n int) ([]Event, error) {
-	all, err := s.readAll()
-	if err != nil {
-		return nil, err
-	}
-	if len(all) <= n {
-		return all, nil
-	}
-	return all[len(all)-n:], nil
-}
-
-// Count 返回事件总数。
-func (s *EventStore) Count() (int, error) {
-	all, err := s.readAll()
-	if err != nil {
-		return 0, err
-	}
-	return len(all), nil
-}
-
-// Digest 从事件流生成可读的文本摘要（用于 prompt 注入降级）。
+// Digest 从事件流生成可读的文本摘要（用于 prompt 注入降级；预留路径，仅 BuildContext 使用）。
 func (s *EventStore) Digest(lastN int) string {
 	if lastN <= 0 {
 		return "(无历史记录)"

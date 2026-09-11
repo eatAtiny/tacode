@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"agentic/internal/llm"
-	"agentic/internal/memory"
-	"agentic/internal/session"
-	"agentic/internal/tool"
-	"agentic/internal/ui/text"
+	"tacode/internal/llm"
+	"tacode/internal/memory"
+	"tacode/internal/session"
+	"tacode/internal/tool"
+	"tacode/internal/ui/text"
 )
 
 // newTestRunner 构造一个测试用 Runner（TextUI + 临时 sessions 目录）。
@@ -28,29 +28,20 @@ func newTestRunner(t *testing.T) *Runner {
 
 	// store 初始路径指向会话管理器默认目录（initTempSession 会重定向）。
 	activeDir := sessions.ActiveSessionDir()
-	history, err := memory.NewHistoryStore(activeDir)
-	if err != nil {
-		t.Fatalf("NewHistoryStore failed: %v", err)
-	}
-	summary, err := memory.NewSummaryStore(activeDir)
-	if err != nil {
-		t.Fatalf("NewSummaryStore failed: %v", err)
-	}
-	memStore, err := memory.NewMemoryStore(activeDir)
-	if err != nil {
-		t.Fatalf("NewMemoryStore failed: %v", err)
-	}
+	history := memory.NewHistoryStore(activeDir)
+	summary := memory.NewSummaryStore(activeDir)
+	memStore := memory.NewMemoryStore(activeDir)
 	events := memory.NewEventStore(activeDir)
 
 	return &Runner{
-		llm:       &llm.OpenAIClient{}, // 空客户端：仅本文件测试使用，不读字段，Model() 返回零值
-		history:   history,
-		summary:   summary,
-		memStore:  memStore,
-		events:    events,
-		sessions:  sessions,
-		ui:        text.NewTextUI(),
-		tools:     tool.NewRegistry(),
+		llm:      &llm.OpenAIClient{}, // 空客户端：仅本文件测试使用，不读字段，Model() 返回零值
+		history:  history,
+		summary:  summary,
+		memStore: memStore,
+		events:   events,
+		sessions: sessions,
+		ui:       text.NewTextUI(),
+		tools:    tool.NewRegistry(),
 	}
 }
 

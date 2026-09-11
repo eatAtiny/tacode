@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -95,13 +97,65 @@ func TestShellIsConcurrencySafe_EdgeCases(t *testing.T) {
 		{"invalid json", `not json`, false},
 		{"empty command", `{"command": ""}`, false},
 		{"leading spaces", `{"command": "  ls -la"}`, true},
-		{"stderr redirect only (safe)", `{"command": "go vet 2>&1"}`, true}, // go vet is read-only, stderr redirect doesn't change that
+		// 行为收紧（P2③）：含 > 一律非只读，"go vet 2>&1" 这类纯 stderr
+		// 重定向的命令现在也需要确认，换取判定规则的可证明性。
+		{"stderr redirect (tightened)", `{"command": "go vet 2>&1"}`, false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := s.IsConcurrencySafe(tt.args); got != tt.expected {
 				t.Errorf("IsConcurrencySafe(%s) = %v, want %v", tt.args, got, tt.expected)
+			}
+		})
+	}
+}
+
+// TestShellIsReadOnly_RedirectAndPipe 表驱动：重定向与管道的只读判定（P2③ 堵住绕过）。
+//
+// 旧实现两处击穿 fail-closed 承诺（已在 /tmp 实证）：
+//   - "cat a > b 2>&1"、"grep foo bar > out 2>/dev/null"：
+//     "> 检查 + 2> 豁免"按整串包含匹配，任意位置的 2> 都能豁免前面的写重定向
+//   - "cat f | tee g"：只校验命令首词，管道右侧的写文件工具不受任何校验
+//
+// 只读误判的真实增量 = 并发归类（进并发批失去逐工具中断检查与串行节奏）；
+// 权限确认由 isDangerousShellCommand 独立判定，非危险写命令本就免确认。
+func TestShellIsReadOnly_RedirectAndPipe(t *testing.T) {
+	s := NewShellTool()
+
+	tests := []struct {
+		name   string
+		args   string
+		wantRO bool
+	}{
+		// 含 > 一律 false（含 2>、2>&1、>>）：
+		{"2>&1 exempts write redirect (proved)", `{"command": "cat a > b 2>&1"}`, false},
+		{"2>/dev/null exempts write redirect (proved)", `{"command": "grep foo bar > out 2>/dev/null"}`, false},
+		{"pipe right side writes file (proved)", `{"command": "cat f | tee g"}`, false},
+		{"stderr discard only (tightened)", `{"command": "cat a 2>/dev/null"}`, false}, // 行为收紧：纯 stderr 丢弃现也需确认
+		{"plain write redirect", `{"command": "echo hi > f"}`, false},
+		{"append redirect", `{"command": "ls >> log"}`, false},
+		// 管道逐段白名单：
+		{"pipe both sides whitelisted", `{"command": "echo hi | grep foo"}`, true},
+		{"pipe multi segments whitelisted", `{"command": "git log --oneline | head -5"}`, true},
+		{"pipe right side not whitelisted", `{"command": "cat f | xargs rm"}`, false},
+		{"pipe empty segment", `{"command": "cat a |"}`, false},
+		// 基础白名单回归：
+		{"plain ls", `{"command": "ls"}`, true},
+		{"plain cat", `{"command": "cat a"}`, true},
+		{"git status", `{"command": "git status"}`, true},
+		{"pwd", `{"command": "pwd"}`, true},
+		{"cp writes file", `{"command": "cp a b"}`, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := s.IsReadOnly(tt.args); got != tt.wantRO {
+				t.Errorf("IsReadOnly(%s) = %v, want %v", tt.args, got, tt.wantRO)
+			}
+			// IsConcurrencySafe 与 IsReadOnly 同源（都走 isReadOnlyShellCommand），判定必须一致。
+			if got := s.IsConcurrencySafe(tt.args); got != tt.wantRO {
+				t.Errorf("IsConcurrencySafe(%s) = %v, want %v", tt.args, got, tt.wantRO)
 			}
 		})
 	}
@@ -157,6 +211,38 @@ func TestGrepToolConcurrency(t *testing.T) {
 	}
 }
 
+// TestGrepExecute_ScanInterruptHint 验证超长行触发 bufio.ErrTooLong 时输出显式扫描中断提示。
+//
+// bufio.Scanner 默认 64KB 行上限：含 >64KB 单行且行内含匹配串的文件扫描到该行即中断。
+// 修复前错误被忽略，整个文件被静默丢弃（LLM 收到 "未找到匹配结果。"，无任何信号）；
+// 修复后应追加 "（该文件扫描中断: ...）" 提示行，明示该文件未被完整扫描。
+func TestGrepExecute_ScanInterruptHint(t *testing.T) {
+	g := NewGrepTool()
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "long_line.txt")
+
+	// 单行长度远超 64KB，且行中嵌入匹配串 "needle"。
+	// "needle" 位于 100_000 字节处 > 64KB(65536)，扫描到该行时必然 ErrTooLong，匹配不会被扫描到。
+	line := strings.Repeat("a", 100_000) + "needle" + strings.Repeat("a", 100_000)
+	if err := os.WriteFile(tmpFile, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	args := toJSON(map[string]any{
+		"pattern": "needle",
+		"path":    tmpFile,
+	})
+	out, err := g.Execute(args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 断言输出包含显式扫描中断提示（最清晰的信号，修复前为静默漏配）。
+	if !strings.Contains(out, "该文件扫描中断") {
+		t.Errorf("expected scan-interrupt hint in output, got: %s", out)
+	}
+}
+
 func TestListToolConcurrency(t *testing.T) {
 	l := NewListTool()
 
@@ -165,6 +251,41 @@ func TestListToolConcurrency(t *testing.T) {
 	}
 	if !l.IsReadOnly(`{"path": "."}`) {
 		t.Error("list should always be read-only")
+	}
+}
+
+// TestListExecute_TruncationHint 验证大目录下 list 输出明示扫描截断与不完整。
+//
+// 150 个条目 + max_entries=50：collectEntries 双倍采集至 maxEntries*2=100 后
+// 提前终止。修复前输出「共 100 个条目」且无任何不完整提示，该数字易被误读为
+// 真实总数（实际 150）。修复后应追加「已达扫描上限，可能不完整」的显式提示。
+func TestListExecute_TruncationHint(t *testing.T) {
+	l := NewListTool()
+	tmpDir := t.TempDir()
+
+	// 构造 150 个文件条目（单一目录内，无子目录，保证双倍采集在顶层即触顶）。
+	for i := 0; i < 150; i++ {
+		p := filepath.Join(tmpDir, fmt.Sprintf("file_%03d.txt", i))
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	args := toJSON(map[string]any{
+		"path":        tmpDir,
+		"max_entries": 50,
+	})
+	out, err := l.Execute(args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// 断言输出明示扫描已达上限、结果可能不完整（修复前无此信号）。
+	if !strings.Contains(out, "已达扫描上限") {
+		t.Errorf("expected scan-cap hint in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "可能不完整") {
+		t.Errorf("expected incompleteness hint in output, got:\n%s", out)
 	}
 }
 
@@ -185,8 +306,8 @@ func TestEditReplaceAll(t *testing.T) {
 
 	// ── replace_all=false, 多处匹配 → 应该报错 ──
 	args := toJSON(map[string]any{
-		"path":   tmpFile,
-		"search": "foo",
+		"path":    tmpFile,
+		"search":  "foo",
 		"replace": "XXX",
 	})
 	_, err := e.Execute(args)
@@ -569,16 +690,18 @@ type aliasTestTool struct {
 	aliases []string
 }
 
-func (t *aliasTestTool) Name() string                               { return t.name }
-func (t *aliasTestTool) Aliases() []string                          { return t.aliases }
-func (t *aliasTestTool) Description() string                        { return "test" }
-func (t *aliasTestTool) Parameters() map[string]any                 { return map[string]any{} }
-func (t *aliasTestTool) Execute(args string) (string, error)        { return "ok", nil }
-func (t *aliasTestTool) CheckPermission(args string) PermissionResult { return PermissionResult{Allow: true} }
-func (t *aliasTestTool) PromptGuide() string                        { return "" }
-func (t *aliasTestTool) IsConcurrencySafe(args string) bool         { return true }
-func (t *aliasTestTool) IsReadOnly(args string) bool                { return true }
-func (t *aliasTestTool) ResultLimit() int                           { return 1000 }
+func (t *aliasTestTool) Name() string                        { return t.name }
+func (t *aliasTestTool) Aliases() []string                   { return t.aliases }
+func (t *aliasTestTool) Description() string                 { return "test" }
+func (t *aliasTestTool) Parameters() map[string]any          { return map[string]any{} }
+func (t *aliasTestTool) Execute(args string) (string, error) { return "ok", nil }
+func (t *aliasTestTool) CheckPermission(args string) PermissionResult {
+	return PermissionResult{Allow: true}
+}
+func (t *aliasTestTool) PromptGuide() string                { return "" }
+func (t *aliasTestTool) IsConcurrencySafe(args string) bool { return true }
+func (t *aliasTestTool) IsReadOnly(args string) bool        { return true }
+func (t *aliasTestTool) ResultLimit() int                   { return 1000 }
 
 // ──────────────────────────────────────────────────────────
 // Shell 危险命令检测
@@ -586,15 +709,15 @@ func (t *aliasTestTool) ResultLimit() int                           { return 100
 
 func TestIsDangerousShellCommand(t *testing.T) {
 	tests := []struct {
-		command  string
+		command   string
 		dangerous bool
 	}{
 		{`{"command": "ls -la"}`, false},
 		{`{"command": "cat file.txt"}`, false},
-		{`{"command": "rm /tmp/foo"}`, true},          // 普通 rm 删除 → 需确认（本次新增）
-		{`{"command": "rm -f /tmp/foo"}`, true},        // rm -f（无 -r）也需确认
-		{`{"command": "rmdir /tmp/foo"}`, false},       // rmdir 不含 "rm "，不误伤
-		{`{"command": "warmup --check"}`, false},       // warmup 等含 rm 子串的词不误伤
+		{`{"command": "rm /tmp/foo"}`, true},     // 普通 rm 删除 → 需确认（本次新增）
+		{`{"command": "rm -f /tmp/foo"}`, true},  // rm -f（无 -r）也需确认
+		{`{"command": "rmdir /tmp/foo"}`, false}, // rmdir 不含 "rm "，不误伤
+		{`{"command": "warmup --check"}`, false}, // warmup 等含 rm 子串的词不误伤
 		{`{"command": "rm -rf /tmp/foo"}`, true},
 		{`{"command": "sudo rm file"}`, true},
 		{`{"command": "chmod 777 script.sh"}`, true},
@@ -719,6 +842,68 @@ func TestRegistryGet(t *testing.T) {
 	}
 	if r.Get("nonexistent") != nil {
 		t.Error("should not find nonexistent tool")
+	}
+}
+
+// TestRegistryListingsSortedAndStable 验证工具清单输出的顺序稳定性。
+//
+// Names/Descriptions/FunctionDefinitions 若直接 range map，顺序随机，
+// system prompt 中工具段落每轮重建时字节不稳，会击穿 messages[0]
+// 「全静态、跨轮字节不变」的前缀缓存设计。
+func TestRegistryListingsSortedAndStable(t *testing.T) {
+	r := NewRegistry()
+	// 7 个真实工具 + 2 个名字分别排在字典序两端的 fake 工具，共 9 个。
+	r.Register(NewShellTool())
+	r.Register(NewFileTool())
+	r.Register(NewEditTool())
+	r.Register(NewGrepTool())
+	r.Register(NewListTool())
+	r.Register(NewGitTool())
+	r.Register(NewWebFetchTool())
+	r.Register(&aliasTestTool{name: "aaa_fake_head"})
+	r.Register(&aliasTestTool{name: "zzz_fake_tail"})
+
+	// ── Names()：连续 10 次调用结果完全相等，且为字典序 ──
+	var first []string
+	for i := 1; i <= 10; i++ {
+		got := r.Names()
+		if len(got) != 9 {
+			t.Fatalf("Names() 第 %d 次调用应返回 9 个工具, got %d: %v", i, len(got), got)
+		}
+		if !sort.StringsAreSorted(got) {
+			t.Fatalf("Names() 第 %d 次调用非字典序: %v", i, got)
+		}
+		if i == 1 {
+			first = got
+			continue
+		}
+		if !slices.Equal(first, got) {
+			t.Fatalf("Names() 第 %d 次调用与第 1 次结果不一致:\n第  1 次: %v\n第 %2d 次: %v", i, first, i, got)
+		}
+	}
+
+	// ── Descriptions()：每条首行工具名顺序与 Names() 一致 ──
+	var descNames []string
+	for _, line := range strings.Split(r.Descriptions(), "\n") {
+		if !strings.HasPrefix(line, "- ") {
+			continue
+		}
+		descNames = append(descNames, strings.SplitN(strings.TrimPrefix(line, "- "), ":", 2)[0])
+	}
+	if !slices.Equal(first, descNames) {
+		t.Errorf("Descriptions() 工具顺序与 Names() 不一致:\nNames:        %v\nDescriptions: %v", first, descNames)
+	}
+
+	// ── FunctionDefinitions()：name 序列与 Names() 一致 ──
+	var defNames []string
+	for _, def := range r.FunctionDefinitions() {
+		if def.Function == nil {
+			t.Fatal("FunctionDefinition.Function 不应为 nil")
+		}
+		defNames = append(defNames, def.Function.Name)
+	}
+	if !slices.Equal(first, defNames) {
+		t.Errorf("FunctionDefinitions() 的 name 序列与 Names() 不一致:\nNames: %v\nDefs:  %v", first, defNames)
 	}
 }
 

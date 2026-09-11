@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"agentic/internal/memory"
+	"tacode/internal/memory"
 
 	tea "github.com/charmbracelet/bubbletea"
 )

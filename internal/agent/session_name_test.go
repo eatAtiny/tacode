@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"agentic/internal/memory"
-	"agentic/internal/session"
+	"tacode/internal/memory"
+	"tacode/internal/session"
 )
 
 // ──────────────────────────────────────────────────────────
@@ -53,9 +53,9 @@ func TestEnsurePersisted_NamesFromFirstInput(t *testing.T) {
 	tempDir := sessions.SessionDir(tempID)
 	os.MkdirAll(tempDir, 0o755)
 
-	history, _ := memory.NewHistoryStore(tempDir)
-	summary, _ := memory.NewSummaryStore(tempDir)
-	memStore, _ := memory.NewMemoryStore(tempDir)
+	history := memory.NewHistoryStore(tempDir)
+	summary := memory.NewSummaryStore(tempDir)
+	memStore := memory.NewMemoryStore(tempDir)
 	events := memory.NewEventStore(tempDir)
 
 	r := &Runner{

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"agentic/internal/llm"
+	"tacode/internal/llm"
 )
 
 // ──────────────────────────────────────────────────────────
@@ -57,7 +57,7 @@ func addSummaries(t *testing.T, store *SummaryStore, n int) {
 
 func TestCompressSummaries_TooFew(t *testing.T) {
 	root := t.TempDir()
-	summary, _ := NewSummaryStore(root)
+	summary := NewSummaryStore(root)
 	addSummaries(t, summary, 3)
 
 	r := NewRetriever(nil, summary, nil, nil)
@@ -74,7 +74,7 @@ func TestCompressSummaries_TooFew(t *testing.T) {
 
 func TestCompressSummaries_MergesOldKeepsRecent(t *testing.T) {
 	root := t.TempDir()
-	summary, _ := NewSummaryStore(root)
+	summary := NewSummaryStore(root)
 	addSummaries(t, summary, 6) // 6 条：压缩前 3 条，保留后 3 条
 
 	r := NewRetriever(nil, summary, nil, nil)
@@ -105,7 +105,7 @@ func TestCompressSummaries_MergesOldKeepsRecent(t *testing.T) {
 
 func TestCheckAndCompress_Threshold(t *testing.T) {
 	root := t.TempDir()
-	summary, _ := NewSummaryStore(root)
+	summary := NewSummaryStore(root)
 	addSummaries(t, summary, 6)
 
 	r := NewRetriever(nil, summary, nil, nil)
@@ -129,7 +129,7 @@ func TestCheckAndCompress_Threshold(t *testing.T) {
 
 func TestCheckAndCompress_ZeroTokenLimit(t *testing.T) {
 	root := t.TempDir()
-	summary, _ := NewSummaryStore(root)
+	summary := NewSummaryStore(root)
 	r := NewRetriever(nil, summary, nil, nil)
 
 	ok, err := r.CheckAndCompress(context.Background(), nil, 0, 100)
@@ -140,7 +140,7 @@ func TestCheckAndCompress_ZeroTokenLimit(t *testing.T) {
 
 func TestCompressSummaries_WithCustomThreshold(t *testing.T) {
 	root := t.TempDir()
-	summary, _ := NewSummaryStore(root)
+	summary := NewSummaryStore(root)
 	addSummaries(t, summary, 6)
 
 	r := NewRetriever(nil, summary, nil, nil)

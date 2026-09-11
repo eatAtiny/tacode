@@ -25,7 +25,7 @@ var backoffFn = backoff
 // 使多个同时重试的请求错开（避免惊群）。
 func backoff(attempt int) time.Duration {
 	base := backoffBase * time.Duration(1<<uint(attempt-1))
-	jitter := time.Duration(rand.Int63n(int64(base) / 5)) // ±20%
+	jitter := time.Duration(rand.Int63n(int64(base) / 5)) // 单向抖动 [0, +20%)
 	return base + jitter
 }
 

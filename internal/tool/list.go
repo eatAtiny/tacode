@@ -19,7 +19,7 @@ func NewListTool() *ListTool { return &ListTool{} }
 
 // ── Tool 接口：基础方法 ──
 
-func (t *ListTool) Name() string    { return "list" }
+func (t *ListTool) Name() string      { return "list" }
 func (t *ListTool) Aliases() []string { return nil }
 
 func (t *ListTool) Description() string {
@@ -51,7 +51,6 @@ type dirEntry struct {
 	isDir bool
 	name  string
 	size  int64
-	path  string // 相对路径（含缩进，用于递归显示）
 }
 
 // Execute 列出目录内容。
@@ -62,7 +61,7 @@ func (t *ListTool) Execute(args string) (string, error) {
 		MaxEntries int    `json:"max_entries"`
 	}
 	if err := parseArgs(args, &params); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
+		return "", err
 	}
 
 	if params.Path == "" {
@@ -92,8 +91,8 @@ func (t *ListTool) Execute(args string) (string, error) {
 	if basePrefix == "." {
 		basePrefix = ""
 	}
-	var entries []dirEntry
-	collectEntries(params.Path, basePrefix, 1, params.Depth, params.MaxEntries, &entries)
+	// scanTruncated 表示双倍采集触顶提前终止，收集到的条目可能不完整。
+	entries, scanTruncated := collectEntries(params.Path, basePrefix, 1, params.Depth, params.MaxEntries)
 
 	// 排序：目录优先 → 字母序。
 	sort.Slice(entries, func(i, j int) bool {
@@ -120,7 +119,13 @@ func (t *ListTool) Execute(args string) (string, error) {
 	}
 
 	if truncated {
-		sb.WriteString(fmt.Sprintf("…(已截断, 共 %d 个条目)\n", len(entries)))
+		// scanTruncated 时 len(entries) 是采集上限（maxEntries*2）而非真实总数，
+		// 必须明示扫描可能不完整，避免 LLM/用户把该数字误读为目录真实条目数。
+		if scanTruncated {
+			sb.WriteString(fmt.Sprintf("…(已截断, 共 %d 个条目（已达扫描上限，可能不完整）)\n", len(entries)))
+		} else {
+			sb.WriteString(fmt.Sprintf("…(已截断, 共 %d 个条目)\n", len(entries)))
+		}
 	}
 
 	return strings.TrimRight(sb.String(), "\n"), nil
@@ -161,19 +166,35 @@ func (t *ListTool) ResultLimit() int { return 3000 }
 //
 // displayPath 是从最初 base 出发的相对路径（用 "/" 连接），
 // 而非之前的空格缩进。LLM 可以直接用这个路径作为后续 list/grep/file 的参数。
-func collectEntries(basePath, prefix string, currentDepth, maxDepth, maxEntries int, entries *[]dirEntry) {
+//
+// 返回 entries 与 truncated：truncated 表示扫描因 maxEntries*2 双倍采集上限
+// 提前终止，收集结果可能不完整。双倍采集而非恰取 maxEntries，是为排序前留
+// 余量：目录条目按「目录优先 + 字母序」排序后取前 maxEntries 条，若只采集
+// maxEntries 条就排序截断，可能因采集顺序丢排头本该出现的条目。
+func collectEntries(basePath, prefix string, currentDepth, maxDepth, maxEntries int) ([]dirEntry, bool) {
+	var entries []dirEntry
+	truncated := collectEntriesRec(basePath, prefix, currentDepth, maxDepth, maxEntries, &entries)
+	return entries, truncated
+}
+
+// collectEntriesRec 是 collectEntries 的递归实现。
+//
+// 通过共享切片指针，整个遍历共用同一个 maxEntries*2 采集上限：任意递归层
+// 发现已采集数达到上限即提前终止（返回 true 表示截断），而非各层独立计数。
+func collectEntriesRec(basePath, prefix string, currentDepth, maxDepth, maxEntries int, entries *[]dirEntry) bool {
 	if currentDepth > maxDepth || len(*entries) >= maxEntries*2 {
-		return
+		return len(*entries) >= maxEntries*2
 	}
 
 	dirEntries, err := os.ReadDir(basePath)
 	if err != nil {
-		return
+		return false
 	}
 
+	truncated := false
 	for _, de := range dirEntries {
 		if len(*entries) >= maxEntries*2 {
-			return
+			return true
 		}
 
 		info, err := de.Info()
@@ -191,14 +212,15 @@ func collectEntries(basePath, prefix string, currentDepth, maxDepth, maxEntries 
 		}
 
 		if de.IsDir() {
+			subPath := filepath.Join(basePath, name)
 			*entries = append(*entries, dirEntry{
 				isDir: true,
 				name:  displayPath + "/",
-				path:  filepath.Join(basePath, name),
 			})
 			// 递归进入子目录，prefix 传递相对路径而非空格缩进。
-			subPath := filepath.Join(basePath, name)
-			collectEntries(subPath, displayPath, currentDepth+1, maxDepth, maxEntries, entries)
+			if collectEntriesRec(subPath, displayPath, currentDepth+1, maxDepth, maxEntries, entries) {
+				truncated = true
+			}
 		} else {
 			*entries = append(*entries, dirEntry{
 				isDir: false,
@@ -207,6 +229,7 @@ func collectEntries(basePath, prefix string, currentDepth, maxDepth, maxEntries 
 			})
 		}
 	}
+	return truncated
 }
 
 // formatEntry 格式化单个条目。

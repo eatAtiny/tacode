@@ -9,14 +9,14 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"agentic/internal/llm"
+	"tacode/internal/llm"
 )
 
 // 默认配置。
 const (
-	defaultSummaryCount = 10  // 默认加载最近 10 条摘要
-	maxMemoryEntries    = 10  // 默认最多加载 10 条记忆
-	minImportance       = 2   // 默认最低重要性（1-5，>=2 才会注入 prompt）
+	defaultSummaryCount      = 10  // 默认加载最近 10 条摘要
+	maxMemoryEntries         = 10  // 默认最多加载 10 条记忆
+	minImportance            = 2   // 默认最低重要性（1-5，>=2 才会注入 prompt）
 	defaultCompressThreshold = 0.8 // 默认 token 使用率阈值（超过触发压缩）
 )
 
@@ -24,13 +24,9 @@ const (
 // Retriever — 三层记忆检索器
 //
 // 调用链中的角色：
-//   QueryEngine（步骤 1）
-//     → Retriever.BuildContext(query)
-//       → 返回上下文文本（注入 system/user prompt）
-//
-//   QueryEngine（步骤 2）
-//     → Retriever.CheckAndCompress(ctx, client, tokenLimit, currentUsage)
-//       → 超过 80% 阈值时调用 CompressSummaries()
+//   查询链路仅使用 BuildContextFallback（queryEngine 首轮/切换时调用；
+//   /compress、/memory 等命令路径另走 CompressSummaries/Count）；
+//   BuildContext 与 CheckAndCompress 为预留路径，当前无生产调用。
 //
 // 检索顺序（优先级从高到低）：
 //   1. L3 记忆索引（MEMORY.md）—— 所有记忆的目录
@@ -43,7 +39,7 @@ const (
 type Retriever struct {
 	history           *HistoryStore
 	summary           *SummaryStore
-	memory            *MemoryStore // 会话级记忆（feedback 类），三级记忆最内层
+	memory            *MemoryStore // 会话级 L3 store；feedback 类已路由到全局 store，此 store 仅为 globalMem 为 nil 时的回退目标
 	events            *EventStore
 	projectMemory     *MemoryStore // 项目级记忆（project/reference 类，跨会话），nil = 未启用
 	globalMemory      *MemoryStore // 全局记忆（user 类，跨项目），nil = 未启用
@@ -121,7 +117,7 @@ func (r *Retriever) ClearProjectInstructions() {
 
 // BuildContext 构建注入 prompt 的上下文文本。
 //
-// 这是每轮查询前调用的核心方法（QueryEngine 步骤 1）。
+// 预留路径：当前生产调用走 BuildContextFallback，本方法无生产调用。
 //
 // 检索流程（优先级从高到低）：
 //
@@ -268,10 +264,11 @@ func (r *Retriever) BuildContextFallback(query string) (string, error) {
 
 // CheckAndCompress 检查是否需要压缩，超过阈值时自动压缩 L2 摘要。
 //
-// 调用时机：QueryEngine 步骤 2（构建上下文后、构建 prompt 前）。
+// 预留路径：当前无生产调用。
 //
 // 判断逻辑：
-//   currentUsage / tokenLimit > 80% → 触发压缩
+//
+//	currentUsage / tokenLimit > 80% → 触发压缩
 //
 // tokenLimit 是模型的上下文窗口大小，currentUsage 是当前已用 token。
 // 返回 true 表示已触发压缩，上层应重新构建上下文。
@@ -291,12 +288,12 @@ func (r *Retriever) CheckAndCompress(ctx context.Context, client *llm.OpenAIClie
 // CompressSummaries 使用 LLM 合并旧摘要，保留最近几条不动。
 //
 // 流程：
-//   1. 加载所有 L2 摘要
-//   2. 如果 <= 3 条，无需压缩
-//   3. 保留最近 3 条不动，压缩其余的（toCompress）
-//   4. 构建压缩 prompt：将 toCompress 格式化为列表
-//   5. 调用 LLM 合并为一段综合摘要
-//   6. 用压缩后的摘要替换旧的（1 条综合摘要 + 3 条最近摘要）
+//  1. 加载所有 L2 摘要
+//  2. 如果 <= 3 条，无需压缩
+//  3. 保留最近 3 条不动，压缩其余的（toCompress）
+//  4. 构建压缩 prompt：将 toCompress 格式化为列表
+//  5. 调用 LLM 合并为一段综合摘要
+//  6. 用压缩后的摘要替换旧的（1 条综合摘要 + 3 条最近摘要）
 //
 // 压缩后的摘要前缀 "[压缩摘要]" 标记。
 func (r *Retriever) CompressSummaries(ctx context.Context, client *llm.OpenAIClient) error {
@@ -355,7 +352,7 @@ func (r *Retriever) CompressSummaries(ctx context.Context, client *llm.OpenAICli
 //
 // 这不是精确计算（精确计算需要 tokenizer），但对压缩判断足够。
 // 调用方如需覆盖消息结构性开销（role 标记、JSON schema 等），
-// 可在结果上乘安全系数（见 estimateMessagesTokens）。
+// 可在结果上乘安全系数；agent 包另有按字符的估算（见 compactor.estimateChars）。
 func EstimateTokens(text string) int {
 	asciiCount := 0
 	cjkCount := 0

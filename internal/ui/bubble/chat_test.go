@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"agentic/internal/session"
+	"tacode/internal/session"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -27,7 +27,7 @@ func TestChatModel_View(t *testing.T) {
 	if !strings.Contains(v, "输入消息") {
 		t.Errorf("View 应包含输入框 placeholder，实际:\n%s", v)
 	}
-	if !strings.Contains(v, "agentic") {
+	if !strings.Contains(v, "tacode") {
 		t.Errorf("View 应包含 footer，实际:\n%s", v)
 	}
 }
@@ -139,7 +139,7 @@ func TestChatModel_Events(t *testing.T) {
 	// balance（进 footer 字段）
 	m.Update(chatBalanceMsg{balance: "💰 ¥110.00"})
 	// context（进 footer 字段）
-	m.Update(chatContextMsg{usedTokens: 100, contextLimit: 50000})
+	m.Update(chatContextMsg{usedChars: 100, contextLimit: 50000})
 
 	if len(m.lines) != 3 {
 		t.Fatalf("lines = %d, want 3（final+token+error，think 进状态行不占对话行，余额不占对话行）", len(m.lines))
@@ -165,8 +165,8 @@ func TestChatModel_Events(t *testing.T) {
 		t.Errorf("footer 应含余额，实际:\n%s", m.renderFooter())
 	}
 	// 上下文占用进 footer（已用/总/百分比）。
-	if m.contextUsedTokens != 100 || m.contextLimit != 50000 {
-		t.Errorf("context = %d/%d, want 100/50000", m.contextUsedTokens, m.contextLimit)
+	if m.contextUsedChars != 100 || m.contextLimit != 50000 {
+		t.Errorf("context = %d/%d, want 100/50000", m.contextUsedChars, m.contextLimit)
 	}
 	footer := m.renderFooter()
 	if !strings.Contains(footer, "100") || !strings.Contains(footer, "50.0k") || !strings.Contains(footer, "0%") {
@@ -197,7 +197,7 @@ func TestChatModel_WelcomePrinted(t *testing.T) {
 	if len(m.lines) != 1 {
 		t.Fatalf("lines = %d, want 1", len(m.lines))
 	}
-	if !strings.Contains(m.lines[0].text, "agentic") {
+	if !strings.Contains(m.lines[0].text, "████████╗") {
 		t.Errorf("欢迎行应含 logo，实际: %q", m.lines[0].text)
 	}
 }
@@ -206,7 +206,7 @@ func TestChatModel_WelcomePrinted(t *testing.T) {
 // Bug 回归：旧条件 used>0 才显示，启动时 used=0 导致上下文要等一轮对话后才出现。
 func TestChatModel_ContextStartupShown(t *testing.T) {
 	m := NewChatModel()
-	m.Update(chatContextMsg{usedTokens: 0, contextLimit: 50_000})
+	m.Update(chatContextMsg{usedChars: 0, contextLimit: 50_000})
 
 	footer := m.renderFooter()
 	if !strings.Contains(footer, "上下文 0/50.0k (0%)") {
@@ -217,7 +217,7 @@ func TestChatModel_ContextStartupShown(t *testing.T) {
 // limit=0（数据未就绪）时不显示上下文段。
 func TestChatModel_ContextNoLimitHidden(t *testing.T) {
 	m := NewChatModel()
-	m.Update(chatContextMsg{usedTokens: 0, contextLimit: 0})
+	m.Update(chatContextMsg{usedChars: 0, contextLimit: 0})
 
 	if strings.Contains(m.renderFooter(), "上下文") {
 		t.Errorf("limit=0 时不应显示上下文段，实际:\n%s", m.renderFooter())
@@ -229,9 +229,9 @@ func TestChatModel_HistoryAppended(t *testing.T) {
 	m := NewChatModel()
 	// 先 seed 一行旧对话，验证历史加载是清空重建（旧的没了）。
 	m.Update(chatMessageMsg{content: "旧对话"})
-	var evts []chatHistoryEvent
+	var evts []string
 	for i := 0; i < 30; i++ {
-		evts = append(evts, chatHistoryEvent{text: fmt.Sprintf("历史第 %d 行", i)})
+		evts = append(evts, fmt.Sprintf("历史第 %d 行", i))
 	}
 	m.Update(chatHistoryMsg{events: evts})
 	if len(m.lines) != 30 {

@@ -366,9 +366,9 @@ import (
     "github.com/sashabaranov/go-openai"
 
     // 项目内部包
-    "agentic/internal/llm"
-    "agentic/internal/memory"
-    "agentic/internal/tool"
+    "tacode/internal/llm"
+    "tacode/internal/memory"
+    "tacode/internal/tool"
 )
 ```
 

@@ -11,7 +11,7 @@ import (
 // Config 是可配置的运行时参数。
 //
 // 优先级（从高到低）：
-//  1. config 文件（-config <path>，或 Config.Load 显式指定）
+//  1. config 文件（-config <path>）
 //  2. 环境变量（OPENAI_CONTEXT_LIMIT 等，保留向后兼容）
 //  3. 代码默认（Default()）
 //
@@ -34,8 +34,8 @@ type Config struct {
 	// nil 时回退到 OPENAI_CONTEXT_LIMIT 环境变量 → 模型名推断。
 	ContextLimit *int `yaml:"context_limit"`
 
-	// ContextCharLimit 上下文字符上限，超过触发压缩管线（默认 50000）。
-	// 镜像 s08 的 CONTEXT_CHAR_LIMIT；Compressor 的 micro/fit/compact 步骤以此触发。
+	// ContextCharLimit 上下文字符上限，超过时触发压缩管线的 micro/fit/compact 步骤。
+	// 镜像 s08 的 CONTEXT_CHAR_LIMIT；nil 时由 Compactor 兜底（真实默认见 agent/compactor.go）。
 	ContextCharLimit *int `yaml:"context_char_limit"`
 }
 
@@ -46,11 +46,12 @@ func Default() *Config {
 	resultLimit := 8000
 	compressThreshold := 0.8
 	return &Config{
-		Temperature:      &temperature,
-		MaxIterations:    &maxIterations,
-		ResultLimit:      &resultLimit,
+		Temperature:       &temperature,
+		MaxIterations:     &maxIterations,
+		ResultLimit:       &resultLimit,
 		CompressThreshold: &compressThreshold,
-		ContextLimit:     nil, // 未显式设置：走 env → 模型推断
+		ContextLimit:      nil, // 未显式设置：走 env → 模型推断
+		ContextCharLimit:  nil, // 真实默认 50000 定义在 agent/compactor.go 的 contextCharLimit（双源，改动需同步）
 	}
 }
 
@@ -97,10 +98,8 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// Apply 将显式设置的字段合并到 base 上（base 优先于显式零值时的默认）。
-// 返回合并后的新配置（不修改接收者）。
-//
-// 语义：base 提供"代码默认"，c 中的非 nil 字段覆盖对应项。
+// Apply 将 c 中显式设置（非 nil）的字段覆盖到 base 的默认值上，返回合并结果。
+// 不修改接收者；base 为 nil 时回退 Default()。
 // 用于 config 文件（已 Load）叠加到 Default() 之上。
 func (c *Config) Apply(base *Config) *Config {
 	if base == nil {

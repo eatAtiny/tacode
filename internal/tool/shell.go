@@ -2,14 +2,16 @@ package tool
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
 	"time"
 
-	"agentic/internal/sandbox"
+	"tacode/internal/sandbox"
 )
+
+// defaultCmdTimeout 命令执行默认超时（shell/git 工具共享）。
+const defaultCmdTimeout = 30 * time.Second
 
 // ShellTool 执行 shell 命令。
 type ShellTool struct {
@@ -20,12 +22,12 @@ type ShellTool struct {
 
 // NewShellTool 创建无沙箱 shell 工具（默认，向后兼容）。
 func NewShellTool() *ShellTool {
-	return &ShellTool{timeout: 30 * time.Second, approved: make(map[string]bool)}
+	return &ShellTool{timeout: defaultCmdTimeout, approved: make(map[string]bool)}
 }
 
 // NewShellToolWithSandbox 创建带沙箱的 shell 工具。
 func NewShellToolWithSandbox(sb sandbox.Sandbox) *ShellTool {
-	return &ShellTool{timeout: 30 * time.Second, sandbox: sb, approved: make(map[string]bool)}
+	return &ShellTool{timeout: defaultCmdTimeout, sandbox: sb, approved: make(map[string]bool)}
 }
 
 // AllowNetworkFor 记录已确认放行网络的命令参数。
@@ -70,7 +72,7 @@ func (t *ShellTool) Execute(args string) (string, error) {
 		Network bool   `json:"network"`
 	}
 	if err := parseArgs(args, &params); err != nil {
-		return "", fmt.Errorf("parse args: %w", err)
+		return "", err
 	}
 	if strings.TrimSpace(params.Command) == "" {
 		return "", fmt.Errorf("command is empty")
@@ -92,24 +94,36 @@ func (t *ShellTool) Execute(args string) (string, error) {
 			cmd = t.sandbox.Wrap(cmd)
 		}
 	}
+	return runCmd(ctx, cmd, "命令", "", t.timeout)
+}
+
+// ──────────────────────────────────────────────────────────
+// 共享命令执行辅助（shell/git 工具复用）
+// ──────────────────────────────────────────────────────────
+
+// runCmd 执行 cmd 并返回 TrimSpace 后的合并输出（stdout + stderr），
+// 统一包装超时与非零退出码错误：
+//   - 超时 → "<label>超时 (<timeout>)"，timeoutCmd 非空时附命令回显
+//   - 非零退出码 → "<label>失败 (退出码 N)"，附输出或「无输出」
+//
+// label 是错误前缀（shell 传 "命令"，git 传 "git 命令"）；
+// timeoutCmd 是超时错误中回显给用户的命令（空串表示不回显）。
+func runCmd(ctx context.Context, cmd *exec.Cmd, label, timeoutCmd string, timeout time.Duration) (string, error) {
 	output, err := cmd.CombinedOutput()
 	result := strings.TrimSpace(string(output))
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("命令超时 (%s)", t.timeout)
-		}
-		// 提取退出码，让 LLM 能看到具体的失败原因。
-		exitCode := -1
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
+			if timeoutCmd != "" {
+				return "", fmt.Errorf("%s超时 (%s): %s", label, timeout, timeoutCmd)
+			}
+			return "", fmt.Errorf("%s超时 (%s)", label, timeout)
 		}
 		if result != "" {
-			return "", fmt.Errorf("命令失败 (退出码 %d):\n%s", exitCode, result)
+			return "", fmt.Errorf("%s失败 (退出码 %d):\n%s", label, exitCodeOf(err), result)
 		}
-		return "", fmt.Errorf("命令失败 (退出码 %d)，无输出", exitCode)
+		return "", fmt.Errorf("%s失败 (退出码 %d)，无输出", label, exitCodeOf(err))
 	}
-
 	return result, nil
 }
 
@@ -159,7 +173,7 @@ func (t *ShellTool) CheckPermission(args string) PermissionResult {
 // 可接受（该命令已不属于只读，走串行 + 权限确认路径兜底）。
 func isDangerousShellCommand(args string) bool {
 	var params map[string]interface{}
-	if err := json.Unmarshal([]byte(args), &params); err != nil {
+	if err := parseArgs(args, &params); err != nil {
 		return false
 	}
 
@@ -172,10 +186,9 @@ func isDangerousShellCommand(args string) bool {
 	normalized := strings.Join(strings.Fields(command), " ")
 
 	// 危险命令列表（归一化后子串匹配，大小写不敏感）。
+	// "rm " 前缀已覆盖 "rm -rf"/"rm -r" 等所有 rm 变体，无需单列。
 	dangerousCommands := []string{
 		"rm ", // 普通 rm 删除也需确认（如 "rm /tmp/foo"）；尾随空格避免子串误伤 rmdir/warmup/firmware 等
-		"rm -rf",
-		"rm -r",
 		"mkfs",
 		"dd if=",
 		"chmod 777",
@@ -258,12 +271,21 @@ var readOnlyCommands = []string{
 
 // isReadOnlyShellCommand 检查 shell 命令是否为只读操作。
 //
-// 策略：
+// 策略（按序检查，任一命中 → false）：
 //  1. 解析 JSON 参数提取 command 字段
-//  2. 去掉前导空格
-//  3. 检查是否以只读命令前缀开头
+//  2. 命令串包含 ">"（任何重定向：>、>>、2>、2>&1）→ 一律 false。
+//     旧实现按整串包含做「含 2> 则豁免 > 检查」，被 "cat a > b 2>&1"
+//     类命令利用任意位置的 2> 绕过（已实证），故收紧为见 > 即非只读。
+//  3. 包含 "|" → 按 | 拆段，每段 TrimSpace 后必须命中白名单前缀，
+//     否则 false。旧实现只校验首段，管道右侧完全不受限，
+//     "cat f | tee g" 因此被误判只读（已实证）。
+//  4. 其余：整串按白名单前缀判断（与管道分段同一规则）。
 //
-// fail-closed：任何不确定的命令都返回 false（不安全）。
+// fail-closed：任何不确定的命令（解析失败、空段、白名单未命中、
+// 含重定向）都返回 false（不安全），并发绿色通道只在全部规则通过时
+// 开放。已知存量缺口（前缀白名单模型固有）：; / && / 换行命令链、
+// $() 与反引号命令替换、白名单命令自身的写参数（如 sort -o）不在
+// 本函数解析范围内。
 func isReadOnlyShellCommand(args string) bool {
 	var params map[string]interface{}
 	if err := parseArgs(args, &params); err != nil {
@@ -275,26 +297,43 @@ func isReadOnlyShellCommand(args string) bool {
 		return false
 	}
 
-	cmd := strings.TrimSpace(command)
-	cmdLower := strings.ToLower(cmd)
+	cmdLower := strings.ToLower(strings.TrimSpace(command))
 
+	// 任何重定向 → 一律非只读。纯 stderr 丢弃（2>/dev/null）实际无
+	// 副作用，此处一并收紧，换取判定规则的可证明性（整串包含式的
+	// 条件豁免已被实证可绕过，不再使用）。
+	if strings.Contains(cmdLower, ">") {
+		return false
+	}
+
+	// 管道：逐段白名单校验，任一段不命中 → 非只读。
+	if strings.Contains(cmdLower, "|") {
+		for _, seg := range strings.Split(cmdLower, "|") {
+			if !matchesReadOnlyPrefix(strings.TrimSpace(seg)) {
+				return false
+			}
+		}
+		return true
+	}
+
+	return matchesReadOnlyPrefix(cmdLower)
+}
+
+// matchesReadOnlyPrefix 检查单条裸命令段（不含重定向/管道）是否以
+// readOnlyCommands 白名单前缀开头。前缀后必须是串尾或空白字符，
+// 防止 "lsfoo" 误命中 "ls"。
+func matchesReadOnlyPrefix(cmdLower string) bool {
+	if cmdLower == "" {
+		return false
+	}
 	for _, safe := range readOnlyCommands {
 		if strings.HasPrefix(cmdLower, safe) {
-			// 额外的安全检查：避免误匹配
-			// 例如 "cat file" 是安全的，但 "cat file > other" 不是
 			remaining := cmdLower[len(safe):]
 			if remaining == "" || remaining[0] == ' ' || remaining[0] == '\t' {
-				// 检查是否有重定向或管道写入
-				if strings.Contains(cmdLower, ">") && !strings.Contains(cmdLower, "2>") {
-					// 有输出重定向（排除 stderr 重定向）→ 不是只读
-					// 但 "git log > /dev/null" 实际无副作用，此处简化处理
-					return false
-				}
 				return true
 			}
 		}
 	}
-
 	return false
 }
 

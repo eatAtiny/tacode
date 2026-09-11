@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"agentic/internal/tool"
+	"tacode/internal/tool"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )

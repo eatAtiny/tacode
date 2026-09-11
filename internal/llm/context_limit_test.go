@@ -5,6 +5,8 @@ import (
 )
 
 func TestInferContextLimit_KnownModels(t *testing.T) {
+	// 表中已并入兜底分支的型号名（gpt-3.5-turbo-16k、claude 系列等）
+	// 是回归锚点：防止兜底分支将来丢失/改值导致这些型号的返回值漂移。
 	tests := []struct {
 		model string
 		want  int
@@ -13,11 +15,18 @@ func TestInferContextLimit_KnownModels(t *testing.T) {
 		{"gpt-4o", 128_000},
 		{"gpt-4-turbo", 128_000},
 		{"gpt-4", 8_192},
+		{"gpt-3.5-turbo-16k", 16_384},
 		{"gpt-3.5-turbo", 16_384},
 		{"claude-sonnet-4", 200_000},
 		{"claude-opus-4", 200_000},
+		{"claude-3.5-sonnet", 200_000},
+		{"claude-3-opus", 200_000},
+		{"claude-3-haiku", 200_000},
+		{"claude-haiku-4", 200_000},
 		{"mimo-v2.5-pro", 1_000_000},
+		{"mimo-v2-pro", 1_000_000}, // 不含 "mimo-v2.5" 子串，须独立命中 1M 分支
 		{"mimo-v2-omni", 256_000},
+		{"mimo-v2-flash", 256_000},
 		{"deepseek-v4-flash", 1_000_000},
 		{"deepseek-chat", 128_000},
 		{"deepseek-reasoner", 128_000},

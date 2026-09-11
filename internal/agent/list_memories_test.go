@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"agentic/internal/memory"
-	"agentic/internal/ui/text"
+	"tacode/internal/memory"
+	"tacode/internal/ui/text"
 )
 
 // ──────────────────────────────────────────────────────────
@@ -33,11 +33,11 @@ func TestListMemories_ShowsThreeTiers(t *testing.T) {
 	ui := newCaptureUI()
 
 	// 三个 store 各放一条记忆。
-	globalMem, _ := memory.NewMemoryStore(t.TempDir())
+	globalMem := memory.NewMemoryStore(t.TempDir())
 	_ = globalMem.SaveEntry(memory.MemoryEntry{Name: "g1", Description: "用户偏好", Type: "user", Importance: 4, Content: "x"})
-	projectMem, _ := memory.NewMemoryStore(t.TempDir())
+	projectMem := memory.NewMemoryStore(t.TempDir())
 	_ = projectMem.SaveEntry(memory.MemoryEntry{Name: "p1", Description: "项目约定", Type: "project", Importance: 3, Content: "y"})
-	sessionMem, _ := memory.NewMemoryStore(t.TempDir())
+	sessionMem := memory.NewMemoryStore(t.TempDir())
 	_ = sessionMem.SaveEntry(memory.MemoryEntry{Name: "s1", Description: "会话细节", Type: "feedback", Importance: 2, Content: "z"})
 
 	r := &Runner{
@@ -75,7 +75,7 @@ func TestListMemories_ShowsThreeTiers(t *testing.T) {
 func TestListMemories_NoStores_ShowsEmptyHint(t *testing.T) {
 	ui := newCaptureUI()
 	r := &Runner{
-		memStore: func() *memory.MemoryStore { m, _ := memory.NewMemoryStore(t.TempDir()); return m }(),
+		memStore: memory.NewMemoryStore(t.TempDir()),
 		ui:       ui,
 	}
 	r.listMemories()
