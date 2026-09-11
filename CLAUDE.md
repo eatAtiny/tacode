@@ -170,7 +170,7 @@ Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncat
 | `/memory` | List L3 memories |
 | `/memory add <content>` | Add L3 memory |
 | `/memory rm <name>` | Delete L3 memory |
-| `/interrupt` | 查询运行中（含工具执行间隙）输入 `/interrupt` 或 `/retry` → 经 `inputForward` 转发给运行中的循环，中止剩余工具并注入中断提示，让 LLM 调整策略 |
+| `/interrupt` | 查询运行中（含工具执行间隙）输入 `/interrupt` → 经 `inputForward` 转发给运行中的循环，中止剩余工具并注入中断提示，让 LLM 调整策略 |
 | `/stop` | Cancel running query |
 | `exit` | Quit |
 
@@ -201,12 +201,12 @@ On each user input:
 
 ### `internal/agent/` (13 files)
 - `runner.go` — `Runner` struct, `Run()` REPL, async query dispatch, cross-round message accumulation
-- `repl.go` — REPL 主循环：select 模型 + 输入排队/转发协议（/interrupt、/retry 控制命令经 `inputForward` 转发）
+- `repl.go` — REPL 主循环：select 模型 + 输入排队/转发协议（/interrupt 控制命令经 `inputForward` 转发）
 - `query_engine.go` — message assembly (system + preamble + conversation + task), compactor prepare, event consumption
 - `query_loop.go` — core ReAct loop, streaming, tool execution, compaction wiring, reactive compact
 - `tool_exec.go` — 工具调用执行子系统：并发/串行分类、权限确认协议、中断注入、read-before-edit 状态
 - `oneshot.go` — headless 单次查询入口（`RunOnce`，配合 TextUI / 子 agent）
-- `types.go` — `QueryEvent`, `QueryEventType` enum, `queryResult`
+- `types.go` — `QueryEvent` 密封接口 + 8 个具体事件类型, `queryResult`
 - `permission.go` — `ToolPermissionChecker` 接口、`globalPermissionChecker` 注入点、`ForbiddenTools` 列表
 - `memory.go` — L3 memory extraction, `/compress` and `/memory` commands
 - `session.go` — session commands, `ensurePersisted()`, `cleanOrphanTempDirs()`

@@ -38,7 +38,7 @@ import (
 //   - ctx: 上下文，用于取消和超时控制（/stop 通过 cancel 实现）
 //   - round: 当前轮次号（从 1 开始）
 //   - userInput: 用户输入的原始文本
-//   - inputForward: 权限确认输入与控制命令（/interrupt、/retry）转发通道（Runner 转发到此）
+//   - inputForward: 权限确认输入与控制命令（/interrupt）转发通道（Runner 转发到此）
 //   - baseMessages: 跨轮累积的对话消息（nil 时从记忆构建）
 //
 // 返回：

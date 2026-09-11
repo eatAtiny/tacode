@@ -87,8 +87,10 @@ func TestHandleInput_QueryRunningForwardsInterrupt(t *testing.T) {
 	}
 }
 
-// handleInput 查询运行中输入 /retry 前缀命令（含参数）同样转发 inputForward。
-func TestHandleInput_QueryRunningForwardsRetry(t *testing.T) {
+// handleInput 查询运行中输入 /retry 已不再被当作控制命令：它和普通消息一样
+// 排队，查询结束后作为下一轮输入发送（此前会被转发进 inputForward 后被
+// peekInterrupt 消费掉，既没重试也没排队——消息静默消失）。
+func TestHandleInput_QueryRunningQueuesRetry(t *testing.T) {
 	r := newTestRunner(t)
 	ctx := context.Background()
 
@@ -109,16 +111,14 @@ func TestHandleInput_QueryRunningForwardsRetry(t *testing.T) {
 	if exit := r.handleInput(retryCmd, ctx, &queryResultCh, &queryCancel, &queryRunning, &round, &currentInput, &inputForward, &pendingInputs); exit {
 		t.Fatal("不应退出")
 	}
-	if len(pendingInputs) != 0 {
-		t.Errorf("/retry 不应排队，pendingInputs = %v", pendingInputs)
+	if len(pendingInputs) != 1 || pendingInputs[0] != retryCmd {
+		t.Errorf("/retry 应排队，pendingInputs = %v", pendingInputs)
 	}
 	select {
 	case got := <-inputForward:
-		if got != retryCmd {
-			t.Errorf("inputForward = %q, want %q", got, retryCmd)
-		}
+		t.Errorf("/retry 不应写入 inputForward，却收到 %q", got)
 	default:
-		t.Error("inputForward 应收到 /retry 命令（mid-loop 转发，而非排队）")
+		// 预期：inputForward 保持为空。
 	}
 }
 

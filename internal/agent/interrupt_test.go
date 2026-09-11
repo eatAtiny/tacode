@@ -15,7 +15,9 @@ import (
 //
 // queryLoopContext 支持 inputForward 通道接收控制命令：
 //   - /interrupt → 中止当前批次的工具执行，注入提示让 LLM 调整策略
-//   - /retry     → 同样中止（带新参数的 /retry <args> 由上层处理）
+//
+// 历史上还接受 /retry 前缀，但那条路径从未实现（只把命令文本拼进给 LLM 的
+// 提示，没有任何代码重新执行工具），已移除——现在 /retry 是普通输入。
 // ──────────────────────────────────────────────────────────
 
 // alwaysAllowChecker 放行所有权限的测试用 checker。
@@ -78,11 +80,43 @@ func TestPeekInterrupt_NoCommand(t *testing.T) {
 	}
 }
 
-func TestPeekInterrupt_RetryCommand(t *testing.T) {
+// /retry 已不再是控制命令：peekInterrupt 不认识它，返回空串。
+// 注意该值会被消费掉（peekInterrupt 无回填），这是当前的已知行为。
+func TestPeekInterrupt_RetryIsNoLongerControlCommand(t *testing.T) {
 	ch := make(chan string, 1)
 	ch <- "/retry {\"command\":\"ls\"}"
 	lc := &queryLoopContext{inputForward: ch}
-	if cmd := lc.peekInterrupt(); cmd != "/retry {\"command\":\"ls\"}" {
-		t.Errorf("retry command should pass through, got %q", cmd)
+	if cmd := lc.peekInterrupt(); cmd != "" {
+		t.Errorf("/retry 不应被识别为控制命令，got %q", cmd)
+	}
+	if len(ch) != 0 {
+		t.Errorf("peekInterrupt 应已消费该值，channel 长度 = %d", len(ch))
+	}
+}
+
+// 带前后空白的 /interrupt 仍应被识别（TrimSpace 归一化）。
+func TestPeekInterrupt_InterruptWithWhitespace(t *testing.T) {
+	ch := make(chan string, 1)
+	ch <- "  /interrupt\n"
+	lc := &queryLoopContext{inputForward: ch}
+	if cmd := lc.peekInterrupt(); cmd != "/interrupt" {
+		t.Errorf("应归一化为 /interrupt，got %q", cmd)
+	}
+}
+
+// isControlCommand 只认 /interrupt；/retry 及其它输入均返回 false。
+func TestIsControlCommand(t *testing.T) {
+	cases := map[string]bool{
+		"/interrupt":              true,
+		"  /interrupt  ":          true,
+		"/retry":                  false,
+		`/retry {"command":"ls"}`: false,
+		"/stop":                   false,
+		"普通消息":                    false,
+	}
+	for input, want := range cases {
+		if got := isControlCommand(input); got != want {
+			t.Errorf("isControlCommand(%q) = %v, want %v", input, got, want)
+		}
 	}
 }

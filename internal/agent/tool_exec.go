@@ -79,7 +79,7 @@ func (lc *queryLoopContext) executeToolCalls(toolCalls []llm.ToolCall) bool {
 	}
 
 	// ── 阶段 2: 串行执行其余工具 ──
-	// 每执行一个工具前检查中断信号（/interrupt 等）：收到则中止后续工具，
+	// 每执行一个工具前检查中断信号（/interrupt）：收到则中止后续工具，
 	// 注入中断提示让 LLM 知道当前状态，继续循环让 LLM 调整策略。
 	for _, item := range serialItems {
 		if cmd := lc.peekInterrupt(); cmd != "" {
@@ -94,17 +94,21 @@ func (lc *queryLoopContext) executeToolCalls(toolCalls []llm.ToolCall) bool {
 	return true
 }
 
-// peekInterrupt 非阻塞检查输入转发通道是否有控制命令（/interrupt、/retry）。
+// peekInterrupt 非阻塞检查输入转发通道是否有控制命令（/interrupt）。
 // 返回命令字符串；无命令或通道未启用时返回空字符串。
+//
+// 注意：本函数会消费（读出）通道里的值。读到非 /interrupt 的值时返回 ""——
+// 该值就此丢弃，不再回到 pendingInputs。正常情况下上游 handleInput 已按
+// isControlCommand 过滤，不会把普通输入写进来；唯一的例外是 permWaiting
+// 竞态窗口（见 query_engine.go 的 PermissionRequest 分支）下抢跑的权限答案。
 func (lc *queryLoopContext) peekInterrupt() string {
 	if lc.inputForward == nil {
 		return ""
 	}
 	select {
 	case cmd := <-lc.inputForward:
-		cmd = strings.TrimSpace(cmd)
-		if cmd == "/interrupt" || strings.HasPrefix(cmd, "/retry") {
-			return cmd
+		if strings.TrimSpace(cmd) == "/interrupt" {
+			return "/interrupt"
 		}
 		return ""
 	default:

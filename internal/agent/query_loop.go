@@ -35,7 +35,7 @@ type queryLoopContext struct {
 	toolRegistry      *tool.Registry       // 工具注册表，用于查找和执行工具
 	maxIter           int                  // 最大迭代次数
 	resultLimit       int                  // 结果截断上限（字符数，默认 8000）
-	inputForward      <-chan string        // 权限确认输入与控制命令（/interrupt、/retry）转发通道，nil = 不启用
+	inputForward      <-chan string        // 权限确认输入与控制命令（/interrupt）转发通道，nil = 不启用
 	events            chan<- QueryEvent    // 事件输出 channel（yield 事件到此）
 	seenToolCalls     map[string]bool      // 已见过的工具调用签名（用于重复检测）
 	totalInputTokens  int                  // 累计输入 token 数
@@ -160,7 +160,7 @@ func queryLoop(
 // 零值表示使用默认值。
 type queryLoopOptions struct {
 	ResultLimit   int           // 结果截断上限，字符数（默认 8000）
-	InputForward  <-chan string // 权限确认输入与控制命令（/interrupt、/retry）转发通道，nil = 不启用
+	InputForward  <-chan string // 权限确认输入与控制命令（/interrupt）转发通道，nil = 不启用
 	ActiveRequest string        // 当前轮用户请求（压缩时注入 [Compacted] 消息用）
 	Compactor     *Compactor    // s08 四步压缩管线（nil = 禁用，保持旧行为）
 }
