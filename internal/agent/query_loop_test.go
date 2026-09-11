@@ -98,7 +98,7 @@ func TestParallelToolExecution(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCalls(toolCalls, 0)
+		lc.executeToolCalls(toolCalls)
 	}()
 
 	results, _ := collectEvents(events, &wg, 2*time.Second, false)
@@ -163,7 +163,7 @@ func TestParallelExecutionIsFaster(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCalls(toolCalls, 0)
+		lc.executeToolCalls(toolCalls)
 	}()
 
 	collectEvents(events, &wg, 2*time.Second, false)
@@ -214,7 +214,7 @@ func TestMixedConcurrentAndSerial(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCalls(toolCalls, 0)
+		lc.executeToolCalls(toolCalls)
 	}()
 
 	// autoApprove=true: 统一事件处理器自动批准权限 → file write 不会阻塞。
@@ -264,7 +264,7 @@ func TestLargeResultPersistence(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCalls(toolCalls, 0)
+		lc.executeToolCalls(toolCalls)
 	}()
 
 	results, _ := collectEvents(events, &wg, 2*time.Second, false)
@@ -307,7 +307,7 @@ func TestPermissionBlocksConcurrent(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCalls(toolCalls, 0)
+		lc.executeToolCalls(toolCalls)
 	}()
 
 	// autoApprove=true 解除阻塞，同时记录权限事件。
@@ -360,7 +360,7 @@ func TestForbiddenToolBlocksConcurrentClassification(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCalls(toolCalls, 0)
+		lc.executeToolCalls(toolCalls)
 	}()
 
 	results, _ := collectEvents(events, &wg, 2*time.Second, false)
@@ -407,7 +407,7 @@ func TestGlobalPermissionCheckerBlocksConcurrentClassification(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCalls(toolCalls, 0)
+		lc.executeToolCalls(toolCalls)
 	}()
 
 	results, _ := collectEvents(events, &wg, 2*time.Second, false)

@@ -51,7 +51,7 @@ func TestExecuteToolCalls_InterruptSkipsRemaining(t *testing.T) {
 		{ID: "c2", Name: "file", Arguments: `{"action": "write", "path": "` + tmpDir + `/b.txt", "content": "b"}`},
 	}
 
-	lc.executeToolCalls(toolCalls, 0)
+	lc.executeToolCalls(toolCalls)
 
 	// 两个工具都被跳过（中断提示代替执行）。
 	if len(lc.messages) != 1 {

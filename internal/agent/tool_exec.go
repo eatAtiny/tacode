@@ -27,15 +27,9 @@ import (
 // 返回：
 //   - true: 继续执行
 //   - false: 发生错误，需要退出
-func (lc *queryLoopContext) executeToolCalls(toolCalls []llm.ToolCall, iter int) bool {
-	// yield: 工具调用请求（含完整 toolCalls 列表和 token 统计）。
-	lc.events <- ToolCallEvent{
-		ToolCalls:    toolCalls,
-		Iteration:    iter + 1,
-		InputTokens:  lc.lastInputTokens,
-		OutputTokens: lc.lastOutputTokens,
-		TotalTokens:  lc.totalInputTokens + lc.totalOutputTokens,
-	}
+func (lc *queryLoopContext) executeToolCalls(toolCalls []llm.ToolCall) bool {
+	// yield: 工具调用请求（含完整 toolCalls 列表）。
+	lc.events <- ToolCallEvent{ToolCalls: toolCalls}
 
 	// ── 分类：并发安全 vs 串行 ──
 	//
@@ -81,7 +75,7 @@ func (lc *queryLoopContext) executeToolCalls(toolCalls []llm.ToolCall, iter int)
 		for i, item := range concurrentItems {
 			concurrentTCs[i] = item.tc
 		}
-		lc.executeConcurrentTools(concurrentTCs, iter)
+		lc.executeConcurrentTools(concurrentTCs)
 	}
 
 	// ── 阶段 2: 串行执行其余工具 ──
@@ -89,10 +83,10 @@ func (lc *queryLoopContext) executeToolCalls(toolCalls []llm.ToolCall, iter int)
 	// 注入中断提示让 LLM 知道当前状态，继续循环让 LLM 调整策略。
 	for _, item := range serialItems {
 		if cmd := lc.peekInterrupt(); cmd != "" {
-			lc.injectInterruptNotice(item.tc, iter, cmd)
+			lc.injectInterruptNotice(item.tc, cmd)
 			return true
 		}
-		if !lc.executeSingleTool(item.tc, iter) {
+		if !lc.executeSingleTool(item.tc) {
 			return false
 		}
 	}
@@ -120,7 +114,7 @@ func (lc *queryLoopContext) peekInterrupt() string {
 
 // injectInterruptNotice 注入中断提示到消息历史。
 // 让 LLM 知道用户中断了工具执行，可据此调整策略（或直接回答）。
-func (lc *queryLoopContext) injectInterruptNotice(tc llm.ToolCall, iter int, cmd string) {
+func (lc *queryLoopContext) injectInterruptNotice(tc llm.ToolCall, cmd string) {
 	notice := fmt.Sprintf("用户已中断工具 %s 的执行（%s）。"+
 		"请根据已有信息调整策略：可直接给出回答，或尝试其他方案。", tc.Name, cmd)
 	lc.messages = append(lc.messages, llm.ChatMessage{
@@ -131,7 +125,6 @@ func (lc *queryLoopContext) injectInterruptNotice(tc llm.ToolCall, iter int, cmd
 		ToolName:   tc.Name,
 		ToolResult: notice,
 		IsError:    true,
-		Iteration:  iter + 1,
 	}
 }
 
@@ -153,7 +146,7 @@ type toolExecResult struct {
 //   - 各工具读取独立文件，无竞争
 //   - fileReads map 在并行写时由 mu 保护
 //   - event channel 只在主 goroutine 写入
-func (lc *queryLoopContext) executeConcurrentTools(toolCalls []llm.ToolCall, iter int) {
+func (lc *queryLoopContext) executeConcurrentTools(toolCalls []llm.ToolCall) {
 	// 结果切片（预分配，按索引存储，保持原始顺序）。
 	results := make([]toolExecResult, len(toolCalls))
 
@@ -239,7 +232,6 @@ func (lc *queryLoopContext) executeConcurrentTools(toolCalls []llm.ToolCall, ite
 			ToolName:   tc.Name,
 			ToolResult: r.result,
 			IsError:    r.isError,
-			Iteration:  iter + 1,
 		}
 
 		lc.messages = append(lc.messages, llm.ChatMessage{
@@ -266,11 +258,11 @@ func (lc *queryLoopContext) executeConcurrentTools(toolCalls []llm.ToolCall, ite
 // 返回：
 //   - true: 继续执行（即使工具执行出错也继续，让 LLM 自行处理错误）
 //   - false: 发生致命错误，需要退出
-func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
+func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall) bool {
 	// ── 子步骤 1: 全局禁止列表 ──
 	if isToolForbidden(tc.Name) {
 		errMsg := fmt.Sprintf("工具已被禁止使用: %s", tc.Name)
-		lc.yieldToolError(tc, errMsg, iter)
+		lc.yieldToolError(tc, errMsg)
 		return true
 	}
 
@@ -278,12 +270,12 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 	t := lc.toolRegistry.Get(tc.Name)
 	if t == nil {
 		errMsg := fmt.Sprintf("未知工具: %s", tc.Name)
-		lc.yieldToolError(tc, errMsg, iter)
+		lc.yieldToolError(tc, errMsg)
 		return true
 	}
 
 	// ── 子步骤 3: 权限检查（工具自检） ──
-	if !lc.checkToolPermission(tc, t, iter) {
+	if !lc.checkToolPermission(tc, t) {
 		return true // 权限拒绝，但继续执行下一个工具
 	}
 
@@ -295,7 +287,7 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 	// ── 子步骤 4b: Pre-tool hooks ──
 	if hookErr := lc.toolRegistry.BeforeHooks(tc.Name, tc.Arguments); hookErr != nil {
 		errMsg := fmt.Sprintf("工具执行被钩子阻止: %v", hookErr)
-		lc.yieldToolError(tc, errMsg, iter)
+		lc.yieldToolError(tc, errMsg)
 		return true
 	}
 
@@ -337,7 +329,6 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 		ToolName:   tc.Name,
 		ToolResult: result,
 		IsError:    execErr != nil,
-		Iteration:  iter + 1,
 	}
 
 	// ── 子步骤 8: 记录文件 mtime（用于 read-before-edit 检测） ──
@@ -368,12 +359,12 @@ func (lc *queryLoopContext) executeSingleTool(tc llm.ToolCall, iter int) bool {
 //	→ QueryEngine 收到事件 → 调用 UI.ConfirmPermission()
 //	→ 用户在终端输入 y/N → 写入 PermissionCh
 //	→ checkToolPermission 从 PermissionCh 读取结果 → 继续或拒绝
-func (lc *queryLoopContext) checkToolPermission(tc llm.ToolCall, t tool.Tool, iter int) bool {
+func (lc *queryLoopContext) checkToolPermission(tc llm.ToolCall, t tool.Tool) bool {
 	// ── 全局权限注入点（极端定制场景） ──
 	if globalPermissionChecker != nil {
 		if !globalPermissionChecker.CheckPermission(tc.Name, tc.Arguments) {
 			errMsg := "全局权限策略拒绝执行"
-			lc.yieldToolError(tc, errMsg, iter)
+			lc.yieldToolError(tc, errMsg)
 			return false
 		}
 		return true
@@ -388,18 +379,17 @@ func (lc *queryLoopContext) checkToolPermission(tc llm.ToolCall, t tool.Tool, it
 	// ── 需要确认 ──
 	ch := make(chan bool, 1)
 	lc.events <- PermissionRequest{
-		Tool:      tc.Name,
-		Args:      tc.Arguments,
-		Reason:    perm.Reason,
-		Reply:     ch,
-		Iteration: iter + 1,
+		Tool:   tc.Name,
+		Args:   tc.Arguments,
+		Reason: perm.Reason,
+		Reply:  ch,
 	}
 
 	// 阻塞等待用户确认。
 	approved := <-ch
 	if !approved {
 		errMsg := "用户拒绝执行"
-		lc.yieldToolError(tc, errMsg, iter)
+		lc.yieldToolError(tc, errMsg)
 		return false
 	}
 

@@ -21,7 +21,7 @@ func TestYieldFinal_CarriesTokens(t *testing.T) {
 		totalInputTokens:  100,
 		totalOutputTokens: 50,
 	}
-	lc.yieldFinal("final answer", 3)
+	lc.yieldFinal("final answer")
 
 	var evt QueryEvent
 	var ok bool

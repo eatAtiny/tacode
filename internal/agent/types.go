@@ -46,7 +46,6 @@ type QueryEvent interface{ isQueryEvent() }
 // ThinkEvent LLM 开始新一轮思考。
 // 触发时机：每次调用 LLM 之前。
 type ThinkEvent struct {
-	Content   string
 	Iteration int // 当前迭代次数（从 1 开始）
 }
 
@@ -57,10 +56,7 @@ func (ThinkEvent) isQueryEvent() {}
 // 注意：多次 Delta 后可能被 ToolCall 中断（LLM 转而请求工具），
 // 也可能在 Final 之前被清除（UI 恢复光标替换为渲染后的最终回答）。
 type DeltaEvent struct {
-	Content      string
-	Iteration    int
-	InputTokens  int
-	OutputTokens int
+	Content string
 }
 
 func (DeltaEvent) isQueryEvent() {}
@@ -68,11 +64,7 @@ func (DeltaEvent) isQueryEvent() {}
 // ToolCallEvent LLM 请求调用工具。
 // 触发时机：LLM 返回 tool_calls 后。
 type ToolCallEvent struct {
-	ToolCalls    []llm.ToolCall
-	Iteration    int
-	InputTokens  int
-	OutputTokens int
-	TotalTokens  int
+	ToolCalls []llm.ToolCall
 }
 
 func (ToolCallEvent) isQueryEvent() {}
@@ -83,7 +75,6 @@ type ToolResultEvent struct {
 	ToolName   string
 	ToolResult string // 执行输出
 	IsError    bool   // 是否出错
-	Iteration  int
 }
 
 func (ToolResultEvent) isQueryEvent() {}
@@ -98,27 +89,23 @@ type PermissionRequest struct {
 	// Reply 承载用户决策：dispatch 写入，checkToolPermission 阻塞读取。
 	// 缓冲为 1，勿改——无缓冲会改变调度时序。
 	Reply chan bool
-
-	Iteration int
 }
 
 func (PermissionRequest) isQueryEvent() {}
 
 // ContinueEvent 继续推理（本轮工具执行完毕，准备进入下一轮迭代）。
 type ContinueEvent struct {
-	Iteration    int
-	InputTokens  int
-	OutputTokens int
-	TotalTokens  int
+	Iteration int
 }
 
 func (ContinueEvent) isQueryEvent() {}
 
 // FinalEvent 最终回答。
 // 触发时机：LLM 不再需要调用工具，直接给出回答。
+// token 统计只在本类型上保留——它是唯一被 UI 消费 token 的事件
+// （ui.OnFinal 的四个参数直接来自这里）。
 type FinalEvent struct {
 	Content      string // 完整最终回答（Markdown 格式）
-	Iteration    int
 	InputTokens  int
 	OutputTokens int
 	TotalTokens  int
@@ -133,8 +120,7 @@ func (FinalEvent) isQueryEvent() {}
 // LoopError 循环错误。
 // 触发时机：LLM 调用失败、流式中断、达到最大迭代次数等。
 type LoopError struct {
-	Content string // 人类可读描述（如 "stream error"）
-	Err     error  // 底层错误对象
+	Err error // 底层错误对象
 }
 
 func (LoopError) isQueryEvent() {}
