@@ -144,7 +144,8 @@ Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncat
 - `shell`/`file` 的写操作、`edit` 等高风险操作触发确认；`grep`/`list`/`webfetch` 等只读操作默认放行。
 - 可选全局注入点 `ToolPermissionChecker`（`CheckPermission(toolName, args) bool`）：通过 `SetPermissionChecker()` 注入自定义策略时覆盖所有工具判定（默认 nil = 用工具自身 `CheckPermission`）。另有全局 `ForbiddenTools` 禁止列表（管理级完全禁用某工具，当前无代码向其追加）。
 - Confirm flows through `UI.ConfirmPermission()` → `PermissionCh` channel → back to queryLoop (blocking).
-- BubbleUI 下权限确认显示为输入框上方的弹层（黄色警告框，含工具/参数/原因），用户在 textarea 输入 y/N。
+- BubbleUI 下权限确认是输入框上方的**模态**弹层（黄色警告框，含工具/参数/原因 + YES/NO 选项）：按键由弹层直接消费（↑↓ 切换 · Enter 确认 · y/n 直达 · Esc 拒绝 · ctrl+c 仍退出），答案经 `ChatModel.permissionDone` 私有 channel 回传，**不经过 textarea 与文本输入流**——因此不存在「用户正在打的消息被当作 y/N 吞掉」的歧义，主循环也无须判断某行输入是权限答案还是普通消息。
+- 弹层置起后经 `permArmDelay`（200ms，低于人的视觉简单反应时）才接收按键：置起到上屏之间有一段异步窗口，默认选中 YES，若用户此刻正敲回车会被当作「确认 YES」= 静默批准危险操作；窗口内按键一律丢弃（最坏吞掉一次打字中的回车，草稿仍在 textarea）。
 
 ### Session Management
 

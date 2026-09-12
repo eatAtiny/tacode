@@ -38,7 +38,8 @@ import (
 //   - ctx: 上下文，用于取消和超时控制（/stop 通过 cancel 实现）
 //   - round: 当前轮次号（从 1 开始）
 //   - userInput: 用户输入的原始文本
-//   - inputForward: 权限确认输入与控制命令（/interrupt）转发通道（Runner 转发到此）
+//   - inputForward: 控制命令（/interrupt）转发通道（Runner 转发到此）。
+//     权限答案不走此通道（UI 自行取得决定，见 UI.ConfirmPermission）
 //   - baseMessages: 跨轮累积的对话消息（nil 时从记忆构建）
 //
 // 返回：
@@ -124,7 +125,7 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 	// ═══════════════════════════════════════════════════════
 	// 步骤 5-6: 消费事件 + 返回最终结果（已抽取到 dispatch）
 	// ═══════════════════════════════════════════════════════
-	return r.dispatch(ctx, eventChan, round, inputForward)
+	return r.dispatch(ctx, eventChan, round)
 }
 
 // dispatch 消费 queryLoop 的事件流，转发到 UI + EventStore，并聚合最终结果。
@@ -153,7 +154,6 @@ func (r *Runner) dispatch(
 	ctx context.Context,
 	eventChan <-chan QueryEvent,
 	round int,
-	inputForward <-chan string,
 ) (finalAnswer string, finalMessages []llm.ChatMessage, err error) {
 	for event := range eventChan {
 		switch ev := event.(type) {
@@ -194,11 +194,13 @@ func (r *Runner) dispatch(
 		case PermissionRequest:
 			// 权限确认：调用 UI 获取用户决策，结果写回 channel。
 			// queryLoop 内部阻塞等待此 channel，实现同步确认。
-			// 设置 permWaiting：主循环据此把输入转发给 ConfirmPermission
-			// （而非排队），确认完成后清除。
-			r.permWaiting.Store(true)
-			approved, _ := r.ui.ConfirmPermission(ev.Tool, ev.Args, ev.Reason, inputForward)
-			r.permWaiting.Store(false)
+			// 取决定的过程不经过文本输入流（UI 实现负责），主循环无须
+			// 区分「这行输入是权限答案还是普通消息」。
+			// error（UI 无法取得决定）按拒绝处理——拿不到用户同意就不放行。
+			approved, err := r.ui.ConfirmPermission(ev.Tool, ev.Args, ev.Reason)
+			if err != nil {
+				approved = false
+			}
 			if ev.Reply != nil {
 				ev.Reply <- approved
 			}

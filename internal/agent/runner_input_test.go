@@ -7,8 +7,11 @@ import (
 
 // handleInput 查询运行中的普通输入应排队（不阻塞），而非转发 inputForward。
 //
-// Bug 2 回归：旧实现 `inputForward <- input` 在无权限确认读者时第 2 条输入
-// 阻塞冻结主循环。新实现用 pendingInputs 排队 + permWaiting 区分权限确认。
+// Bug 2 回归：旧实现 `inputForward <- input` 在无读者时第 2 条输入即阻塞
+// 冻结主循环。新实现用 pendingInputs 排队。
+//
+// 权限答案已不在此路径：确认由 UI 层自行取得（模态弹层 + 私有 channel），
+// 不经过文本输入流，因此主循环无须判断某行输入是否为权限答案。
 func TestHandleInput_QueryRunningQueuesInput(t *testing.T) {
 	r := newTestRunner(t)
 	ctx := context.Background()
@@ -119,41 +122,6 @@ func TestHandleInput_QueryRunningQueuesRetry(t *testing.T) {
 		t.Errorf("/retry 不应写入 inputForward，却收到 %q", got)
 	default:
 		// 预期：inputForward 保持为空。
-	}
-}
-
-// handleInput 权限确认在等（permWaiting=true）时应转发 inputForward（非阻塞）。
-func TestHandleInput_PermissionForwardsInput(t *testing.T) {
-	r := newTestRunner(t)
-	ctx := context.Background()
-
-	var (
-		queryResultCh <-chan queryResult
-		queryCancel   context.CancelFunc
-		queryRunning  bool
-		round         int
-		currentInput  string
-		inputForward  chan string
-		pendingInputs []string
-	)
-
-	queryRunning = true
-	inputForward = make(chan string, 1)
-	r.permWaiting.Store(true) // 模拟权限确认在等
-
-	if exit := r.handleInput("y", ctx, &queryResultCh, &queryCancel, &queryRunning, &round, &currentInput, &inputForward, &pendingInputs); exit {
-		t.Fatal("不应退出")
-	}
-	if len(pendingInputs) != 0 {
-		t.Errorf("权限确认时不应排队，pendingInputs = %v", pendingInputs)
-	}
-	select {
-	case got := <-inputForward:
-		if got != "y" {
-			t.Errorf("inputForward = %q, want y", got)
-		}
-	default:
-		t.Error("inputForward 应收到 y（权限确认转发）")
 	}
 }
 

@@ -511,7 +511,7 @@ func TestChatModel_StatusResetOnSubmit(t *testing.T) {
 	}
 }
 
-// 权限确认期间状态行隐藏（弹层已展示工具信息，避免叠加误导），确认后恢复。
+// 权限确认期间状态行隐藏（弹层已展示工具信息，避免叠加误导），作出决定后恢复。
 func TestChatModel_StatusHiddenDuringPermission(t *testing.T) {
 	m := NewChatModel()
 	m.Update(chatThinkMsg{iteration: 1})
@@ -523,15 +523,20 @@ func TestChatModel_StatusHiddenDuringPermission(t *testing.T) {
 	if !strings.Contains(v, "权限确认") {
 		t.Errorf("权限弹层应显示，实际:\n%s", v)
 	}
-	// 确认完成后状态行恢复（status 未被其他事件清空时）。
-	m.Update(chatPermissionDoneMsg{})
+	// 作出决定后弹层清除，状态行恢复（status 未被其他事件清空时）。
+	m.Update(chatPermissionArmedMsg{})
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.permLayer != nil {
+		t.Fatal("作出决定后弹层应清除")
+	}
 	if !strings.Contains(m.View(), "思考中") {
 		t.Errorf("确认完成后状态行应恢复，实际:\n%s", m.View())
 	}
 }
 
-// 权限确认期间的提交不清状态行（避免批准后到工具结果前的空窗）。
-func TestChatModel_StatusKeptDuringPermissionSubmit(t *testing.T) {
+// 权限确认期间键入的回车不得进入 submitCh，也不得清空状态行——弹层是模态的，
+// 权限答案不走文本输入流，用户此刻打的字一个字节都不该被当作回答消费掉。
+func TestChatModel_PermissionSubmitBlocked(t *testing.T) {
 	m := NewChatModel()
 	m.Update(chatThinkMsg{iteration: 1})
 	m.Update(chatToolCallMsg{name: "shell", args: "{}"})
@@ -540,16 +545,23 @@ func TestChatModel_StatusKeptDuringPermissionSubmit(t *testing.T) {
 		t.Fatal("前置失败：工具调用后状态行应非空")
 	}
 
+	// 用户仍在往 textarea 里打字并敲了回车。此处未武装（等价于弹层尚未上屏），
+	// 按键必须被完整丢弃——既不能提交，也不能被当成权限答案。
 	m.textarea.SetValue("y")
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 
-	if m.status == "" {
-		t.Error("权限确认中的提交不应清空状态行，实际已清空")
+	select {
+	case v := <-m.submitCh:
+		t.Errorf("弹层期间的按键不得进入 submitCh，却收到 %q", v)
+	default:
 	}
-	// 确认完成清弹层后状态仍在，直到下一事件。
-	m.Update(chatPermissionDoneMsg{})
+	select {
+	case approved := <-m.permissionDone:
+		t.Errorf("未武装时不得产生权限决定，却得到 approved=%v", approved)
+	default:
+	}
 	if m.status == "" {
-		t.Error("确认完成后状态行应保留（等 final/error 清空）")
+		t.Error("被丢弃的按键不应清空状态行")
 	}
 }
 

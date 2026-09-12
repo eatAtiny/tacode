@@ -79,7 +79,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	var queryRunning bool                // 是否有查询正在运行
 	var round int                        // 当前轮次号
 	var currentInput string              // 当前查询的用户输入，用于保存记忆
-	var inputForward chan string         // 权限确认输入与控制命令（/interrupt）转发通道
+	var inputForward chan string         // 控制命令（/interrupt）转发通道
 
 	// 排队输入重放 channel：查询结束时把 pendingInputs 弹出一条投递到此，
 	// 与 inputCh 走同一套分支 A 处理逻辑（空输入/exit/命令/查询）。
@@ -185,7 +185,7 @@ func (r *Runner) Run(ctx context.Context) error {
 //   - queryRunning:  是否有查询正在运行
 //   - round:         当前轮次号
 //   - currentInput:  当前查询的用户输入（保存记忆用）
-//   - inputForward:  权限确认输入与控制命令（/interrupt）转发通道
+//   - inputForward:  控制命令（/interrupt）转发通道
 //   - pendingInputs: 查询运行中排队的输入
 //
 // 返回 true 表示退出（exit 命令或 EOF）。
@@ -217,10 +217,13 @@ func (r *Runner) handleInput(
 
 	// ── 查询运行中 ──
 	// 输入处理策略：
-	//   - /stop                 → 取消当前查询
-	//   - 权限确认在等           → 转发给 query 侧（ConfirmPermission 阻塞读 inputForward）
-	//   - /interrupt             → 控制命令，转发给 queryLoop（peekInterrupt 读取）
-	//   - 其他                   → 排队（pendingInputs），查询结束后自动作为下一轮输入
+	//   - /stop        → 取消当前查询
+	//   - /interrupt   → 控制命令，转发给 queryLoop（peekInterrupt 读取）
+	//   - 其他          → 排队（pendingInputs），查询结束后自动作为下一轮输入
+	//
+	// 权限答案不在此列：确认由 UI 层自行取得（模态弹层 + 私有 channel），
+	// 不经过文本输入流，因此主循环无须判断某行输入是否是权限答案。
+	//
 	// 旧实现无条件 `inputForward <- input`：无权限确认时 channel 无人读，
 	// 第 2 条输入即阻塞冻结主循环（Bug 2 根因）。
 	if *queryRunning {
@@ -231,14 +234,6 @@ func (r *Runner) handleInput(
 			r.ui.OnMessage("⏹️  已停止")
 			*round++
 			r.printPrompt()
-		} else if r.permWaiting.Load() {
-			// 权限确认：转发给 ConfirmPermission（阻塞读 inputForward）。
-			// 非阻塞发送避免 channel 满时冻结主循环；缓冲 1 一般有空位。
-			select {
-			case *inputForward <- input:
-			default:
-				// 缓冲满（异常）：丢弃，避免阻塞。
-			}
 		} else if isControlCommand(input) {
 			// 控制命令：转发给 queryLoop（peekInterrupt 在串行工具执行间隙
 			// 非阻塞读取，中止剩余工具并注入中断提示让 LLM 调整策略）。

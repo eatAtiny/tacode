@@ -156,18 +156,19 @@ type UI interface {
 
 	// ConfirmPermission 请求用户确认权限。
 	// tool 是工具名称，args 是 JSON 格式的参数，reason 是需要确认的原因。
-	// inputForward 是输入转发 channel：实现应从该 channel 读取用户确认输入
-	// （而非从 ReadInputChan），这样 Runner 可以在确认期间继续接收控制命令。
 	//
 	// 返回值：true 表示允许执行，false 表示拒绝。
 	//
 	// 调用时机：权限检查器对工具返回 "confirm" 动作时。
 	// 此方法是阻塞的——queryLoop 会等待确认结果后才继续执行。
 	//
-	// inputForward 说明：
-	//   - 不为 nil 时，从此 channel 读取用户输入（与主循环共享输入流）
-	//   - 为 nil 时，实现应自行读取输入（如直接调用 ReadInput）
-	ConfirmPermission(tool, args, reason string, inputForward <-chan string) (bool, error)
+	// 实现要求：确认过程不得经过文本输入流（ReadInput / ReadInputChan）。
+	// 权限答案与用户正在输入的普通消息若共用一条输入流，两者无法区分，会
+	// 产生「消息被当作答案吞掉」的竞态。实现应提供独立的确认通道，例如
+	// 模态弹层 + 私有 channel 回传（见 BubbleUI 的实现）。
+	//
+	// 返回 error 表示无法取得用户决定（如 UI 未启动），此时调用方按拒绝处理。
+	ConfirmPermission(tool, args, reason string) (bool, error)
 
 	// ── 生命周期组 ──────────────────────────────────────
 

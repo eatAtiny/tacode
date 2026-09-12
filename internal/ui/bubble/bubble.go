@@ -15,8 +15,8 @@
 //   - 流式文本：delta 增量缓冲，遇换行切段定稿（逐段上屏）
 //   - Markdown 渲染：最终回答经 Glamour 渲染为终端友好的格式
 //   - 框线输出：工具调用和结果用 box.go 的 Unicode 框线字符绘制
-//   - 权限确认：输入框上方弹层 + 输入经 textarea 提交流转（Runner 查询运行时
-//     转发到 inputForward，ConfirmPermission 从该 channel 读取）
+//   - 权限确认：输入框上方模态弹层（↑↓/Enter 或 y/n 按键直接消费，答案经
+//     ChatModel.permissionDone 回传，不经过 textarea 与文本输入流）
 //
 // 文件组织：
 //   - bubble.go   tea 包装器（事件方法 → Program.Send、输入桥接、生命周期）
@@ -28,7 +28,6 @@ package bubble
 import (
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 
 	"tacode/internal/memory"
@@ -257,36 +256,20 @@ func (b *BubbleUI) ShowHistory(events []memory.Event) {
 	b.send(chatHistoryMsg{events: history})
 }
 
-// ConfirmPermission 显示权限确认弹层，等待用户输入。
+// ConfirmPermission 显示权限确认弹层，阻塞等待用户决定。
 //
-// 聊天界面下的确认输入流转（链路）：
-//
-//	textarea 提交 → ChatModel.submitCh → Runner.Run() 主循环
-//	  → queryRunning 分支转发到 inputForward（查询运行中非 nil）
-//	  → ConfirmPermission 从 inputForward 读取
-//
-// 提示经 chatPermissionMsg 显示为输入框上方的弹层（比追加对话行更醒目），
-// 用户输入 y/N 后发 chatPermissionDoneMsg 清除弹层。
-// inputForward 为 nil（无运行中查询，理论不发生）时回退 ReadInputChan。
-func (b *BubbleUI) ConfirmPermission(tool, args, reason string, inputForward <-chan string) (bool, error) {
-	// 弹层显示在输入框上方（用户据此在 textarea 输入 y/N 回车）。
+// 弹层是模态的：chatPermissionMsg 让 ChatModel 进入权限模式，此后所有按键
+// 由弹层消费（不进入 textarea），决定经 ChatModel.permissionDone 回传。
+// 答案全程不经过文本输入流——因此不存在「用户正在打的消息被当作 y/N 吞掉」
+// 的歧义，主循环也无须判断某行输入是权限答案还是普通消息。
+func (b *BubbleUI) ConfirmPermission(tool, args, reason string) (bool, error) {
+	if b.program == nil {
+		// tea 未启动（异常）：没有任何途径能让用户作出决定，不能默认放行
+		// 一个高危操作。
+		return false, fmt.Errorf("聊天界面未启动，无法确认权限")
+	}
 	b.send(chatPermissionMsg{tool: tool, args: args, reason: reason})
-
-	var input string
-	var ok bool
-	if inputForward != nil {
-		input, ok = <-inputForward
-	} else {
-		input, ok = <-b.ReadInputChan()
-	}
-	// 清除弹层（无论用户是否输入有效值）。
-	b.send(chatPermissionDoneMsg{})
-
-	if !ok {
-		return false, fmt.Errorf("EOF")
-	}
-	answer := strings.ToLower(strings.TrimSpace(input))
-	return answer == "y" || answer == "yes", nil
+	return <-b.chat.permissionDone, nil
 }
 
 // Welcome 打印启动横幅。

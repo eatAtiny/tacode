@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"tacode/internal/memory"
 
@@ -151,81 +152,220 @@ func TestStart_Idempotent(t *testing.T) {
 	}
 }
 
-// 权限确认：提示进对话区 + 输入从 inputForward 读取（查询运行中链路）。
-// 注：textarea 提交 → submitCh → Runner → inputForward 的转发由 Runner 主循环
-// 负责（已有 TestReadInputChan_BridgesSubmitCh 覆盖桥接），此处直接写入
-// inputForward 模拟已转发的确认输入；提示经 Program.Send 进对话区。
-func TestConfirmPermission_InputForward(t *testing.T) {
-	b := startTest(t)
+// ──────────────────────────────────────────────────────────
+// 权限弹层（模态）：按键由弹层消费，决定经 permissionDone 回传
+// ──────────────────────────────────────────────────────────
 
-	// 模拟查询运行中：Runner 主循环已把 textarea 提交转发到 inputForward。
-	inputForward := make(chan string, 1)
-	go func() {
-		inputForward <- "y"
-	}()
+// newPermissionModel 构造处于权限弹层模态的 ChatModel。
+// armed 为 true 时投递武装消息（模拟 permArmDelay 到期），走真实武装路径，
+// 测试不依赖真实时钟。
+func newPermissionModel(t *testing.T, tool, args, reason string, armed bool) *ChatModel {
+	t.Helper()
+	m := NewChatModel()
+	_, _ = m.Update(chatPermissionMsg{tool: tool, args: args, reason: reason})
+	if m.permLayer == nil {
+		t.Fatal("chatPermissionMsg 应置起弹层")
+	}
+	if armed {
+		_, _ = m.Update(chatPermissionArmedMsg{})
+		if !m.permLayer.armed {
+			t.Fatal("武装消息应置位 armed")
+		}
+	}
+	return m
+}
 
-	approved, err := b.ConfirmPermission("shell", `{"command":"rm -rf /"}`, "高风险操作", inputForward)
-	if err != nil {
-		t.Fatalf("ConfirmPermission error: %v", err)
+// readPermissionDecision 非阻塞读取弹层决定，返回 (有无决定, 是否批准)。
+func readPermissionDecision(m *ChatModel) (got, approved bool) {
+	select {
+	case approved = <-m.permissionDone:
+		return true, approved
+	default:
+		return false, false
+	}
+}
+
+// 默认选中 YES，Enter 确认即批准；弹层随后清除。
+func TestPermissionLayer_DefaultYesEnterApproves(t *testing.T) {
+	m := newPermissionModel(t, "shell", `{"command":"rm -rf /"}`, "高风险操作", true)
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	got, approved := readPermissionDecision(m)
+	if !got {
+		t.Fatal("Enter 应产生决定")
 	}
 	if !approved {
-		t.Error("输入 y 应允许")
+		t.Error("默认选中 YES + Enter 应批准")
 	}
+	if m.permLayer != nil {
+		t.Error("作出决定后弹层应清除")
+	}
+}
 
-	// 提示应显示为弹层（Close 同步等待事件循环处理完消息后读取，避免竞争）。
-	if err := b.Close(); err != nil {
-		t.Fatalf("Close error: %v", err)
-	}
-	// 确认完成后弹层应清除；确认前应显示（此处已完成，验证流程无 panic）。
-	// 弹层内容由 View 渲染，直接验证 renderPermissionLayer 输出。
-	m := NewChatModel()
-	m.permLayer = &permissionLayer{tool: "shell", args: `{"command":"rm -rf /"}`, reason: "高风险操作"}
+// 渲染：含工具信息与 YES/NO 两个选项。
+func TestPermissionLayer_Render(t *testing.T) {
+	m := &ChatModel{permLayer: &permissionLayer{
+		tool: "shell", args: `{"command":"rm -rf /"}`, reason: "高风险操作",
+	}}
 	layer := m.renderPermissionLayer()
-	for _, want := range []string{"权限确认", "shell", "rm -rf", "高风险操作", "y 允许"} {
+	for _, want := range []string{"权限确认", "shell", "rm -rf", "高风险操作", "YES", "NO"} {
 		if !strings.Contains(layer, want) {
 			t.Errorf("权限弹层应含 %q，实际:\n%s", want, layer)
 		}
 	}
 }
 
-// 权限确认：输入 n / 其他内容应拒绝。
-func TestConfirmPermission_Reject(t *testing.T) {
-	b := NewBubbleUI()
-	if err := b.Start(testStartOpts()...); err != nil {
-		t.Fatalf("Start error: %v", err)
-	}
-	defer b.Close()
+// n 与 Esc 均直达拒绝。
+func TestPermissionLayer_NAndEscReject(t *testing.T) {
+	t.Run("n", func(t *testing.T) {
+		m := newPermissionModel(t, "shell", "{}", "", true)
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+		got, approved := readPermissionDecision(m)
+		if !got || approved {
+			t.Errorf("n 应产生拒绝决定，got=%v approved=%v", got, approved)
+		}
+	})
+	t.Run("esc", func(t *testing.T) {
+		m := newPermissionModel(t, "shell", "{}", "", true)
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+		got, approved := readPermissionDecision(m)
+		if !got || approved {
+			t.Errorf("Esc 应产生拒绝决定，got=%v approved=%v", got, approved)
+		}
+	})
+}
 
-	inputForward := make(chan string, 1)
-	go func() {
-		inputForward <- "n"
-	}()
+// ↑↓ 切换选中项，Enter 确认当前项。
+func TestPermissionLayer_ArrowSelectsThenEnter(t *testing.T) {
+	t.Run("down-then-enter-rejects", func(t *testing.T) {
+		m := newPermissionModel(t, "shell", "{}", "", true)
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		if m.permLayer.selected != permNo {
+			t.Fatalf("↓ 后应选中 NO，got %d", m.permLayer.selected)
+		}
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		got, approved := readPermissionDecision(m)
+		if !got || approved {
+			t.Errorf("↓ + Enter 应拒绝，got=%v approved=%v", got, approved)
+		}
+	})
+	t.Run("down-up-then-enter-approves", func(t *testing.T) {
+		m := newPermissionModel(t, "shell", "{}", "", true)
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+		if m.permLayer.selected != permYes {
+			t.Fatalf("↑ 后应选回 YES，got %d", m.permLayer.selected)
+		}
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		got, approved := readPermissionDecision(m)
+		if !got || !approved {
+			t.Errorf("↑ + Enter 应批准，got=%v approved=%v", got, approved)
+		}
+	})
+}
 
-	approved, err := b.ConfirmPermission("shell", `{"command":"rm -rf /"}`, "", inputForward)
-	if err != nil {
-		t.Fatalf("ConfirmPermission error: %v", err)
+// 核心回归：弹层期间键入的回车绝不能被当成回答，也绝不能进入 submitCh。
+//
+// 这是本次改造要修的那个 bug——用户正在打消息时敲的回车，若被当作 y/N 答案，
+// 会导致消息静默丢失 + 默认选中 YES 时静默批准一次危险操作。上屏闸未开
+// （armed=false，等价于用户还看不见弹层）时，按键必须被完整丢弃。
+func TestPermissionLayer_DisarmedDropsTypedEnter(t *testing.T) {
+	m := newPermissionModel(t, "shell", `{"command":"rm -rf /"}`, "高风险操作", false)
+	m.textarea.SetValue("帮我看看这个 bug")
+
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	// 决定：绝不能产生（否则就是静默批准/拒绝）。
+	if got, approved := readPermissionDecision(m); got {
+		t.Fatalf("未武装时不得产生决定，却得到 approved=%v", approved)
 	}
-	if approved {
-		t.Error("输入 n 应拒绝")
+	// 提交：绝不能到达 Runner。
+	select {
+	case v := <-m.submitCh:
+		t.Fatalf("弹层期间的按键不得进入 submitCh，却收到 %q", v)
+	default:
+	}
+	// 弹层仍在等（用户仍可作出决定）。
+	if m.permLayer == nil {
+		t.Error("未作出决定时弹层不应清除")
+	}
+	if m.textarea.Value() != "帮我看看这个 bug" {
+		t.Errorf("草稿应保留，实际 %q", m.textarea.Value())
+	}
+
+	// 武装后同一个回车才生效。
+	_, _ = m.Update(chatPermissionArmedMsg{})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got, approved := readPermissionDecision(m)
+	if !got || !approved {
+		t.Errorf("武装后 Enter 应批准，got=%v approved=%v", got, approved)
 	}
 }
 
-// 权限确认：inputForward 为 nil 时回退 ReadInputChan（textarea 提交 channel）。
-// 不 Start（无 tea 程序，send 丢弃消息，直接 Update ChatModel 无并发写者）。
-func TestConfirmPermission_FallbackReadInputChan(t *testing.T) {
-	b := NewBubbleUI()
+// ctrl+c 在弹层期间必须仍然是退出逃生口（不受武装闸限制）。
+func TestPermissionLayer_CtrlCQuits(t *testing.T) {
+	m := newPermissionModel(t, "shell", "{}", "", false)
 
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("ctrl+c 应返回退出命令")
+	}
+	if got, _ := readPermissionDecision(m); got {
+		t.Error("ctrl+c 不应产生权限决定")
+	}
+}
+
+// Message 类型实现：直接驱动 ChatModel（同一 tea 事件循环 goroutine）。
+var _ tea.Model = (*ChatModel)(nil)
+
+// BubbleUI.ConfirmPermission 与弹层的完整往返：发 chatPermissionMsg → 用户
+// 按键经 Program.Send 投递 → 弹层作出决定 → permissionDone → 方法返回。
+// 这条链路验证 ConfirmPermission 确实接在 permissionDone 上（而非旧输入流）。
+//
+// 用真实时钟等待 permArmDelay（3× 冗余），不注入武装消息——本测试的目的
+// 正是覆盖「武装消息由 tea.Tick 自己送达」这条生产路径。
+func TestConfirmPermission_ModalRoundTrip(t *testing.T) {
+	b := startTest(t)
+
+	resCh := make(chan bool, 1)
+	errCh := make(chan error, 1)
 	go func() {
-		b.chat.textarea.SetValue("yes")
-		b.chat.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		approved, err := b.ConfirmPermission("shell", `{"command":"ls"}`, "需确认")
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resCh <- approved
 	}()
 
-	approved, err := b.ConfirmPermission("shell", `{"command":"ls"}`, "", nil)
-	if err != nil {
+	// 等 tea.Tick 武装弹层后再投按键（先投会被武装闸丢弃）。
+	time.Sleep(3 * permArmDelay)
+	b.send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+
+	select {
+	case approved := <-resCh:
+		if !approved {
+			t.Error("按 y 应批准")
+		}
+	case err := <-errCh:
 		t.Fatalf("ConfirmPermission error: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("ConfirmPermission 未返回")
 	}
-	if !approved {
-		t.Error("输入 yes 应允许")
+}
+
+// tea 未启动时 ConfirmPermission 必须拒绝而非默认放行——拿不到用户同意
+// 就不能执行高危操作。旧实现此路径返回 EOF 错误，调用方按拒绝处理。
+func TestConfirmPermission_NotStartedRejects(t *testing.T) {
+	b := NewBubbleUI() // 未 Start：program 为 nil
+
+	approved, err := b.ConfirmPermission("shell", `{"command":"rm -rf /"}`, "")
+	if err == nil {
+		t.Error("未启动 tea 时应返回错误")
+	}
+	if approved {
+		t.Error("未启动 tea 时不得默认放行")
 	}
 }
 
