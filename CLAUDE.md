@@ -144,7 +144,10 @@ Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncat
 - `shell`/`file` 的写操作、`edit` 等高风险操作触发确认；`grep`/`list`/`webfetch` 等只读操作默认放行。
 - 可选全局注入点 `ToolPermissionChecker`（`CheckPermission(toolName, args) bool`）：通过 `SetPermissionChecker()` 注入自定义策略时覆盖所有工具判定（默认 nil = 用工具自身 `CheckPermission`）。另有全局 `ForbiddenTools` 禁止列表（管理级完全禁用某工具，当前无代码向其追加）。
 - Confirm flows through `UI.ConfirmPermission()` → `PermissionCh` channel → back to queryLoop (blocking).
-- BubbleUI 下权限确认显示为输入框上方的弹层（黄色警告框，含工具/参数/原因），用户在 textarea 输入 y/N。
+- BubbleUI 下权限确认是输入框上方的**模态**弹层（黄色警告框，含工具/参数/原因 + YES/NO 选项）：按键由弹层直接消费（↑↓ 切换 · Enter 确认 · y/n 直达 · Esc 拒绝 · ctrl+c 仍退出），答案经 `ChatModel.permissionDone` 私有 channel 回传，**不经过 textarea 与文本输入流**——因此不存在「用户正在打的消息被当作 y/N 吞掉」的歧义，主循环也无须判断某行输入是权限答案还是普通消息。
+- 弹层置起后经 `permArmDelay`（200ms，低于人的视觉简单反应时）才接收按键：置起到上屏之间有一段异步窗口，默认选中 YES，若用户此刻正敲回车会被当作「确认 YES」= 静默批准危险操作；窗口内按键一律丢弃（最坏吞掉一次打字中的回车，草稿仍在 textarea）。
+- 判定结果有三态 `permDecision`（`tool_exec.go`）：**全局策略**拒绝只跳过该工具、继续本批；**用户本人**拒绝则**终止本次查询**（`execAbortUser`）——人已否决过的动作不在本轮里自动重试。代价是本轮内 LLM 失去重新规划的机会，补偿是拒绝记录留在累积 `messages` 里，用户下一轮开口时 LLM 看得到并据此换方案（重新规划从「循环内下一次迭代」挪到「对话的下一轮」）。终止用 `yieldFinal` 而非 error 收束，因为 `repl.go` 只在 `err == nil` 时累积 `result.messages`。
+- **tool_calls 配对是 API 硬约束**：assistant 消息携带整批 `tool_calls` 后，每个 `tool_call_id` 都必须有对应的 `role=tool` 消息，否则下一次 LLM 调用被拒（400）。批次中途终止（用户拒绝 / `/interrupt`）用 `backfillMissingToolResults` 按 `tc.ID` 的补集回填占位消息（不能假设「已执行的 = 前缀」，并发批已重排过顺序）。
 
 ### Session Management
 
@@ -170,7 +173,7 @@ Plus `EventStore` (`events.jsonl`) — append-only full event log, never truncat
 | `/memory` | List L3 memories |
 | `/memory add <content>` | Add L3 memory |
 | `/memory rm <name>` | Delete L3 memory |
-| `/interrupt` | 查询运行中（含工具执行间隙）输入 `/interrupt` 或 `/retry` → 经 `inputForward` 转发给运行中的循环，中止剩余工具并注入中断提示，让 LLM 调整策略 |
+| `/interrupt` | 查询运行中（含工具执行间隙）输入 `/interrupt` → 经 `inputForward` 转发给运行中的循环，中止剩余工具并注入中断提示，让 LLM 调整策略 |
 | `/stop` | Cancel running query |
 | `exit` | Quit |
 
@@ -201,12 +204,12 @@ On each user input:
 
 ### `internal/agent/` (13 files)
 - `runner.go` — `Runner` struct, `Run()` REPL, async query dispatch, cross-round message accumulation
-- `repl.go` — REPL 主循环：select 模型 + 输入排队/转发协议（/interrupt、/retry 控制命令经 `inputForward` 转发）
+- `repl.go` — REPL 主循环：select 模型 + 输入排队/转发协议（/interrupt 控制命令经 `inputForward` 转发）
 - `query_engine.go` — message assembly (system + preamble + conversation + task), compactor prepare, event consumption
 - `query_loop.go` — core ReAct loop, streaming, tool execution, compaction wiring, reactive compact
-- `tool_exec.go` — 工具调用执行子系统：并发/串行分类、权限确认协议、中断注入、read-before-edit 状态
+- `tool_exec.go` — 工具调用执行子系统：并发/串行分类、权限判定（三态）、中断注入、tool_calls 配对回填、read-before-edit 状态
 - `oneshot.go` — headless 单次查询入口（`RunOnce`，配合 TextUI / 子 agent）
-- `types.go` — `QueryEvent`, `QueryEventType` enum, `queryResult`
+- `types.go` — `QueryEvent` 密封接口 + 8 个具体事件类型, `queryResult`
 - `permission.go` — `ToolPermissionChecker` 接口、`globalPermissionChecker` 注入点、`ForbiddenTools` 列表
 - `memory.go` — L3 memory extraction, `/compress` and `/memory` commands
 - `session.go` — session commands, `ensurePersisted()`, `cleanOrphanTempDirs()`

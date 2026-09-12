@@ -26,7 +26,7 @@ func drainEvents(events <-chan QueryEvent) []QueryEvent {
 
 // collectEvents 消费事件 channel 直到执行完成。
 // autoApprove=true 时自动批准权限请求。
-func collectEvents(events <-chan QueryEvent, wg *sync.WaitGroup, timeout time.Duration, autoApprove bool) (toolResults []QueryEvent, permCount int) {
+func collectEvents(events <-chan QueryEvent, wg *sync.WaitGroup, timeout time.Duration, autoApprove bool) (toolResults []ToolResultEvent, permCount int) {
 	deadline := time.After(timeout)
 	done := make(chan struct{})
 	go func() {
@@ -36,30 +36,29 @@ func collectEvents(events <-chan QueryEvent, wg *sync.WaitGroup, timeout time.Du
 		close(done)
 	}()
 
+	// consume 处理单个事件：收集工具结果、统计权限请求并按需自动批准。
+	consume := func(evt QueryEvent, approve bool) {
+		switch e := evt.(type) {
+		case ToolResultEvent:
+			toolResults = append(toolResults, e)
+		case PermissionRequest:
+			permCount++
+			if approve && e.Reply != nil {
+				select {
+				case e.Reply <- true: // 批准
+				default:
+				}
+			}
+		}
+	}
+
 	for {
 		select {
 		case evt := <-events:
-			switch evt.Type {
-			case QueryEventToolResult:
-				toolResults = append(toolResults, evt)
-			case QueryEventPermission:
-				permCount++
-				if autoApprove && evt.PermissionCh != nil {
-					select {
-					case evt.PermissionCh <- true: // 批准
-					default:
-					}
-				}
-			}
+			consume(evt, autoApprove)
 		case <-done:
-			extra := drainEvents(events)
-			for _, evt := range extra {
-				switch evt.Type {
-				case QueryEventToolResult:
-					toolResults = append(toolResults, evt)
-				case QueryEventPermission:
-					permCount++
-				}
+			for _, evt := range drainEvents(events) {
+				consume(evt, false)
 			}
 			return
 		case <-deadline:
@@ -99,7 +98,7 @@ func TestParallelToolExecution(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCalls(toolCalls, 0)
+		lc.executeToolCalls(toolCalls)
 	}()
 
 	results, _ := collectEvents(events, &wg, 2*time.Second, false)
@@ -164,7 +163,7 @@ func TestParallelExecutionIsFaster(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCalls(toolCalls, 0)
+		lc.executeToolCalls(toolCalls)
 	}()
 
 	collectEvents(events, &wg, 2*time.Second, false)
@@ -215,7 +214,7 @@ func TestMixedConcurrentAndSerial(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCalls(toolCalls, 0)
+		lc.executeToolCalls(toolCalls)
 	}()
 
 	// autoApprove=true: 统一事件处理器自动批准权限 → file write 不会阻塞。
@@ -265,7 +264,7 @@ func TestLargeResultPersistence(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCalls(toolCalls, 0)
+		lc.executeToolCalls(toolCalls)
 	}()
 
 	results, _ := collectEvents(events, &wg, 2*time.Second, false)
@@ -308,7 +307,7 @@ func TestPermissionBlocksConcurrent(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCalls(toolCalls, 0)
+		lc.executeToolCalls(toolCalls)
 	}()
 
 	// autoApprove=true 解除阻塞，同时记录权限事件。
@@ -361,7 +360,7 @@ func TestForbiddenToolBlocksConcurrentClassification(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCalls(toolCalls, 0)
+		lc.executeToolCalls(toolCalls)
 	}()
 
 	results, _ := collectEvents(events, &wg, 2*time.Second, false)
@@ -408,7 +407,7 @@ func TestGlobalPermissionCheckerBlocksConcurrentClassification(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		lc.executeToolCalls(toolCalls, 0)
+		lc.executeToolCalls(toolCalls)
 	}()
 
 	results, _ := collectEvents(events, &wg, 2*time.Second, false)

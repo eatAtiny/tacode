@@ -80,9 +80,6 @@ type Runner struct {
 	// pendingInputs 查询运行中排队的用户输入（查询结束后自动作为下一轮处理）。
 	// 仅 Run() 主循环 goroutine 访问，无需锁。
 	pendingInputs []string
-	// permWaiting 是否有权限确认正在等待输入（queryEngine 设置，主循环读取）。
-	// 用 atomic 跨 goroutine 同步：queryEngine 在 ConfirmPermission 前后翻转。
-	permWaiting atomic.Bool
 }
 
 // NewRunner 构造 Agent 执行器。

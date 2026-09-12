@@ -35,7 +35,7 @@ type queryLoopContext struct {
 	toolRegistry      *tool.Registry       // 工具注册表，用于查找和执行工具
 	maxIter           int                  // 最大迭代次数
 	resultLimit       int                  // 结果截断上限（字符数，默认 8000）
-	inputForward      <-chan string        // 权限确认输入与控制命令（/interrupt、/retry）转发通道，nil = 不启用
+	inputForward      <-chan string        // 控制命令（/interrupt）转发通道，nil = 不启用
 	events            chan<- QueryEvent    // 事件输出 channel（yield 事件到此）
 	seenToolCalls     map[string]bool      // 已见过的工具调用签名（用于重复检测）
 	totalInputTokens  int                  // 累计输入 token 数
@@ -46,6 +46,7 @@ type queryLoopContext struct {
 	compactor         *Compactor           // s08 四步压缩管线（nil = 禁用）
 	activeRequest     string               // 当前轮用户请求（压缩时注入 [Compacted] 消息用）
 	reactiveRetries   int                  // prompt_too_long 补救重试次数（上限 MAX_REACTIVE_RETRIES）
+	abortTool         string               // 用户拒绝执行的那个工具名（终止提示用，由 checkToolPermission 写入）
 }
 
 // queryLoop 是纯粹的 Agent Loop 核心循环，使用异步生成器模式。
@@ -160,7 +161,7 @@ func queryLoop(
 // 零值表示使用默认值。
 type queryLoopOptions struct {
 	ResultLimit   int           // 结果截断上限，字符数（默认 8000）
-	InputForward  <-chan string // 权限确认输入与控制命令（/interrupt、/retry）转发通道，nil = 不启用
+	InputForward  <-chan string // 权限确认输入与控制命令（/interrupt）转发通道，nil = 不启用
 	ActiveRequest string        // 当前轮用户请求（压缩时注入 [Compacted] 消息用）
 	Compactor     *Compactor    // s08 四步压缩管线（nil = 禁用，保持旧行为）
 }
@@ -183,7 +184,7 @@ func (lc *queryLoopContext) runLoop() {
 		// ── 步骤 1: 检查上下文是否被取消 ──
 		// 支持 /stop 命令：Runner 调用 cancel() → ctx.Err() != nil
 		if lc.ctx.Err() != nil {
-			lc.yieldError("query loop cancelled", lc.ctx.Err())
+			lc.yieldError(lc.ctx.Err())
 			return
 		}
 
@@ -211,14 +212,27 @@ func (lc *queryLoopContext) runLoop() {
 		// ── 步骤 6: 检查是否完成 ──
 		// 如果没有工具调用，LLM 直接给出了最终答案 → 任务完成。
 		if len(toolCalls) == 0 {
-			lc.yieldFinal(content, iter+1)
+			lc.yieldFinal(content)
 			return
 		}
 
 		// ── 步骤 7: 执行工具调用 ──
 		// 遍历所有工具调用：权限检查 → 查找工具 → 执行 → 截断 → yield 结果。
-		// 权限被拒绝时跳过该工具但继续执行其他工具。
-		if !lc.executeToolCalls(toolCalls, iter) {
+		// 全局策略拒绝只跳过该工具；用户拒绝则终止整个查询（见下）。
+		if lc.executeToolCalls(toolCalls) == execAbortUser {
+			// 用户拒绝执行工具 → 终止本次查询，不在本轮里自动重试。
+			//
+			// 代价是本轮内 LLM 失去了重新规划的机会；补偿是把这条记录留在
+			// 累积 messages 里——下一轮用户开口时 LLM 看得到它，据此换方案。
+			// 等于把重新规划从「循环内下一次迭代」挪到「对话的下一轮」，
+			// 中间插入用户本人。
+			//
+			// 用 final 收束而非 error：Runner 只在 err == nil 时累积
+			// result.messages（repl.go），走 error 路径这条记录会丢，
+			// 下一轮 LLM 就看不到自己被执行过什么。
+			text := fmt.Sprintf("⛔ 已拒绝执行 %s，本次查询已终止。", lc.abortTool)
+			lc.appendAssistantMessage(text, nil)
+			lc.yieldFinal(text)
 			return
 		}
 
@@ -262,11 +276,9 @@ func (lc *queryLoopContext) prepareIfNeeded(iter int) bool {
 	lc.messages = lc.compactor.Prepare(lc.messages, lc.activeRequest)
 	if len(lc.messages) != before {
 		// yield: 压缩事件（供 UI 提示）。
-		lc.events <- QueryEvent{
-			Type:      QueryEventThink,
-			Content:   "🗜️ 上下文接近上限，正在压缩...",
-			Iteration: iter + 1,
-		}
+		// 注：原先随事件携带的 "🗜️ 上下文接近上限，正在压缩..." 文本从未被消费
+		// （ui.OnThink 只接收 iteration，无文本参数），剪枝后该提示彻底移除。
+		lc.events <- ThinkEvent{Iteration: iter + 1}
 	}
 	return true
 }
@@ -298,10 +310,7 @@ func (lc *queryLoopContext) hasCompactRequest(toolCalls []llm.ToolCall) bool {
 //   - ok: 是否成功
 func (lc *queryLoopContext) callLLMStream(iter int) (string, []llm.ToolCall, bool) {
 	// yield: 思考中。
-	lc.events <- QueryEvent{
-		Type:      QueryEventThink,
-		Iteration: iter + 1,
-	}
+	lc.events <- ThinkEvent{Iteration: iter + 1}
 
 	// ── 流式调用 + prompt_too_long 补救 ──
 	// 每次模型调用失败且为 too-long 错误时，reactiveCompact 压缩后重试（最多 1 次）。
@@ -311,7 +320,7 @@ func (lc *queryLoopContext) callLLMStream(iter int) (string, []llm.ToolCall, boo
 	var inputTokens, outputTokens int
 	for {
 		streamChan := lc.llmClient.ChatWithToolsStream(lc.ctx, lc.messages, lc.tools)
-		streamErr := lc.drainStream(streamChan, iter, &fullContent, &toolCalls, &inputTokens, &outputTokens)
+		streamErr := lc.drainStream(streamChan, &fullContent, &toolCalls, &inputTokens, &outputTokens)
 		if streamErr == nil {
 			break // 成功
 		}
@@ -322,7 +331,7 @@ func (lc *queryLoopContext) callLLMStream(iter int) (string, []llm.ToolCall, boo
 			continue // 压缩后重试
 		}
 		// 非 too-long 或重试耗尽：yield 错误并返回失败。
-		lc.yieldError("stream error", streamErr)
+		lc.yieldError(streamErr)
 		return "", nil, false
 	}
 
@@ -334,19 +343,13 @@ func (lc *queryLoopContext) callLLMStream(iter int) (string, []llm.ToolCall, boo
 }
 
 // drainStream 消费流式 channel，返回错误（nil = 成功）。
-func (lc *queryLoopContext) drainStream(streamChan <-chan llm.StreamEvent, iter int, fullContent *string, toolCalls *[]llm.ToolCall, inputTokens, outputTokens *int) error {
+func (lc *queryLoopContext) drainStream(streamChan <-chan llm.StreamEvent, fullContent *string, toolCalls *[]llm.ToolCall, inputTokens, outputTokens *int) error {
 	for streamEvent := range streamChan {
 		switch streamEvent.Type {
 		case llm.StreamEventDelta:
 			// 增量文本：追加到 fullContent 并实时 yield 给上层。
 			*fullContent += streamEvent.Content
-			lc.events <- QueryEvent{
-				Type:         QueryEventDelta,
-				Content:      streamEvent.Content,
-				Iteration:    iter + 1,
-				InputTokens:  streamEvent.InputTokens,
-				OutputTokens: streamEvent.OutputTokens,
-			}
+			lc.events <- DeltaEvent{Content: streamEvent.Content}
 
 		case llm.StreamEventDone:
 			// 流式完成：提取最终的工具调用列表和 token 统计。
@@ -445,10 +448,7 @@ func (lc *queryLoopContext) generateFinalSummary() {
 	// yield: 思考中（总结轮）。与 callLLMStream 开头的 Think 对齐：
 	// inline UI 依赖 Think 重置流式状态（streamed），否则上一轮迭代的 delta
 	// 会让 final 的 glamour 重印分支被跳过，总结文本不上屏。
-	lc.events <- QueryEvent{
-		Type:      QueryEventThink,
-		Iteration: lc.maxIter,
-	}
+	lc.events <- ThinkEvent{Iteration: lc.maxIter}
 
 	// 兜底总结不带任何工具定义：此轮目的是根据已有信息直接作答，
 	// 传 tools 会让 LLM 有机会再次返回 tool_calls，而本函数的事件循环
@@ -465,7 +465,7 @@ func (lc *queryLoopContext) generateFinalSummary() {
 			finalInputTokens = streamEvent.InputTokens
 			finalOutputTokens = streamEvent.OutputTokens
 		case llm.StreamEventError:
-			lc.yieldError(fmt.Sprintf("reached max iterations (%d) without final answer", lc.maxIter), streamEvent.Error)
+			lc.yieldError(streamEvent.Error)
 			return
 		}
 	}
@@ -473,7 +473,7 @@ func (lc *queryLoopContext) generateFinalSummary() {
 	lc.totalInputTokens += finalInputTokens
 	lc.totalOutputTokens += finalOutputTokens
 
-	lc.yieldFinal(finalContent, lc.maxIter)
+	lc.yieldFinal(finalContent)
 }
 
 // ──────────────────────────────────────────────────────────
@@ -481,21 +481,15 @@ func (lc *queryLoopContext) generateFinalSummary() {
 // ──────────────────────────────────────────────────────────
 
 // yieldError yield 错误事件（通过 event channel 发送给上层）。
-func (lc *queryLoopContext) yieldError(content string, err error) {
-	lc.events <- QueryEvent{
-		Type:    QueryEventError,
-		Content: content,
-		Error:   err,
-	}
+func (lc *queryLoopContext) yieldError(err error) {
+	lc.events <- LoopError{Err: err}
 }
 
 // yieldFinal yield 最终回答事件（通过 event channel 发送给上层）。
 // 包含完整的 token 统计和查询结束后的完整消息数组（跨轮累积用）。
-func (lc *queryLoopContext) yieldFinal(content string, iter int) {
-	lc.events <- QueryEvent{
-		Type:         QueryEventFinal,
+func (lc *queryLoopContext) yieldFinal(content string) {
+	lc.events <- FinalEvent{
 		Content:      content,
-		Iteration:    iter,
 		InputTokens:  lc.totalInputTokens,
 		OutputTokens: lc.totalOutputTokens,
 		TotalTokens:  lc.totalInputTokens + lc.totalOutputTokens,
@@ -504,13 +498,11 @@ func (lc *queryLoopContext) yieldFinal(content string, iter int) {
 }
 
 // yieldToolError yield 工具错误事件并推入 tool 消息到历史。
-func (lc *queryLoopContext) yieldToolError(tc llm.ToolCall, errMsg string, iter int) {
-	lc.events <- QueryEvent{
-		Type:       QueryEventToolResult,
+func (lc *queryLoopContext) yieldToolError(tc llm.ToolCall, errMsg string) {
+	lc.events <- ToolResultEvent{
 		ToolName:   tc.Name,
 		ToolResult: errMsg,
 		IsError:    true,
-		Iteration:  iter + 1,
 	}
 
 	lc.messages = append(lc.messages, llm.ChatMessage{
@@ -521,13 +513,6 @@ func (lc *queryLoopContext) yieldToolError(tc llm.ToolCall, errMsg string, iter 
 }
 
 // yieldContinue yield 继续推理事件（通过 event channel 发送给上层）。
-// 包含当前累计的 token 统计。
 func (lc *queryLoopContext) yieldContinue(iter int) {
-	lc.events <- QueryEvent{
-		Type:         QueryEventContinue,
-		Iteration:    iter,
-		InputTokens:  lc.totalInputTokens,
-		OutputTokens: lc.totalOutputTokens,
-		TotalTokens:  lc.totalInputTokens + lc.totalOutputTokens,
-	}
+	lc.events <- ContinueEvent{Iteration: iter}
 }

@@ -112,17 +112,19 @@ func runGenerateFinalSummary(t *testing.T, client *llm.OpenAIClient, messages []
 		select {
 		case evt := <-events:
 			// 钉住 Think yield 修复（2d591d7）：总结路径首个事件必须是
-			// QueryEventThink（inline UI 依赖它重置 streamed，删除该 yield
+			// ThinkEvent（inline UI 依赖它重置 streamed，删除该 yield
 			// 会导致 final 的 glamour 重印分支被跳过、总结文本不上屏）。
-			if drained == 0 && evt.Type != QueryEventThink {
-				t.Fatalf("首个排空的事件应为 QueryEventThink（总结轮重置流式状态），实际 %v", evt.Type)
+			if drained == 0 {
+				if _, ok := evt.(ThinkEvent); !ok {
+					t.Fatalf("首个排空的事件应为 ThinkEvent（总结轮重置流式状态），实际 %T", evt)
+				}
 			}
 			drained++
-			if evt.Type == QueryEventFinal {
-				finalContent = evt.Content
+			if fe, ok := evt.(FinalEvent); ok {
+				finalContent = fe.Content
 			}
 		case <-time.After(2 * time.Second):
-			t.Fatal("timed out waiting for QueryEventFinal")
+			t.Fatal("timed out waiting for FinalEvent")
 		default:
 			return finalContent
 		}

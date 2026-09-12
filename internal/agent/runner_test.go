@@ -84,8 +84,8 @@ func TestInitTempSession_SetsPaths(t *testing.T) {
 func TestTextUI_PermissionAutoApprove(t *testing.T) {
 	ui := text.NewTextUI()
 
-	// TextUI.ConfirmPermission 不读 inputForward，直接返回 true。
-	approved, err := ui.ConfirmPermission("shell", `{"command":"ls"}`, "", nil)
+	// TextUI.ConfirmPermission 无人值守，直接返回 true（不经任何输入通道）。
+	approved, err := ui.ConfirmPermission("shell", `{"command":"ls"}`, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

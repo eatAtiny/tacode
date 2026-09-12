@@ -16,6 +16,7 @@ package bubble
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
@@ -42,6 +43,9 @@ var (
 	styleSuccess = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 	// styleToolPrefix 工具框线样式：黄色加粗（框线竖线，box.go 使用）。
 	styleToolPrefix = lipgloss.NewStyle().Foreground(lipgloss.Color("11")).Bold(true)
+	// permSelectedStyle 权限弹层选中项样式：反色高亮（外层弹层样式已设黄底字/
+	// 加粗，反色在此之上保证选中项在任意终端配色下都可辨认）。
+	permSelectedStyle = lipgloss.NewStyle().Reverse(true)
 )
 
 // ──────────────────────────────────────────────────────────
@@ -90,9 +94,11 @@ type (
 		activeID string
 	}
 	// chatPermissionMsg 权限确认弹层（ConfirmPermission 触发，工具执行前）。
+	// 收到即进入模态：按键由弹层消费，决定经 ChatModel.permissionDone 回传。
 	chatPermissionMsg struct{ tool, args, reason string }
-	// chatPermissionDoneMsg 权限确认完成（用户已输入 y/N，清除弹层）。
-	chatPermissionDoneMsg struct{}
+	// chatPermissionArmedMsg 弹层武装（置起后经 permArmDelay 由 tea.Tick 投递）。
+	// 在此之前到达的按键一律丢弃——见 permissionLayer.armed。
+	chatPermissionArmedMsg struct{}
 )
 
 // chatLine 转录的一行（渲染后文本）。
@@ -139,15 +145,84 @@ type ChatModel struct {
 	// pickerDone 选择器结果回传 channel（BubbleUI 从这读选择结果）。
 	pickerDone chan string
 
-	// permLayer 权限确认弹层（非 nil = 有权限确认在等，View 渲染弹层）。
+	// permLayer 权限确认弹层（非 nil = 有权限确认在等，弹层为模态：
+	// Update 拦截全部按键，View 渲染选项）。
 	permLayer *permissionLayer
+	// permissionDone 权限决定回传 channel（BubbleUI 从这读，容量 1）。
+	permissionDone chan bool
 }
 
-// permissionLayer 权限确认弹层状态。
+// 权限弹层选项下标。
+const (
+	permYes = iota // 0：默认选中（用户指定初始状态为 YES）
+	permNo
+)
+
+// permissionLayer 权限确认弹层状态（模态：持有选中态与上屏标志）。
 type permissionLayer struct {
 	tool   string // 需要确认的工具名
 	args   string // 工具参数
 	reason string // 确认原因
+
+	selected int // 当前选中项（permYes / permNo）
+	// armed 弹层是否已「武装」（置起后经过 permArmDelay 才为 true）。
+	// 未武装时 Update 丢弃所有按键——见 Update 权限分支的「上屏闸」说明。
+	// 用延时而非渲染回调，是因为 tea 的事件循环每处理一条消息就调用一次
+	// View（tea.go:502），靠 View 置位的标志几乎立刻为真，挡不住任何按键。
+	armed bool
+}
+
+// permArmDelay 权限弹层的武装延时。
+//
+// 取值依据：人的视觉简单反应时约 200–250ms，即用户不可能在弹层出现后的
+// permArmDelay 内按下按键。因此这个窗口内到达的按键必然产生于弹层上屏
+// 之前（用户还在往 textarea 里打字），一律丢弃是安全的。
+//
+// 为什么需要它：弹层置起到上屏之间有一段不可消除的异步窗口。默认选中 YES，
+// 若用户此刻正敲回车，Enter 会被当作「确认 YES」= 静默批准一次危险操作。
+// 丢按键最坏只是吞掉一次打字中的回车，草稿仍留在 textarea 里。
+const permArmDelay = 200 * time.Millisecond
+
+// update 处理一个按键，返回 (是否已作出决定, 是否批准)。
+// 切换选中/未识别的按键返回 (false, false)，调用方继续等待。
+// ctrl+c 不在此处理（调用方需保留它作为退出逃生口）。
+func (p *permissionLayer) update(keyMsg tea.KeyMsg) (done, approved bool) {
+	switch keyMsg.Type {
+	case tea.KeyUp:
+		p.selected = permYes
+	case tea.KeyDown:
+		p.selected = permNo
+	case tea.KeyEnter:
+		// 确认当前选中项。
+		return true, p.selected == permYes
+	case tea.KeyEsc:
+		// Esc = 拒绝本次工具（用户已确认的语义）。
+		return true, false
+	case tea.KeyRunes:
+		switch strings.ToLower(string(keyMsg.Runes)) {
+		case "y":
+			return true, true // 直达批准，忽略当前选中项
+		case "n":
+			return true, false // 直达拒绝
+		case "k":
+			p.selected = permYes
+		case "j":
+			p.selected = permNo
+		}
+	}
+	return false, false
+}
+
+// renderOptions 渲染 YES/NO 两行选项，选中项反色高亮。
+func (p *permissionLayer) renderOptions() string {
+	render := func(label string, active bool) string {
+		if active {
+			return permSelectedStyle.Render("▸ " + label)
+		}
+		return "  " + label
+	}
+	return render("YES 允许执行", p.selected == permYes) + "\n" +
+		render("NO  拒绝并终止本次查询", p.selected == permNo)
 }
 
 // NewChatModel 创建聊天模型。
@@ -164,10 +239,11 @@ func NewChatModel() *ChatModel {
 	renderer, _ := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(100))
 
 	return &ChatModel{
-		textarea:   ta,
-		renderer:   renderer,
-		submitCh:   make(chan string, 8),
-		pickerDone: make(chan string, 1),
+		textarea:       ta,
+		renderer:       renderer,
+		submitCh:       make(chan string, 8),
+		pickerDone:     make(chan string, 1),
+		permissionDone: make(chan bool, 1),
 	}
 }
 
@@ -183,6 +259,45 @@ func (m *ChatModel) Init() tea.Cmd {
 // Update 处理消息。签名满足 tea.Model 接口（返回 tea.Model）。
 func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+
+	// ── 权限确认模式（模态） ──
+	// 按键全部由弹层消费，不进入 textarea，也不落到下面的 Enter 提交分支：
+	// 权限答案走私有 channel（permissionDone）而非文本输入流。这是本设计的
+	// 要点——答案与用户正在打的普通消息彻底分离，不存在「这行是 y 还是消息」
+	// 的歧义，也就不需要主循环去猜（旧实现靠 permWaiting 标志猜，有竞态窗口）。
+	//
+	// 本分支必须在 picking 与 Enter 提交分支之上：放到下面会让 y/N 先被
+	// Enter 分支提交进 submitCh，弹层形同虚设。
+	if m.permLayer != nil {
+		// 武装消息（tea.Tick 投递）：弹层已上屏足够久，开始接收按键。
+		// 必须在下面的非按键早返回之前处理，否则会被一并吞掉。
+		if _, ok := msg.(chatPermissionArmedMsg); ok {
+			m.permLayer.armed = true
+			return m, nil
+		}
+		keyMsg, ok := msg.(tea.KeyMsg)
+		if !ok {
+			// 非按键消息（如 WindowSize）也不转发，直接忽略。
+			return m, nil
+		}
+		// ctrl+c 是显式逃生口：弹层只覆盖活区，用户仍需能退出程序。
+		// 这里显式 Quit，绝不吞掉（且不受武装闸限制——退出永远可达）。
+		if keyMsg.Type == tea.KeyCtrlC {
+			return m, tea.Quit
+		}
+		// 上屏闸：弹层置起到上屏之间有一段异步窗口，此间到达的按键必然
+		// 产生于用户看见弹层之前（他还在往 textarea 里打字）。默认选中 YES，
+		// 若此刻正敲回车，Enter 会被当作「确认 YES」= 静默批准一次危险操作。
+		// 武装前一律丢弃：最坏只是吞掉一次打字中的回车，草稿仍留在 textarea。
+		if !m.permLayer.armed {
+			return m, nil
+		}
+		if done, approved := m.permLayer.update(keyMsg); done {
+			m.permLayer = nil
+			m.permissionDone <- approved
+		}
+		return m, nil
+	}
 
 	// ── 选择器模式（/list 进行中） ──
 	// 所有按键转发给 SessionPickerModel，选择器完成（Enter/Esc）时捕获结果。
@@ -213,11 +328,9 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.submitCh <- value
 				m.textarea.Reset()
 				// 新一轮提交：重置状态行（上一轮残留的思考/输出状态清除）。
-				// 权限确认进行中不清状态行（y/N 提交后到工具结果到达前保持 🔧 状态，
-				// 避免空窗；chatPermissionDoneMsg 只清弹层）。
-				if m.permLayer == nil {
-					m.status = ""
-				}
+				// 无需再判断权限弹层：弹层是模态的，其分支在本分支之上提前
+				// 返回，提交永远不可能发生在权限确认期间。
+				m.status = ""
 				// 用户消息经 commit 定稿（打印于活区上方入 scrollback）。
 				cmds = append(cmds, m.commit(m.renderUser(value)))
 			}
@@ -312,11 +425,17 @@ func (m *ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.picker = session.NewSessionPickerModel(v.sessions, v.activeID)
 		m.picking = true
 	case chatPermissionMsg:
-		// 权限确认弹层：工具执行前显示（覆盖在输入框上方）。
-		m.permLayer = &permissionLayer{tool: v.tool, args: v.args, reason: v.reason}
-	case chatPermissionDoneMsg:
-		// 权限确认完成：清除弹层。
-		m.permLayer = nil
+		// 权限确认弹层：工具执行前显示（覆盖在输入框上方），进入模态。
+		// armed 保持 false——经 permArmDelay 后才接收按键（见 permArmDelay）。
+		m.permLayer = &permissionLayer{
+			tool:     v.tool,
+			args:     v.args,
+			reason:   v.reason,
+			selected: permYes,
+		}
+		cmds = append(cmds, tea.Tick(permArmDelay, func(time.Time) tea.Msg {
+			return chatPermissionArmedMsg{}
+		}))
 	}
 
 	return m, tea.Batch(cmds...)
@@ -401,7 +520,7 @@ func (m *ChatModel) View() string {
 }
 
 // renderPermissionLayer 渲染权限确认弹层。
-// 显示在输入框上方，黄色警告框，提示工具/参数/原因 + 输入方式。
+// 显示在输入框上方，黄色警告框，提示工具/参数/原因 + YES/NO 选项。
 func (m *ChatModel) renderPermissionLayer() string {
 	style := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("11")). // 黄色
@@ -417,7 +536,8 @@ func (m *ChatModel) renderPermissionLayer() string {
 	if m.permLayer.reason != "" {
 		content += "\n  原因: " + m.permLayer.reason
 	}
-	content += "\n  输入 y 允许 / n 拒绝"
+	content += "\n\n" + m.permLayer.renderOptions()
+	content += "\n" + styleMuted.Render("  ↑↓ 切换 · Enter 确认 · y 允许 · n/Esc 拒绝")
 
 	return style.Render(content)
 }

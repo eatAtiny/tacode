@@ -23,7 +23,7 @@ tacode/
   internal/
     agent/
       runner.go                        # Runner：REPL 主循环 + 异步查询调度 + 跨轮消息累积
-      repl.go                          # REPL 主循环：select 模型 + 输入排队/转发协议（/interrupt、/retry）
+      repl.go                          # REPL 主循环：select 模型 + 输入排队/转发协议（/interrupt）
       query_engine.go                  # QueryEngine：上下文构建、提示词组装、事件消费
       query_loop.go                    # queryLoop：核心 ReAct 循环（异步生成器模式）
       tool_exec.go                     # 工具调用执行：并发/串行分类、权限确认、中断注入

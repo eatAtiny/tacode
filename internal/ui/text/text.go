@@ -164,7 +164,7 @@ func (t *TextUI) Welcome(model string) {
 // ConfirmPermission 默认放行所有权限请求（无人值守场景）。
 // 转发 permission 事件（data 为 map[string]string，含 reason）后直接返回 true。
 // 如需权限控制，上层应通过 OnEvent 回调拦截并自行处理。
-func (t *TextUI) ConfirmPermission(tool, args, reason string, inputForward <-chan string) (bool, error) {
+func (t *TextUI) ConfirmPermission(tool, args, reason string) (bool, error) {
 	t.emit("permission", map[string]string{"tool": tool, "args": args, "reason": reason})
 	return true, nil // 默认放行
 }

@@ -24,8 +24,8 @@ import (
 //	步骤 2: 自动压缩检查 — 上下文超过阈值时压缩旧消息
 //	步骤 3: 构建 System/User Prompt — 组合 ReAct 提示词 + 工具描述
 //	步骤 4: 启动 queryLoop — 获取 event channel，开始异步生成器
-//	步骤 5: 消费事件 — 从 channel 实时读取事件并转发到 UI + EventStore
-//	步骤 6: 返回最终结果 — 将 final answer + 完整消息数组返回给 Runner
+//	步骤 5-6: 消费事件 + 返回最终结果 — 委派给 dispatch
+//	          （逐事件转发 UI + EventStore，聚合 final answer 与完整消息数组）
 //
 // 设计：
 //   - 分离关注点：queryLoop 可独立测试和复用
@@ -38,7 +38,8 @@ import (
 //   - ctx: 上下文，用于取消和超时控制（/stop 通过 cancel 实现）
 //   - round: 当前轮次号（从 1 开始）
 //   - userInput: 用户输入的原始文本
-//   - inputForward: 权限确认输入与控制命令（/interrupt、/retry）转发通道（Runner 转发到此）
+//   - inputForward: 控制命令（/interrupt）转发通道（Runner 转发到此）。
+//     权限答案不走此通道（UI 自行取得决定，见 UI.ConfirmPermission）
 //   - baseMessages: 跨轮累积的对话消息（nil 时从记忆构建）
 //
 // 返回：
@@ -122,34 +123,52 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 	})
 
 	// ═══════════════════════════════════════════════════════
-	// 步骤 5: 消费事件（实时转发到 UI + EventStore）
+	// 步骤 5-6: 消费事件 + 返回最终结果（已抽取到 dispatch）
 	// ═══════════════════════════════════════════════════════
-	// 事件类型和对应的处理：
-	//   - think      → UI.OnThink()      显示思考状态
-	//   - delta      → UI.OnDelta()      流式输出增量文本
-	//   - tool_call  → EventStore + UI   记录工具调用 + 显示框线
-	//   - tool_result→ EventStore + UI   记录执行结果 + 显示结果框
-	//   - permission → UI.ConfirmPermission()  阻塞等待用户确认
-	//   - continue   → UI.OnContinue()   显示继续推理
-	//   - final      → UI.OnFinal()      渲染最终回答（Markdown）
-	//   - error      → UI.OnError()      显示错误并返回
-	var finalAnswer string
-	var finalMessages []llm.ChatMessage // 查询结束后的完整消息数组（跨轮累积）
+	return r.dispatch(ctx, eventChan, round)
+}
 
+// dispatch 消费 queryLoop 的事件流，转发到 UI + EventStore，并聚合最终结果。
+//
+// 四种收束情形全部表达为普通控制流，无需结果 struct：
+//   - 继续消费：循环体自然结束本次迭代
+//   - 收到 Final：写入命名返回值，channel 关闭后随 range 退出
+//   - 静默取消：LoopError 分支内返回 ("", nil, nil)
+//   - 真实错误：LoopError 分支内返回真实 error
+//
+// 事件类型和对应的处理：
+//   - think      → UI.OnThink()      显示思考状态
+//   - delta      → UI.OnDelta()      流式输出增量文本
+//   - tool_call  → EventStore + UI   记录工具调用 + 显示框线
+//   - tool_result→ EventStore + UI   记录执行结果 + 显示结果框
+//   - permission → UI.ConfirmPermission()  阻塞等待用户确认
+//   - continue   → UI.OnContinue()   显示继续推理
+//   - final      → UI.OnFinal()      渲染最终回答（Markdown）
+//   - error      → UI.OnError()      显示错误并返回
+//
+// 返回：
+//   - finalAnswer: 最终回答文本（跨轮累积用）
+//   - finalMessages: 查询结束后的完整消息数组（跨轮累积用）
+//   - err: 真实错误；("", nil, nil) 表示 ctx 主动取消（静默，非错误）
+func (r *Runner) dispatch(
+	ctx context.Context,
+	eventChan <-chan QueryEvent,
+	round int,
+) (finalAnswer string, finalMessages []llm.ChatMessage, err error) {
 	for event := range eventChan {
-		switch event.Type {
-		case QueryEventThink:
+		switch ev := event.(type) {
+		case ThinkEvent:
 			// LLM 开始新一轮思考。
-			r.ui.OnThink(event.Iteration)
+			r.ui.OnThink(ev.Iteration)
 
-		case QueryEventDelta:
+		case DeltaEvent:
 			// 流式增量文本（实时输出，不换行）。
-			r.ui.OnDelta(event.Content)
+			r.ui.OnDelta(ev.Content)
 
-		case QueryEventToolCall:
+		case ToolCallEvent:
 			// LLM 请求工具调用：先记录到事件日志（真相源），再通知 UI。
-			toolCallEvents := make([]memory.ToolCallEvent, len(event.ToolCalls))
-			for i, tc := range event.ToolCalls {
+			toolCallEvents := make([]memory.ToolCallEvent, len(ev.ToolCalls))
+			for i, tc := range ev.ToolCalls {
 				toolCallEvents[i] = memory.ToolCallEvent{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
 			}
 			r.events.Append(memory.Event{
@@ -158,44 +177,46 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 				ToolCalls: toolCallEvents,
 			})
 			// 逐个通知 UI（每个工具调用绘制一个框线）。
-			for _, tc := range event.ToolCalls {
+			for _, tc := range ev.ToolCalls {
 				r.ui.OnToolCall(tc.Name, tc.Arguments)
 			}
 
-		case QueryEventToolResult:
+		case ToolResultEvent:
 			// 工具执行结果：记录到事件日志并通知 UI。
 			r.events.Append(memory.Event{
 				Type:       memory.EventToolResult,
-				ToolName:   event.ToolName,
-				ToolResult: event.ToolResult,
-				IsError:    event.IsError,
+				ToolName:   ev.ToolName,
+				ToolResult: ev.ToolResult,
+				IsError:    ev.IsError,
 			})
-			r.ui.OnToolResult(event.ToolName, event.ToolResult, event.IsError)
+			r.ui.OnToolResult(ev.ToolName, ev.ToolResult, ev.IsError)
 
-		case QueryEventPermission:
+		case PermissionRequest:
 			// 权限确认：调用 UI 获取用户决策，结果写回 channel。
 			// queryLoop 内部阻塞等待此 channel，实现同步确认。
-			// 设置 permWaiting：主循环据此把输入转发给 ConfirmPermission
-			// （而非排队），确认完成后清除。
-			r.permWaiting.Store(true)
-			approved, _ := r.ui.ConfirmPermission(event.PermissionTool, event.PermissionArgs, event.PermissionReason, inputForward)
-			r.permWaiting.Store(false)
-			if event.PermissionCh != nil {
-				event.PermissionCh <- approved
+			// 取决定的过程不经过文本输入流（UI 实现负责），主循环无须
+			// 区分「这行输入是权限答案还是普通消息」。
+			// error（UI 无法取得决定）按拒绝处理——拿不到用户同意就不放行。
+			approved, err := r.ui.ConfirmPermission(ev.Tool, ev.Args, ev.Reason)
+			if err != nil {
+				approved = false
+			}
+			if ev.Reply != nil {
+				ev.Reply <- approved
 			}
 
-		case QueryEventContinue:
+		case ContinueEvent:
 			// 工具执行完毕，继续下一轮推理。
-			r.ui.OnContinue(event.Iteration)
+			r.ui.OnContinue(ev.Iteration)
 
-		case QueryEventFinal:
+		case FinalEvent:
 			// 最终回答：保存结果，通知 UI 渲染 Markdown + 本轮 token 统计。
-			finalAnswer = event.Content
-			finalMessages = event.Messages
+			finalAnswer = ev.Content
+			finalMessages = ev.Messages
 
 			// OnFinal 的 token 行直接读取 Final 事件携带的精确累计值
 			// （queryLoop 内部多次 LLM 调用已累加，Final 是最终值）。
-			r.ui.OnFinal(finalAnswer, event.InputTokens, event.OutputTokens, event.TotalTokens)
+			r.ui.OnFinal(finalAnswer, ev.InputTokens, ev.OutputTokens, ev.TotalTokens)
 
 			// 上下文占用更新（footer 状态栏常驻显示）。
 			// used = 当前消息数组估算字符数，limit = 压缩触发的字符上限
@@ -207,7 +228,7 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 			// 每轮结束更新余额（每轮自动查询，失败静默；连续失败达到阈值时提示一次）。
 			go r.queryBalanceWith(r.queryBalance)
 
-		case QueryEventError:
+		case LoopError:
 			// 错误处理：区分「主动取消」与「真实错误」。
 			// /stop（或 /interrupt）主动取消时 ctx 已取消，queryLoop 的流式
 			// 读取会因连接中断返回错误（receive stream failed 等）——
@@ -217,13 +238,16 @@ func (r *Runner) queryEngine(ctx context.Context, round int, userInput string, i
 				return "", nil, nil
 			}
 			// 真实错误：通知 UI 并返回错误信息。
-			r.ui.OnError(event.Error)
-			return "", nil, fmt.Errorf("query loop error: %w", event.Error)
+			r.ui.OnError(ev.Err)
+			return "", nil, fmt.Errorf("query loop error: %w", ev.Err)
+
+		default:
+			// 密封接口保证只有本包能新增事件类型；触达此处意味着新增了生产侧
+			// 事件却忘了在此处理——响亮失败，而非像旧的 Type 判别那样静默丢弃。
+			// 这是本次重构唯一有意偏离「零行为变化」之处。
+			panic(fmt.Sprintf("agent: unhandled event type %T", event))
 		}
 	}
 
-	// ═══════════════════════════════════════════════════════
-	// 步骤 6: 返回最终结果
-	// ═══════════════════════════════════════════════════════
 	return finalAnswer, finalMessages, nil
 }
