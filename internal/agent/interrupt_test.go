@@ -55,12 +55,24 @@ func TestExecuteToolCalls_InterruptSkipsRemaining(t *testing.T) {
 
 	lc.executeToolCalls(toolCalls)
 
-	// 两个工具都被跳过（中断提示代替执行）。
-	if len(lc.messages) != 1 {
-		t.Fatalf("expected 1 interrupt notice message, got %d: %+v", len(lc.messages), lc.messages)
+	// 两个工具都被跳过：一条 user 角色的中断提示 + 两条 tool 占位回填。
+	// 占位消息不可省——缺少它们会让下一次 LLM 调用因 tool_calls 配对不全
+	// 被 API 拒绝（400），这是与「用户拒绝终止」共用的同一个约束。
+	if len(lc.messages) != 3 {
+		t.Fatalf("expected 1 interrupt notice + 2 tool placeholders, got %d: %+v",
+			len(lc.messages), lc.messages)
 	}
 	if !strings.Contains(lc.messages[0].Content, "用户已中断") {
-		t.Errorf("message should be interrupt notice, got %q", lc.messages[0].Content)
+		t.Errorf("message[0] 应为中断提示，got %q", lc.messages[0].Content)
+	}
+	if lc.messages[0].Role != "user" {
+		t.Errorf("中断提示应为 user 角色，got %q", lc.messages[0].Role)
+	}
+	assertToolCallPairsComplete(t, lc.messages, toolCalls)
+	for _, m := range lc.messages[1:] {
+		if m.Role != "tool" || !strings.Contains(m.Content, "用户中断，该工具未执行") {
+			t.Errorf("回填的占位消息应说明未执行，got role=%q content=%q", m.Role, m.Content)
+		}
 	}
 }
 

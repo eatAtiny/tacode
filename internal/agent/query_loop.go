@@ -35,7 +35,7 @@ type queryLoopContext struct {
 	toolRegistry      *tool.Registry       // 工具注册表，用于查找和执行工具
 	maxIter           int                  // 最大迭代次数
 	resultLimit       int                  // 结果截断上限（字符数，默认 8000）
-	inputForward      <-chan string        // 权限确认输入与控制命令（/interrupt）转发通道，nil = 不启用
+	inputForward      <-chan string        // 控制命令（/interrupt）转发通道，nil = 不启用
 	events            chan<- QueryEvent    // 事件输出 channel（yield 事件到此）
 	seenToolCalls     map[string]bool      // 已见过的工具调用签名（用于重复检测）
 	totalInputTokens  int                  // 累计输入 token 数
@@ -46,6 +46,7 @@ type queryLoopContext struct {
 	compactor         *Compactor           // s08 四步压缩管线（nil = 禁用）
 	activeRequest     string               // 当前轮用户请求（压缩时注入 [Compacted] 消息用）
 	reactiveRetries   int                  // prompt_too_long 补救重试次数（上限 MAX_REACTIVE_RETRIES）
+	abortTool         string               // 用户拒绝执行的那个工具名（终止提示用，由 checkToolPermission 写入）
 }
 
 // queryLoop 是纯粹的 Agent Loop 核心循环，使用异步生成器模式。
@@ -217,8 +218,21 @@ func (lc *queryLoopContext) runLoop() {
 
 		// ── 步骤 7: 执行工具调用 ──
 		// 遍历所有工具调用：权限检查 → 查找工具 → 执行 → 截断 → yield 结果。
-		// 权限被拒绝时跳过该工具但继续执行其他工具。
-		if !lc.executeToolCalls(toolCalls) {
+		// 全局策略拒绝只跳过该工具；用户拒绝则终止整个查询（见下）。
+		if lc.executeToolCalls(toolCalls) == execAbortUser {
+			// 用户拒绝执行工具 → 终止本次查询，不在本轮里自动重试。
+			//
+			// 代价是本轮内 LLM 失去了重新规划的机会；补偿是把这条记录留在
+			// 累积 messages 里——下一轮用户开口时 LLM 看得到它，据此换方案。
+			// 等于把重新规划从「循环内下一次迭代」挪到「对话的下一轮」，
+			// 中间插入用户本人。
+			//
+			// 用 final 收束而非 error：Runner 只在 err == nil 时累积
+			// result.messages（repl.go），走 error 路径这条记录会丢，
+			// 下一轮 LLM 就看不到自己被执行过什么。
+			text := fmt.Sprintf("⛔ 已拒绝执行 %s，本次查询已终止。", lc.abortTool)
+			lc.appendAssistantMessage(text, nil)
+			lc.yieldFinal(text)
 			return
 		}
 
